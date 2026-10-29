@@ -1,0 +1,6 @@
+{
+  "name": "LedgerBill ERP",
+  "description": "High-throughput enterprise billing, inventory catalog, credit management, purchase invoices, daily sales reconciliation, and profit calculation suite.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
