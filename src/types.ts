@@ -3,6 +3,7 @@ export type NavScreen =
   | 'product-entry'
   | 'sales-bill-entry'
   | 'credit-bill-management'
+  | 'coupons'
   | 'daily-sales-management'
   | 'expense-management'
   | 'purchase-bill-entry'
@@ -14,10 +15,12 @@ export interface Product {
   name: string;
   sku: string;
   brandId?: string;
-  unitId?: string;
+  unitId: string;
+  unitAllowsDecimals: boolean;
   hsn: string;
   brand: string;
   unit: string;
+  unitName?: string;
   sellingPrice: number;
   purchaseRate: number;
   mrp: number;
@@ -71,6 +74,8 @@ export interface SaleRecord {
   upiRef?: string;
   amount: number;
   subtotal: number;
+  couponCode?: string;
+  couponPrice?: number;
   discountAmount?: number;
   billDiscountAmount?: number;
   cashReceived?: number;

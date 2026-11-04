@@ -1,37 +1,54 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { useApp } from '../context/AppContext';
-import { CartItem } from '../types';
-import { formatCurrency } from '../utils/currency';
+import React, { useState, useEffect, useRef } from "react";
+import { Package } from "lucide-react";
+import { useApp } from "../context/AppContext";
+import { CartItem } from "../types";
+import { formatCurrency } from "../utils/currency";
+import { normalizeCouponCode } from "../utils/coupons";
+import { isUnitQuantityInputValid, isUnitQuantityValid, quantityStep } from "../utils/unitQuantity";
 
 export const SalesBillEntryView: React.FC = () => {
-  const { products, customers, addSale, showToast, setActiveReceiptToPrint } = useApp();
+  const { products, customers, addSale, showToast, setActiveReceiptToPrint } =
+    useApp();
 
-  const [billNumber, setBillNumber] = useState(() => `SB-${Date.now().toString().slice(-6)}`);
-  const [billDate, setBillDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const [customerName, setCustomerName] = useState('');
-  const [customerType, setCustomerType] = useState<'walkin' | 'registered'>('walkin');
+  const [billNumber, setBillNumber] = useState(
+    () => `SB-${Date.now().toString().slice(-6)}`,
+  );
+  const [billDate, setBillDate] = useState(() =>
+    new Date().toISOString().slice(0, 10),
+  );
+  const [customerName, setCustomerName] = useState("");
+  const [customerType, setCustomerType] = useState<"walkin" | "registered">(
+    "walkin",
+  );
 
   // Scanner & Fast Entry
-  const [fastSearchQuery, setFastSearchQuery] = useState('');
-  const [quickQty, setQuickQty] = useState(1);
+  const [fastSearchQuery, setFastSearchQuery] = useState("");
   const [showAutoSuggest, setShowAutoSuggest] = useState(false);
-  const [stockWarning, setStockWarning] = useState('');
+  const [activeSearchIndex, setActiveSearchIndex] = useState(-1);
+  const [stockWarning, setStockWarning] = useState("");
   const fastInputRef = useRef<HTMLInputElement>(null);
 
   // Cart Items
   const [cartItems, setCartItems] = useState<CartItem[]>([]);
+  const [quantityDrafts, setQuantityDrafts] = useState<Record<string, string>>({});
 
   // Discounts & Coupons
   const [billDiscount, setBillDiscount] = useState(0);
+  const [couponCode, setCouponCode] = useState("");
+  const [couponPrice, setCouponPrice] = useState("");
+  const [couponEnabled, setCouponEnabled] = useState(false);
 
   // Payment Method
-  const [paymentMode, setPaymentMode] = useState<'Cash' | 'Credit' | 'UPI'>('Cash');
-  const [upiRef, setUpiRef] = useState('');
+  const [paymentMode, setPaymentMode] = useState<"Cash" | "Credit" | "UPI">(
+    "Cash",
+  );
+  const [upiRef, setUpiRef] = useState("");
   const [creditDueDate, setCreditDueDate] = useState(() => {
-    const due = new Date(); due.setDate(due.getDate() + 14); return due.toISOString().slice(0, 10);
+    const due = new Date();
+    due.setDate(due.getDate() + 14);
+    return due.toISOString().slice(0, 10);
   });
-  const [cashReceived, setCashReceived] = useState(0);
-  const [cashReceivedManuallySet, setCashReceivedManuallySet] = useState(false);
+  const [savingSale, setSavingSale] = useState(false);
 
   // Recalculations
   const grossSubtotal = cartItems.reduce((acc, item) => {
@@ -40,70 +57,98 @@ export const SalesBillEntryView: React.FC = () => {
     return acc + net;
   }, 0);
 
-  const finalTotal = Math.max(0, grossSubtotal - billDiscount);
+  const remainingBeforeCoupon = Math.max(0, grossSubtotal - billDiscount);
+  const enteredCouponPrice = couponPrice.trim() ? Number(couponPrice) : 0;
+  const couponDiscount = Number.isFinite(enteredCouponPrice)
+    ? enteredCouponPrice
+    : 0;
+  const finalTotal = Math.max(0, remainingBeforeCoupon - couponDiscount);
   const totalUnits = cartItems.reduce((acc, item) => acc + item.quantity, 0);
-  const changeToReturn = cashReceived - finalTotal;
-
-  useEffect(() => {
-    if (!cashReceivedManuallySet) setCashReceived(finalTotal);
-  }, [finalTotal, cashReceivedManuallySet]);
-
   // Keyboard shortcut listeners
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.ctrlKey && e.key === 'Enter') {
+      if (e.ctrlKey && e.key === "Enter") {
         e.preventDefault();
         handleCompleteSale();
       }
-      if (e.key === 'F2') {
+      if (e.key === "F2") {
         e.preventDefault();
         fastInputRef.current?.focus();
         fastInputRef.current?.select();
       }
-      if (e.key === 'F4') {
+      if (e.key === "F4") {
         e.preventDefault();
-        const nextMode = paymentMode === 'Cash' ? 'Credit' : paymentMode === 'Credit' ? 'UPI' : 'Cash';
+        const nextMode =
+          paymentMode === "Cash"
+            ? "Credit"
+            : paymentMode === "Credit"
+              ? "UPI"
+              : "Cash";
         setPaymentMode(nextMode);
       }
     };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [cartItems, finalTotal, paymentMode, customerName, billNumber, cashReceived]);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [
+    cartItems,
+    finalTotal,
+    paymentMode,
+    customerName,
+    billNumber,
+    savingSale,
+  ]);
 
   // Quick scanner suggestion filtering
   const matchingCatalog = fastSearchQuery.trim()
     ? products
-        .filter((p) => p.status === 'Active')
+        .filter((p) => p.status === "Active")
         .filter(
           (p) =>
             p.name.toLowerCase().includes(fastSearchQuery.toLowerCase()) ||
             p.sku.toLowerCase().includes(fastSearchQuery.toLowerCase()) ||
-            p.brand.toLowerCase().includes(fastSearchQuery.toLowerCase())
+            p.brand.toLowerCase().includes(fastSearchQuery.toLowerCase()),
         )
         .slice(0, 5)
     : [];
 
-  const handleAddItemToCart = (product: { id: string; name: string; sku: string; unit: string; sellingPrice: number; quantity: number }, qty = 1) => {
-    if (!Number.isInteger(qty) || qty < 1) {
-      showToast('Quantity must be at least one.', 'error');
+  const handleAddItemToCart = (
+    product: {
+      id: string;
+      name: string;
+      sku: string;
+      unit: string;
+      sellingPrice: number;
+      quantity: number;
+      unitAllowsDecimals?: boolean;
+    },
+    qty = 1,
+  ) => {
+    const allowsDecimals = product.unitAllowsDecimals ?? false;
+    if (qty <= 0 || !isUnitQuantityValid(qty, allowsDecimals)) {
+      showToast(allowsDecimals ? "Enter a positive quantity with up to 3 decimal places." : "This unit only allows whole-number quantities.", "error");
       return;
     }
-    const existingIndex = cartItems.findIndex((it) => it.productId === product.id);
-    const alreadyInCart = existingIndex >= 0 ? cartItems[existingIndex].quantity : 0;
+    const existingIndex = cartItems.findIndex(
+      (it) => it.productId === product.id,
+    );
+    const alreadyInCart =
+      existingIndex >= 0 ? cartItems[existingIndex].quantity : 0;
     if (alreadyInCart + qty > product.quantity) {
-      const message = `Only ${product.quantity} ${product.unit || 'units'} of ${product.name} available. ${alreadyInCart} already in this sale.`;
+      const message = `Only ${product.quantity} ${product.unit || "units"} of ${product.name} available. ${alreadyInCart} already in this sale.`;
       setStockWarning(message);
-      showToast(message, 'error');
+      showToast(message, "error");
       return;
     }
-    setStockWarning('');
+    setStockWarning("");
     if (existingIndex >= 0) {
       setCartItems((prev) =>
-        prev.map((it, idx) => (idx === existingIndex ? { ...it, quantity: it.quantity + qty } : it))
+        prev.map((it, idx) =>
+          idx === existingIndex ? { ...it, quantity: it.quantity + qty } : it,
+        ),
       );
     } else {
       const newItem: CartItem = {
-        id: 'cart-' + Date.now() + Math.random(),
+        id: "cart-" + Date.now() + Math.random(),
         name: product.name,
         sku: product.sku,
         productId: product.id,
@@ -114,222 +159,312 @@ export const SalesBillEntryView: React.FC = () => {
       };
       setCartItems((prev) => [...prev, newItem]);
     }
-    showToast(`Added ${product.name} (x${qty}) to cart.`);
-    setFastSearchQuery('');
+    setFastSearchQuery("");
     setShowAutoSuggest(false);
+    setActiveSearchIndex(-1);
   };
 
   const handleQuickAdd = () => {
     if (matchingCatalog.length > 0) {
-      handleAddItemToCart(matchingCatalog[0], quickQty);
+      handleAddItemToCart(matchingCatalog[0]);
     } else {
-      showToast('No matching active product found.', 'error');
+      showToast("No matching active product found.", "error");
     }
   };
 
   const getCartQuantity = (productId: string) =>
-    cartItems.filter((item) => item.productId === productId).reduce((total, item) => total + item.quantity, 0);
+    cartItems
+      .filter((item) => item.productId === productId)
+      .reduce((total, item) => total + item.quantity, 0);
 
   const handleCompleteSale = async () => {
+    if (savingSale) return;
     if (cartItems.length === 0) {
-      showToast('Cannot complete sale with an empty cart.', 'error');
+      showToast("Cannot complete sale with an empty cart.", "error");
       return;
     }
-
-    if (paymentMode === 'Credit' && (customerType !== 'registered' || !customerName)) {
-      showToast('Choose a registered customer before creating a credit bill.', 'error');
-      return;
-    }
-    if (customerType === 'registered' && !customerName) {
-      showToast('Choose a registered customer for this sale.', 'error');
-      return;
-    }
-    if (paymentMode === 'Cash' && cashReceived < finalTotal) {
-      showToast('Cash received must cover the bill total.', 'error');
-      return;
-    }
-    const itemNames = cartItems.map((c) => `${c.name} (x${c.quantity})`).join(', ');
-
-    const saved = await addSale({
-      billNumber,
-      date: billDate,
-      dateTime: `${billDate} ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
-      customerName: customerName.trim() || 'Walk-in Customer',
-      customerType: customerName.trim() ? 'registered' : 'walkin',
-      itemsCount: cartItems.length,
-      itemsList: itemNames,
-      paymentMode,
-      upiRef: paymentMode === 'UPI' && upiRef.trim() ? upiRef.trim() : undefined,
-      amount: finalTotal,
-      subtotal: grossSubtotal,
-      discountAmount: cartItems.reduce((sum, item) => sum + item.quantity * item.price * (item.discount / 100), 0) + billDiscount,
-      billDiscountAmount: billDiscount,
-      cashReceived: paymentMode === 'Cash' ? cashReceived : undefined,
-      changeGiven: paymentMode === 'Cash' ? Math.max(0, changeToReturn) : undefined,
-      creditDueDate: paymentMode === 'Credit' ? creditDueDate : undefined,
-      lineItems: cartItems.map((item) => {
-        const product = products.find((entry) => entry.id === item.productId)!;
-        return { productId: product.id, name: product.name, sku: product.sku, unit: product.unit, quantity: item.quantity, sellingPrice: item.price, purchaseRate: product.purchaseRate, discount: item.discount, tax: 0 };
-      }),
+    const invalidQuantityDraft = cartItems.some((item) => {
+      const draft = quantityDrafts[item.id];
+      if (draft === undefined) return false;
+      const product = products.find((entry) => entry.id === item.productId);
+      const allowsDecimals = product?.unitAllowsDecimals ?? false;
+      const quantity = Number(draft);
+      return !draft || !isUnitQuantityInputValid(draft, allowsDecimals) || quantity <= 0 || quantity > (product?.quantity ?? 0);
     });
+    if (invalidQuantityDraft) {
+      showToast("Review the sale quantities; one or more entries are invalid or exceed stock.", "error");
+      return;
+    }
 
-    if (saved) {
-      setBillNumber(`SB-${Date.now().toString().slice(-6)}`);
-      setBillDate(new Date().toISOString().slice(0, 10));
-      setCartItems([]);
-      setBillDiscount(0);
-      setUpiRef('');
-      setCashReceivedManuallySet(false);
+    if (
+      paymentMode === "Credit" &&
+      (customerType !== "registered" || !customerName)
+    ) {
+      showToast(
+        "Choose a registered customer before creating a credit bill.",
+        "error",
+      );
+      return;
+    }
+    if (customerType === "registered" && !customerName) {
+      showToast("Choose a registered customer for this sale.", "error");
+      return;
+    }
+    const normalizedCouponCode = normalizeCouponCode(couponCode);
+    const couponCodeProvided = normalizedCouponCode.length > 0;
+    const couponPriceProvided = couponPrice.trim().length > 0;
+    if (couponCodeProvided !== couponPriceProvided) {
+      showToast(
+        "Enter both the coupon code and its amount, or leave both blank.",
+        "error",
+      );
+      return;
+    }
+    if (
+      couponPriceProvided &&
+      (!Number.isFinite(enteredCouponPrice) || enteredCouponPrice <= 0)
+    ) {
+      showToast("Coupon amount must be greater than zero.", "error");
+      return;
+    }
+    if (normalizedCouponCode.length > 80) {
+      showToast("Coupon codes can be at most 80 characters.", "error");
+      return;
+    }
+    if (couponPriceProvided && enteredCouponPrice > remainingBeforeCoupon) {
+      showToast(
+        "Coupon discount cannot exceed the remaining sale value.",
+        "error",
+      );
+      return;
+    }
+    const itemNames = cartItems
+      .map((c) => `${c.name} (x${c.quantity})`)
+      .join(", ");
+
+    setSavingSale(true);
+    try {
+      const saved = await addSale({
+        billNumber,
+        date: billDate,
+        dateTime: `${billDate} ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`,
+        customerName: customerName.trim() || "Walk-in Customer",
+        customerType: customerName.trim() ? "registered" : "walkin",
+        itemsCount: cartItems.length,
+        itemsList: itemNames,
+        paymentMode,
+        upiRef:
+          paymentMode === "UPI" && upiRef.trim() ? upiRef.trim() : undefined,
+        amount: finalTotal,
+        subtotal: grossSubtotal,
+        ...(couponCodeProvided
+          ? {
+              couponCode: normalizedCouponCode,
+              couponPrice: enteredCouponPrice,
+            }
+          : {}),
+        discountAmount:
+          cartItems.reduce(
+            (sum, item) =>
+              sum + item.quantity * item.price * (item.discount / 100),
+            0,
+          ) + billDiscount,
+        billDiscountAmount: billDiscount,
+        cashReceived: paymentMode === "Cash" ? finalTotal : undefined,
+        changeGiven: paymentMode === "Cash" ? 0 : undefined,
+        creditDueDate: paymentMode === "Credit" ? creditDueDate : undefined,
+        lineItems: cartItems.map((item) => {
+          const product = products.find(
+            (entry) => entry.id === item.productId,
+          )!;
+          return {
+            productId: product.id,
+            name: product.name,
+            sku: product.sku,
+            unit: product.unit,
+            quantity: item.quantity,
+            sellingPrice: item.price,
+            purchaseRate: product.purchaseRate,
+            discount: item.discount,
+            tax: 0,
+          };
+        }),
+      });
+
+      if (saved) {
+        setBillNumber(`SB-${Date.now().toString().slice(-6)}`);
+        setBillDate(new Date().toISOString().slice(0, 10));
+        setCartItems([]);
+        setBillDiscount(0);
+        setCouponCode("");
+        setCouponPrice("");
+        setCouponEnabled(false);
+        setUpiRef("");
+      }
+    } finally {
+      setSavingSale(false);
     }
   };
 
   const handlePrintCurrentReceipt = () => {
     setActiveReceiptToPrint({
-      title: 'Retail Bill',
+      title: "Retail Bill",
       refNumber: billNumber,
-      date: billDate + ' ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      date:
+        billDate +
+        " " +
+        new Date().toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
       party: customerName,
       items: cartItems.map((c) => ({
         name: c.name,
         qty: c.quantity,
+        unit: products.find((product) => product.id === c.productId)?.unit || '',
         price: c.price,
         total: c.quantity * c.price * (1 - c.discount / 100),
       })),
       subtotal: grossSubtotal,
       billDiscount,
+      couponCode: normalizeCouponCode(couponCode) || undefined,
+      couponDiscount,
       total: finalTotal,
       mode: paymentMode,
     });
   };
 
   return (
-    <div className="flex flex-col w-full gap-space-md">
-    
-      <div className="grid grid-cols-1 gap-space-md xl:grid-cols-12">
-        <section className="grid grid-cols-1 gap-space-md rounded-lg border border-outline-variant/20 bg-surface-container-lowest p-space-md shadow-sm sm:grid-cols-3 xl:col-span-9">
-          <div className="flex items-center gap-3">
-            <span className="flex h-11 w-11 items-center justify-center rounded-lg bg-primary-container/10 text-primary">
-              <span className="material-symbols-outlined">receipt_long</span>
-            </span>
-            <div>
-              <div className="text-sm text-on-surface-variant">Bill reference</div>
-              <strong className="font-mono text-primary">{billNumber}</strong>
-            </div>
-          </div>
-          <label className="flex flex-col gap-1 text-sm font-medium text-on-surface-variant" htmlFor="bill-date">
-            Issue date
-            <input id="bill-date" type="date" className="h-10 rounded-md border border-outline-variant/30 bg-surface-container-low px-3 font-mono text-on-surface" value={billDate} onChange={(e) => setBillDate(e.target.value)} />
+    <div className="grid w-full grid-cols-1 items-start gap-3 lg:grid-cols-12">
+      <div className="flex flex-col gap-3 lg:col-span-8">
+        <section className="grid grid-cols-1 gap-3 rounded-lg border border-outline-variant/20 bg-surface-container-lowest p-3 shadow-sm sm:grid-cols-2">
+          <label
+            className="flex flex-col gap-1 text-sm font-medium text-on-surface-variant"
+            htmlFor="bill-date"
+          >
+            Bill date
+            <input
+              id="bill-date"
+              type="date"
+              className="h-10 rounded-md border border-outline-variant/30 bg-surface-container-low px-3 font-mono text-on-surface"
+              value={billDate}
+              onChange={(e) => setBillDate(e.target.value)}
+            />
           </label>
-          <label className="flex flex-col gap-1 text-sm font-medium text-on-surface-variant" htmlFor="customer-search">
-            Customer (optional)
-            <select id="customer-search" className="h-10 rounded-md border border-outline-variant/30 bg-surface-container-low px-3 text-on-surface" value={customerName} onChange={(e) => { setCustomerName(e.target.value); setCustomerType(e.target.value ? 'registered' : 'walkin'); }}>
+          <label
+            className="flex flex-col gap-1 text-sm font-medium text-on-surface-variant"
+            htmlFor="customer-search"
+          >
+            {paymentMode === "Credit" ? "Customer (required for credit)" : "Customer (optional)"}
+            <select
+              id="customer-search"
+              className="h-10 rounded-md border border-outline-variant/30 bg-surface-container-low px-3 text-on-surface"
+              value={customerName}
+              onChange={(e) => {
+                setCustomerName(e.target.value);
+                setCustomerType(e.target.value ? "registered" : "walkin");
+              }}
+            >
               <option value="">Walk-in / no customer</option>
-              {customers.map((customer) => <option key={customer.id} value={customer.name}>{customer.name}{customer.phone ? ` · ${customer.phone}` : ''}</option>)}
+              {customers.map((customer) => (
+                <option key={customer.id} value={customer.name}>
+                  {customer.name}
+                  {customer.phone ? ` · ${customer.phone}` : ""}
+                </option>
+              ))}
             </select>
           </label>
         </section>
 
-        <section className="rounded-lg border border-outline-variant/20 bg-surface-container-lowest p-space-md shadow-sm xl:col-span-3" aria-label="Customer type">
-          <div className="grid h-full min-h-11 grid-cols-2 gap-1 rounded-lg bg-surface-container-low p-1">
-            <button type="button" onClick={() => { setCustomerType('walkin'); setCustomerName(''); }} className={`flex items-center justify-center gap-2 rounded-md px-2 text-sm font-semibold transition-colors ${customerType === 'walkin' ? 'bg-primary-container text-on-primary' : 'text-on-surface-variant hover:text-on-surface'}`}>
-              <span className="material-symbols-outlined text-lg">person</span> Walk-in
-            </button>
-            <button type="button" onClick={() => setCustomerType('registered')} className={`flex items-center justify-center gap-2 rounded-md px-2 text-sm font-semibold transition-colors ${customerType === 'registered' ? 'bg-primary-container text-on-primary' : 'text-on-surface-variant hover:text-on-surface'}`}>
-              <span className="material-symbols-outlined text-lg">groups</span> Registered
-            </button>
-          </div>
-        </section>
-      </div>
-
-      {/* Main POS Transaction Workspace */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-space-md items-start">
-        {/* Left Column: add products and review the cart */}
-        <div className="lg:col-span-8 flex flex-col gap-space-md">
+        {/* Main POS workspace: add products and review the cart */}
           {/* Fast Product Scanner Toolbar */}
-          <section className="bg-surface-container-lowest p-space-md rounded-lg shadow-sm border border-outline-variant/20">
+          <section className="bg-surface-container-lowest p-3 rounded-lg shadow-sm border border-outline-variant/20">
             <div className="flex flex-col gap-space-xs">
               <div className="flex items-center justify-between">
                 <label className="font-label-md text-label-md text-on-surface font-semibold flex items-center gap-1">
-                  <span className="material-symbols-outlined text-[16px] text-primary">barcode_scanner</span>
+                  <span className="material-symbols-outlined text-[16px] text-primary">
+                    add_shopping_cart
+                  </span>
                   <span>Add Products</span>
                 </label>
-                <span className="text-xs text-on-surface-variant">Scan or search by name, SKU, or brand</span>
+                <span className="text-xs text-on-surface-variant">
+                  Search by product name, SKU, or brand
+                </span>
               </div>
-              <div className="flex items-center gap-space-sm relative">
-                <div className="relative flex-1">
+              <div className="relative">
                   <input
                     ref={fastInputRef}
                     autoComplete="off"
                     type="text"
-                    className="w-full h-9 pl-3 pr-20 bg-surface-container-low rounded font-body-md text-body-md text-on-surface placeholder:text-outline focus:outline-none focus:bg-surface-container-lowest border border-outline-variant/30"
-                    placeholder="Scan barcode or search product by name, SKU, or brand..."
+                    className="w-full h-10 px-3 bg-surface-container-low rounded-md font-body-md text-body-md text-on-surface placeholder:text-outline focus:outline-none focus:bg-surface-container-lowest border border-outline-variant/30"
+                    placeholder="Search product by name, SKU, or brand..."
                     value={fastSearchQuery}
+                    role="combobox"
+                    aria-autocomplete="list"
+                    aria-expanded={showAutoSuggest && matchingCatalog.length > 0}
+                    aria-controls={showAutoSuggest && matchingCatalog.length > 0 ? "sales-product-results" : undefined}
+                    aria-activedescendant={activeSearchIndex >= 0 ? `sales-product-option-${activeSearchIndex}` : undefined}
                     onChange={(e) => {
                       setFastSearchQuery(e.target.value);
                       setShowAutoSuggest(e.target.value.trim().length > 0);
+                      setActiveSearchIndex(-1);
                     }}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
+                      if (e.key === "ArrowDown" && matchingCatalog.length > 0) {
                         e.preventDefault();
-                        handleQuickAdd();
+                        setShowAutoSuggest(true);
+                        setActiveSearchIndex((current) => current >= matchingCatalog.length - 1 ? 0 : current + 1);
+                      } else if (e.key === "ArrowUp" && matchingCatalog.length > 0) {
+                        e.preventDefault();
+                        setShowAutoSuggest(true);
+                        setActiveSearchIndex((current) => current <= 0 ? matchingCatalog.length - 1 : current - 1);
+                      } else if (e.key === "Enter") {
+                        e.preventDefault();
+                        const selected = showAutoSuggest && activeSearchIndex >= 0
+                          ? matchingCatalog[activeSearchIndex]
+                          : undefined;
+                        if (selected) handleAddItemToCart(selected);
+                        else handleQuickAdd();
+                      } else if (e.key === "Escape") {
+                        setShowAutoSuggest(false);
+                        setActiveSearchIndex(-1);
                       }
                     }}
                   />
-                  <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1 text-outline">
-                    <kbd className="font-data-mono-sm text-[10px] bg-surface-container px-1 py-0.5 rounded">
-                      Enter ↵
-                    </kbd>
-                  </div>
+                <div className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1 text-outline">
+                  <kbd className="font-data-mono-sm text-[10px] bg-surface-container px-1 py-0.5 rounded">Enter ↵</kbd>
                 </div>
-
-                <div className="w-24 flex items-center bg-surface-container-low rounded px-2 h-9 border border-outline-variant/30">
-                  <span className="font-label-sm text-label-sm text-on-surface-variant mr-1">Qty</span>
-                  <input
-                    type="number"
-                    min="1"
-                    className="w-full bg-transparent font-data-mono-md text-data-mono-md text-on-surface text-center focus:outline-none"
-                    value={quickQty}
-                    onChange={(e) => setQuickQty(Math.max(1, parseInt(e.target.value) || 1))}
-                  />
-                </div>
-
-                <button
-                  type="button"
-                  className="h-9 px-space-md bg-primary-container text-on-primary rounded font-label-md text-label-md font-semibold hover:bg-primary transition-colors flex items-center gap-1"
-                  onClick={handleQuickAdd}
-                >
-                  <span className="material-symbols-outlined text-[16px]">add_shopping_cart</span>
-                  <span>Add</span>
-                </button>
               </div>
 
-              {/* Suggestions dropdown */}
+              {/* Search results */}
               {showAutoSuggest && matchingCatalog.length > 0 && (
-                <div className="relative">
-                  <div className="absolute top-1 left-0 right-0 z-30 bg-surface-container-lowest rounded-lg shadow-xl border border-outline-variant/30 p-1">
-                    <div className="p-space-xs font-label-sm text-label-sm text-on-surface-variant bg-surface-container-low rounded mb-1 flex justify-between">
-                      <span>Choose a product</span>
-                      <span>Available stock</span>
-                    </div>
-                    {matchingCatalog.map((prod) => (
-                      <button
+                <div id="sales-product-results" role="listbox" aria-label="Product search results" className="overflow-hidden rounded-lg border border-outline-variant/30 bg-surface-container-lowest">
+                  {matchingCatalog.map((prod, index) => {
+                    const available = Math.max(0, prod.quantity - getCartQuantity(prod.id));
+                    return (
+                      <div
                         key={prod.id}
-                        type="button"
-                        onClick={() => handleAddItemToCart(prod, quickQty)}
-                        className="w-full p-2 rounded hover:bg-surface-container cursor-pointer flex items-center justify-between text-left"
+                        id={`sales-product-option-${index}`}
+                        role="option"
+                        aria-selected={activeSearchIndex === index}
+                        onMouseEnter={() => setActiveSearchIndex(index)}
+                        onClick={() => handleAddItemToCart(prod)}
+                        className={`grid cursor-pointer grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2 border-b border-outline-variant/20 border-l-4 px-3 py-2.5 last:border-b-0 sm:gap-4 ${activeSearchIndex === index ? 'border-l-[#a86600] bg-[#f4ddb0] shadow-[inset_0_0_0_1px_rgba(168,102,0,.14)]' : 'border-l-transparent hover:bg-surface-container-low'}`}
                       >
-                        <div className="flex flex-col">
-                          <span className="font-body-md text-body-md font-semibold text-on-surface">{prod.name}</span>
-                          <span className="font-data-mono-sm text-data-mono-sm text-on-surface-variant">
-                            {prod.sku} • Available: {Math.max(0, prod.quantity - getCartQuantity(prod.id))} / {prod.quantity}
-                          </span>
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-semibold text-on-surface">{prod.name}</div>
+                          <div className="flex min-w-0 items-center gap-1 truncate text-xs text-on-surface-variant">
+                            {prod.brand && <span className="inline-flex max-w-[140px] shrink-0 truncate rounded-full bg-[#fff0c7] px-2 py-0.5 font-medium text-[#795400]" title={prod.brand}>{prod.brand}</span>}
+                            <span className="inline-flex shrink-0 items-center gap-1 rounded bg-surface-container-low px-1.5 py-0.5 font-semibold" aria-label={`Unit: ${prod.unitName || prod.unit || 'not set'}`}>
+                              <Package size={12} aria-hidden="true" />{prod.unitName || prod.unit || '—'}
+                            </span>
+                          </div>
                         </div>
-                        <span className="font-data-mono-md text-data-mono-md font-bold text-primary">
-                          {formatCurrency(prod.sellingPrice)}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
+                        <span className="whitespace-nowrap text-sm font-semibold text-on-surface">{formatCurrency(prod.sellingPrice)}</span>
+                        <span className="whitespace-nowrap rounded-full bg-tertiary-container/15 px-2.5 py-1 text-xs font-semibold text-tertiary">In stock ({available}{prod.unit ? ` ${prod.unit}` : ''})</span>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -339,7 +474,9 @@ export const SalesBillEntryView: React.FC = () => {
           <section className="bg-surface-container-lowest rounded-lg shadow-sm overflow-hidden border border-outline-variant/20">
             <div className="px-space-md py-space-sm bg-surface-container-low flex items-center justify-between border-b border-outline-variant/20">
               <div className="flex items-center gap-space-sm">
-                <span className="font-title-md text-title-md font-semibold text-on-surface">Bill Items</span>
+                <span className="font-title-md text-title-md font-semibold text-on-surface">
+                  Bill Items
+                </span>
                 <span className="font-data-mono-sm text-data-mono-sm bg-surface-container-high text-primary px-2 py-0.5 rounded-full font-semibold">
                   {cartItems.length} items
                 </span>
@@ -349,10 +486,12 @@ export const SalesBillEntryView: React.FC = () => {
                 className="font-label-sm text-label-sm text-error hover:bg-error-container/40 px-2 py-1 rounded transition-colors flex items-center gap-1"
                 onClick={() => {
                   setCartItems([]);
-                  showToast('Cart cleared', 'info');
+                  showToast("Cart cleared", "info");
                 }}
               >
-                <span className="material-symbols-outlined text-[14px]">delete_sweep</span>
+                <span className="material-symbols-outlined text-[14px]">
+                  delete_sweep
+                </span>
                 <span>Clear cart</span>
               </button>
             </div>
@@ -362,32 +501,51 @@ export const SalesBillEntryView: React.FC = () => {
                 <thead>
                   <tr className="bg-surface-container-low text-on-surface-variant font-label-sm text-label-sm uppercase tracking-wider">
                     <th className="py-2 px-space-md w-10 text-center">#</th>
-                    <th className="py-2 px-space-md min-w-[180px]">Product Name</th>
+                    <th className="py-2 px-space-md min-w-[180px]">
+                      Product Name
+                    </th>
                     <th className="py-2 px-space-sm">Brand</th>
-                    <th className="py-2 px-space-sm w-32 text-center">Quantity</th>
+                    <th className="py-2 px-space-sm w-32 text-center">
+                      Quantity
+                    </th>
                     <th className="py-2 px-space-sm w-28 text-right">Price</th>
-                    <th className="py-2 px-space-sm w-24 text-right">Disc (%)</th>
+                    <th className="py-2 px-space-sm w-24 text-right">
+                      Disc (%)
+                    </th>
                     <th className="py-2 px-space-md w-28 text-right">Total</th>
-                    <th className="py-2 px-space-sm w-12 text-center">Action</th>
+                    <th className="py-2 px-space-sm w-12 text-center">
+                      Action
+                    </th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-surface-container">
                   {cartItems.map((item, index) => {
                     const gross = item.quantity * item.price;
                     const net = gross - gross * (item.discount / 100);
+                    const product = products.find((entry) => entry.id === item.productId);
+                    const allowsDecimals = product?.unitAllowsDecimals ?? false;
+                    const minimumQuantity = allowsDecimals ? 0.001 : 1;
+                    const quantityIncrement = allowsDecimals ? 0.1 : 1;
+                    const inputQuantity = quantityDrafts[item.id] ?? String(item.quantity);
                     return (
-                      <tr key={item.id} className="hover:bg-surface-container-low transition-colors">
+                      <tr
+                        key={item.id}
+                        className="hover:bg-surface-container-low transition-colors"
+                      >
                         <td className="py-2 px-space-md text-center font-data-mono-sm text-data-mono-sm text-on-surface-variant">
-                          {String(index + 1).padStart(2, '0')}
+                          {String(index + 1).padStart(2, "0")}
                         </td>
                         <td className="py-2 px-space-md">
                           <div className="flex flex-col">
-                            <span className="font-title-md text-body-md font-semibold text-on-surface">{item.name}</span>
+                            <span className="font-title-md text-body-md font-semibold text-on-surface">
+                              {item.name}
+                            </span>
+                            {product?.unit && <span className="text-xs text-on-surface-variant">{product.unit}</span>}
                           </div>
                         </td>
                         <td className="py-2 px-space-sm">
                           <span className="rounded bg-surface-container-high px-2 py-1 text-xs text-on-surface-variant">
-                            {products.find((product) => product.id === item.productId)?.brand || '—'}
+                            {product?.brand || "—"}
                           </span>
                         </td>
                         <td className="py-2 px-space-sm">
@@ -396,10 +554,16 @@ export const SalesBillEntryView: React.FC = () => {
                               type="button"
                               className="w-6 h-6 flex items-center justify-center rounded bg-surface-container-lowest text-on-surface hover:bg-surface-container-high transition-colors font-bold text-xs"
                               onClick={() => {
+                                setQuantityDrafts((previous) => { const next = { ...previous }; delete next[item.id]; return next; });
                                 setCartItems((prev) =>
                                   prev.map((it) =>
-                                    it.id === item.id ? { ...it, quantity: Math.max(1, it.quantity - 1) } : it
-                                  )
+                                    it.id === item.id
+                                      ? {
+                                          ...it,
+                                          quantity: Math.max(minimumQuantity, Math.round((it.quantity - quantityIncrement) * 1000) / 1000),
+                                        }
+                                      : it,
+                                  ),
                                 );
                               }}
                             >
@@ -407,46 +571,69 @@ export const SalesBillEntryView: React.FC = () => {
                             </button>
                             <input
                               type="number"
-                              min="1"
-                              max={products.find((product) => product.id === item.productId)?.quantity ?? 0}
+                              min={minimumQuantity}
+                              step={quantityStep(allowsDecimals)}
+                              max={product?.quantity ?? 0}
                               className="w-10 text-center font-data-mono-md text-data-mono-md bg-transparent text-on-surface focus:outline-none"
-                              value={item.quantity}
+                              value={inputQuantity}
                               onChange={(e) => {
-                                const product = products.find((entry) => entry.id === item.productId);
-                                const requested = parseInt(e.target.value) || 1;
-                                const maximum = product?.quantity ?? 0;
-                                if (requested > maximum) {
-                                  const message = `Only ${maximum} ${product?.unit || 'units'} of ${item.name} are available.`;
-                                  setStockWarning(message);
-                                  showToast(message, 'error');
-                                } else {
-                                  setStockWarning('');
+                                const raw = e.target.value;
+                                setQuantityDrafts((previous) => ({ ...previous, [item.id]: raw }));
+                                if (!raw || !isUnitQuantityInputValid(raw, allowsDecimals)) {
+                                  setStockWarning(allowsDecimals ? "Use no more than 3 decimal places for this quantity." : "This unit only allows whole-number quantities.");
+                                  return;
                                 }
-                                const val = Math.min(Math.max(1, requested), Math.max(1, maximum));
-                                setCartItems((prev) =>
-                                  prev.map((it) => (it.id === item.id ? { ...it, quantity: val } : it))
-                                );
+                                const requested = Number(raw);
+                                const maximum = product?.quantity ?? 0;
+                                if (requested < minimumQuantity || requested > maximum) {
+                                  const message = requested > maximum ? `Only ${maximum} ${product?.unit || "units"} of ${item.name} are available.` : "Quantity must be greater than zero.";
+                                  setStockWarning(message);
+                                } else {
+                                  setStockWarning("");
+                                  setCartItems((prev) => prev.map((it) => it.id === item.id ? { ...it, quantity: requested } : it));
+                                }
+                              }}
+                              onBlur={() => {
+                                const raw = quantityDrafts[item.id];
+                                if (raw === undefined) return;
+                                const requested = Number(raw);
+                                if (!raw || !isUnitQuantityInputValid(raw, allowsDecimals) || requested < minimumQuantity || requested > (product?.quantity ?? 0)) {
+                                  setQuantityDrafts((previous) => { const next = { ...previous }; delete next[item.id]; return next; });
+                                } else {
+                                  setCartItems((previous) => previous.map((it) => it.id === item.id ? { ...it, quantity: requested } : it));
+                                  setQuantityDrafts((previous) => { const next = { ...previous }; delete next[item.id]; return next; });
+                                }
                               }}
                             />
                             <button
                               type="button"
                               aria-label={`Increase ${item.name} quantity`}
-                              title={item.quantity >= (products.find((product) => product.id === item.productId)?.quantity ?? 0) ? 'Maximum available stock reached' : 'Increase quantity'}
+                              title={
+                                item.quantity >=
+                                (product?.quantity ?? 0)
+                                  ? "Maximum available stock reached"
+                                  : "Increase quantity"
+                              }
                               className="w-6 h-6 flex items-center justify-center rounded bg-surface-container-lowest text-on-surface hover:bg-surface-container-high transition-colors font-bold text-xs"
                               onClick={() => {
-                                const product = products.find((entry) => entry.id === item.productId);
-                                if (product && item.quantity >= product.quantity) {
-                                  const message = `Only ${product.quantity} ${product.unit || 'units'} of ${product.name} are available.`;
+                                setQuantityDrafts((previous) => { const next = { ...previous }; delete next[item.id]; return next; });
+                                if (
+                                  product &&
+                                  item.quantity >= product.quantity
+                                ) {
+                                  const message = `Only ${product.quantity} ${product.unit || "units"} of ${product.name} are available.`;
                                   setStockWarning(message);
-                                  showToast(message, 'error');
+                                  showToast(message, "error");
                                   return;
                                 }
                                 setCartItems((prev) =>
                                   prev.map((it) =>
-                                    it.id === item.id ? { ...it, quantity: it.quantity + 1 } : it
-                                  )
+                                    it.id === item.id
+                                      ? { ...it, quantity: Math.min(product?.quantity ?? it.quantity + quantityIncrement, Math.round((it.quantity + quantityIncrement) * 1000) / 1000) }
+                                      : it,
+                                  ),
                                 );
-                                setStockWarning('');
+                                setStockWarning("");
                               }}
                             >
                               +
@@ -462,7 +649,11 @@ export const SalesBillEntryView: React.FC = () => {
                             onChange={(e) => {
                               const val = parseFloat(e.target.value) || 0;
                               setCartItems((prev) =>
-                                prev.map((it) => (it.id === item.id ? { ...it, price: val } : it))
+                                prev.map((it) =>
+                                  it.id === item.id
+                                    ? { ...it, price: val }
+                                    : it,
+                                ),
                               );
                             }}
                           />
@@ -474,12 +665,16 @@ export const SalesBillEntryView: React.FC = () => {
                             min="0"
                             max="100"
                             className="w-16 text-right font-data-mono-md text-data-mono-md bg-surface-container-low px-1.5 py-0.5 rounded text-on-surface focus:outline-none focus:bg-surface-container-lowest border border-outline-variant/30"
-                            value={item.discount || ''}
+                            value={item.discount || ""}
                             placeholder="0"
                             onChange={(e) => {
                               const val = parseFloat(e.target.value) || 0;
                               setCartItems((prev) =>
-                                prev.map((it) => (it.id === item.id ? { ...it, discount: val } : it))
+                                prev.map((it) =>
+                                  it.id === item.id
+                                    ? { ...it, discount: val }
+                                    : it,
+                                ),
                               );
                             }}
                           />
@@ -491,9 +686,15 @@ export const SalesBillEntryView: React.FC = () => {
                           <button
                             type="button"
                             className="text-outline hover:text-error transition-colors p-1 rounded"
-                            onClick={() => setCartItems((prev) => prev.filter((it) => it.id !== item.id))}
+                            onClick={() =>
+                              setCartItems((prev) =>
+                                prev.filter((it) => it.id !== item.id),
+                              )
+                            }
                           >
-                            <span className="material-symbols-outlined text-[18px]">delete</span>
+                            <span className="material-symbols-outlined text-[18px]">
+                              delete
+                            </span>
                           </button>
                         </td>
                       </tr>
@@ -501,8 +702,12 @@ export const SalesBillEntryView: React.FC = () => {
                   })}
                   {cartItems.length === 0 && (
                     <tr>
-                        <td colSpan={8} className="text-center py-8 text-on-surface-variant font-body-sm">
-                        No products added yet. Search above and choose a product to start the sale.
+                      <td
+                        colSpan={8}
+                        className="text-center py-8 text-on-surface-variant font-body-sm"
+                      >
+                        No products added yet. Search above and choose a product
+                        to start the sale.
                       </td>
                     </tr>
                   )}
@@ -511,44 +716,157 @@ export const SalesBillEntryView: React.FC = () => {
             </div>
 
             {stockWarning && (
-              <p role="alert" className="mx-space-md mt-2 rounded-md bg-error-container/40 px-3 py-2 text-sm text-error">
+              <p
+                role="alert"
+                className="mx-space-md mt-2 rounded-md bg-error-container/40 px-3 py-2 text-sm text-error"
+              >
                 {stockWarning}
               </p>
             )}
 
             <div className="bg-surface-container-low px-space-md py-2 text-right text-sm text-on-surface-variant border-t border-outline-variant/20">
-              Total quantity: <strong className="text-on-surface">{totalUnits}</strong>
+              Total quantity:{" "}
+              <strong className="text-on-surface">{totalUnits}</strong>
             </div>
           </section>
-        </div>
+      </div>
 
-        {/* Right Column: Checkout, Calculation Breakdown & Payment (4 Cols) */}
-        <div className="lg:col-span-4 flex flex-col gap-space-md">
-          <section className="bg-surface-container-lowest p-space-md rounded-lg shadow-sm flex flex-col gap-space-md border border-outline-variant/20">
+      {/* Bill summary and checkout stay at the top of the right column. */}
+      <div className="flex flex-col gap-3 lg:col-span-4">
+          <section className="bg-surface-container-lowest p-3 rounded-lg shadow-sm flex flex-col gap-3 border border-outline-variant/20">
             <div>
               <span className="font-title-md text-title-md font-semibold text-on-surface block mb-2">
-                Billing Summary
+                Sale total and payment
               </span>
               <div className="bg-surface-container-low p-space-sm rounded-lg flex flex-col gap-space-xs font-body-md text-body-md border border-outline-variant/20">
-                <div className="flex items-center justify-between text-on-surface-variant">
-                  <span>Subtotal ({cartItems.length} items)</span>
-                  <span className="font-data-mono-md text-data-mono-md font-medium text-on-surface">
-                    {formatCurrency(grossSubtotal)}
-                  </span>
+                <div className="flex items-center justify-between py-1 text-on-surface-variant">
+                  <span>Subtotal</span>
+                  <span className="font-data-mono-md text-data-mono-md text-on-surface">{formatCurrency(grossSubtotal)}</span>
                 </div>
-
                 <div className="py-1">
-                  <label className="flex items-center justify-between gap-2 text-on-surface-variant" htmlFor="bill-discount"><span>Bill discount (₹)</span><input id="bill-discount" type="number" min="0" max={grossSubtotal} step="0.01" value={billDiscount || ''} placeholder="0" onChange={e=>setBillDiscount(Math.min(grossSubtotal,Math.max(0,Number(e.target.value)||0)))} className="h-7 w-24 px-2 text-right bg-surface-container-lowest rounded border border-outline-variant/30 text-on-surface" /></label>
+                  <label
+                    className="flex items-center justify-between gap-2 text-on-surface-variant"
+                    htmlFor="bill-discount"
+                  >
+                    <span>Bill discount (₹)</span>
+                    <input
+                      id="bill-discount"
+                      type="number"
+                      min="0"
+                      max={grossSubtotal}
+                      step="0.01"
+                      value={billDiscount || ""}
+                      placeholder="0"
+                      onChange={(e) =>
+                        setBillDiscount(
+                          Math.min(
+                            grossSubtotal,
+                            Math.max(0, Number(e.target.value) || 0),
+                          ),
+                        )
+                      }
+                      className="h-7 w-24 px-2 text-right bg-surface-container-lowest rounded border border-outline-variant/30 text-on-surface"
+                    />
+                  </label>
                 </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={couponEnabled}
+                  aria-controls={couponEnabled ? "sale-coupon-fields" : undefined}
+                  onClick={() => {
+                    const enabled = !couponEnabled;
+                    setCouponEnabled(enabled);
+                    if (!enabled) {
+                      setCouponCode("");
+                      setCouponPrice("");
+                    }
+                  }}
+                  className="flex w-full items-center justify-between gap-3 rounded-lg border border-outline-variant/25 bg-surface-container-lowest px-3 py-2 text-left shadow-sm transition hover:shadow-md"
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    <span className="material-symbols-outlined text-[18px] text-primary">confirmation_number</span>
+                    <span>
+                      <span className="block text-sm font-semibold text-on-surface">Coupon discount</span>
+                      <span className="block text-[11px] text-on-surface-variant">{couponEnabled ? 'Enter a code and amount' : 'Add a coupon code'}</span>
+                    </span>
+                  </span>
+                  <span className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${couponEnabled ? 'bg-[#c88b00]' : 'bg-[#c7c4be]'}`} aria-hidden="true">
+                    <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${couponEnabled ? 'translate-x-[18px]' : 'translate-x-0.5'}`} />
+                  </span>
+                </button>
+
+                {couponEnabled && <div id="sale-coupon-fields" className="rounded-lg border border-[#eee5d4] bg-white p-3 shadow-[0_4px_14px_rgba(37,27,12,.08)] animate-in fade-in slide-in-from-top-1 duration-150">
+                  <div className="grid grid-cols-2 gap-2">
+                    <label
+                      className="flex flex-col gap-1 text-xs text-on-surface-variant"
+                      htmlFor="sale-coupon-code"
+                    >
+                      Coupon code
+                      <input
+                        id="sale-coupon-code"
+                        value={couponCode}
+                        onChange={(event) =>
+                          setCouponCode(normalizeCouponCode(event.target.value))
+                        }
+                        maxLength={80}
+                        placeholder="coupon code"
+                        className="h-8 min-w-0 rounded border border-outline-variant/30 px-2 font-mono uppercase text-on-surface outline-none focus:border-primary"
+                      />
+                    </label>
+                    <label
+                      className="flex flex-col gap-1 text-xs text-on-surface-variant"
+                      htmlFor="sale-coupon-price"
+                    >
+                      Amount (₹)
+                      <input
+                        id="sale-coupon-price"
+                        type="number"
+                        min="0.01"
+                        step="0.01"
+                        value={couponPrice}
+                        onChange={(event) => setCouponPrice(event.target.value)}
+                        placeholder="0.00"
+                        className="h-8 min-w-0 rounded border border-outline-variant/30 px-2 text-right text-on-surface outline-none focus:border-primary"
+                      />
+                    </label>
+                  </div>
+                  <p className="mt-2 text-[11px] leading-4 text-on-surface-variant">
+                    Enter the coupon code and discount amount.
+                  </p>
+                </div>}
+
+                {couponDiscount > 0 && (
+                  <div className="flex items-center justify-between text-on-surface-variant">
+                    <span>Coupon discount</span>
+                    <span className="font-data-mono-md text-data-mono-md text-on-surface">
+                      −{formatCurrency(couponDiscount)}
+                    </span>
+                  </div>
+                )}
+
+                {couponEnabled && couponPrice.trim() &&
+                  (!Number.isFinite(enteredCouponPrice) ||
+                    enteredCouponPrice <= 0) && (
+                    <p role="alert" className="text-xs text-error">
+                      Enter an amount greater than zero.
+                    </p>
+                  )}
+                {couponEnabled && couponPrice.trim() &&
+                  enteredCouponPrice > remainingBeforeCoupon && (
+                    <p role="alert" className="text-xs text-error">
+                      Coupon discount cannot exceed the remaining sale value.
+                    </p>
+                  )}
 
                 <div className="h-px bg-surface-container-high my-1"></div>
 
                 {/* Grand Total */}
                 <div className="flex items-baseline justify-between pt-1">
-                  <span className="font-title-md text-title-md font-bold text-on-surface uppercase">
+                  <span className="text-[17px] font-extrabold tracking-wide text-on-surface uppercase sm:text-[19px]">
                     Final Bill Total
                   </span>
-                  <span className="font-display-lg text-display-lg font-bold text-primary font-data-mono-lg leading-none">
+                  <span className="text-[40px] font-extrabold tracking-tight text-[#171717] font-data-mono-lg leading-none sm:text-[44px]">
                     {formatCurrency(finalTotal)}
                   </span>
                 </div>
@@ -561,7 +879,7 @@ export const SalesBillEntryView: React.FC = () => {
                 Payment Method
               </label>
               <div className="grid grid-cols-3 gap-1 bg-surface-container-low p-1 rounded-lg border border-outline-variant/20">
-                {(['Cash', 'Credit', 'UPI'] as const).map((mode) => (
+                {(["Cash", "Credit", "UPI"] as const).map((mode) => (
                   <button
                     key={mode}
                     type="button"
@@ -570,12 +888,16 @@ export const SalesBillEntryView: React.FC = () => {
                     }}
                     className={`py-1.5 px-2 rounded font-label-md text-label-md font-semibold flex items-center justify-center gap-1 transition-all ${
                       paymentMode === mode
-                        ? 'bg-primary-container text-on-primary'
-                        : 'text-on-surface-variant hover:text-on-surface'
+                        ? "bg-primary-container text-on-primary"
+                        : "text-on-surface-variant hover:text-on-surface"
                     }`}
                   >
                     <span className="material-symbols-outlined text-[16px]">
-                      {mode === 'Cash' ? 'payments' : mode === 'Credit' ? 'account_balance' : 'qr_code_scanner'}
+                      {mode === "Cash"
+                        ? "payments"
+                        : mode === "Credit"
+                          ? "account_balance"
+                          : "qr_code_scanner"}
                     </span>
                     <span>{mode}</span>
                   </button>
@@ -583,46 +905,17 @@ export const SalesBillEntryView: React.FC = () => {
               </div>
             </div>
 
-            {paymentMode === 'Cash' && (
-              <div className="flex flex-col gap-space-xs rounded-lg border border-outline-variant/20 bg-surface-container-low p-space-sm">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <label className="text-sm font-medium text-on-surface" htmlFor="cash-received">Amount Received (₹)</label>
-                </div>
-                <input id="cash-received" type="number" min={finalTotal} step="0.01" value={cashReceived || ''} placeholder="0" onChange={(e) => { setCashReceivedManuallySet(true); setCashReceived(Math.max(0, Number(e.target.value) || 0)); }} className="h-11 rounded-md border border-outline-variant/30 bg-surface-container-lowest px-3 text-lg font-semibold text-on-surface" />
-                <div className={`flex items-center justify-between rounded-md px-3 py-2 text-sm font-medium ${changeToReturn >= 0 ? 'bg-emerald-50 text-emerald-800' : 'bg-error-container/40 text-error'}`}>
-                  <span>Change to Return</span>
-                  <strong className="font-mono">{changeToReturn < 0 ? `-${formatCurrency(Math.abs(changeToReturn))}` : formatCurrency(changeToReturn)}</strong>
-                </div>
-              </div>
-            )}
-
             {/* Payment Details Subpanel */}
-            {paymentMode === 'Credit' && (
+            {paymentMode === "Credit" && (
               <div className="flex flex-col gap-space-xs bg-surface-container-low p-space-sm rounded-lg border border-outline-variant/20">
                 {!customerName ? (
-                  <label className="flex flex-col gap-1 text-sm font-medium text-on-surface-variant" htmlFor="credit-customer">
-                    Select a registered customer <span className="text-error">Required</span>
-                    <select
-                      id="credit-customer"
-                      className="h-10 rounded-md border border-outline-variant/30 bg-surface-container-lowest px-3 text-on-surface"
-                      value=""
-                      required
-                      onChange={(e) => {
-                        setCustomerName(e.target.value);
-                        setCustomerType('registered');
-                      }}
-                    >
-                      <option value="" disabled>Select customer</option>
-                      {customers.map((customer) => (
-                        <option key={customer.id} value={customer.name}>
-                          {customer.name}{customer.phone ? ` · ${customer.phone}` : ''}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                  <p role="status" className="rounded-md bg-surface-container-highest px-3 py-2 text-sm text-on-surface-variant">
+                    Choose a registered customer in the Customer field above to complete a credit sale.
+                  </p>
                 ) : (
                   <p className="text-sm text-on-surface-variant">
-                    Credit sale for <strong className="text-on-surface">{customerName}</strong>.
+                    Credit sale for{" "}
+                    <strong className="text-on-surface">{customerName}</strong>.
                   </p>
                 )}
                 <div className="flex flex-col mt-1">
@@ -637,13 +930,17 @@ export const SalesBillEntryView: React.FC = () => {
                   />
                 </div>
                 <div className="p-2 bg-surface-container-highest rounded text-on-surface-variant font-label-sm text-label-sm flex items-center gap-1 mt-1">
-                  <span className="material-symbols-outlined text-[16px] text-primary">info</span>
-                  <span>The unpaid balance will be added to this customer’s account.</span>
+                  <span className="material-symbols-outlined text-[16px] text-primary">
+                    info
+                  </span>
+                  <span>
+                    The unpaid balance will be added to this customer’s account.
+                  </span>
                 </div>
               </div>
             )}
 
-            {paymentMode === 'UPI' && (
+            {paymentMode === "UPI" && (
               <div className="flex flex-col gap-space-xs bg-surface-container-low p-space-sm rounded-lg border border-outline-variant/20">
                 <div className="flex flex-col">
                   <label className="font-label-sm text-label-sm text-on-surface-variant mb-1">
@@ -664,12 +961,14 @@ export const SalesBillEntryView: React.FC = () => {
             <div className="flex flex-col gap-space-xs pt-1">
               <button
                 type="button"
-                disabled={cartItems.length === 0}
+                disabled={savingSale || cartItems.length === 0}
                 className="w-full min-h-11 bg-primary-container text-on-primary rounded-lg font-title-md text-title-md font-semibold hover:bg-primary transition-colors flex items-center justify-center gap-space-sm shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
                 onClick={handleCompleteSale}
               >
-                <span className="material-symbols-outlined text-[20px]">check_circle</span>
-                <span>Complete sale</span>
+                <span className="material-symbols-outlined text-[20px]">
+                  {savingSale ? "hourglass_top" : "check_circle"}
+                </span>
+                <span>{savingSale ? "Saving sale…" : "Complete sale"}</span>
               </button>
 
               <div className="grid grid-cols-1 gap-space-xs">
@@ -678,14 +977,15 @@ export const SalesBillEntryView: React.FC = () => {
                   className="h-8 px-space-sm bg-surface-container text-on-surface rounded font-label-md text-label-md font-medium hover:bg-surface-container-high transition-colors flex items-center justify-center gap-1"
                   onClick={handlePrintCurrentReceipt}
                 >
-                  <span className="material-symbols-outlined text-[16px]">print</span>
+                  <span className="material-symbols-outlined text-[16px]">
+                    print
+                  </span>
                   <span>Print Receipt</span>
                 </button>
               </div>
             </div>
           </section>
         </div>
-      </div>
     </div>
   );
 };

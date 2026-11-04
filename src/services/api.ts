@@ -13,9 +13,23 @@ export interface AuthSession {
 }
 
 interface ApiEnvelope<T> {
+  success?: boolean;
   data?: T;
   meta?: { total: number; page: number; limit: number; totalPages: number };
   error?: string;
+  message?: string;
+  errors?: Array<{ field?: string; message?: string }>;
+}
+
+export class ApiClientError extends Error {
+  constructor(
+    message: string,
+    public readonly status?: number,
+    public readonly fieldErrors: Array<{ field?: string; message?: string }> = [],
+  ) {
+    super(message);
+    this.name = 'ApiClientError';
+  }
 }
 
 const API_BASE_URL = import.meta.env.API_BASE_URL.replace(/\/$/, '');
@@ -43,7 +57,14 @@ async function requestEnvelope<T>(
 
     const body = (await response.json().catch(() => ({}))) as ApiEnvelope<T>;
     if (!response.ok) {
-      throw new Error(body.error || `Request failed (${response.status})`);
+      throw new ApiClientError(
+        body.message || body.error || `Request failed (${response.status})`,
+        response.status,
+        body.errors || [],
+      );
+    }
+    if (response.status === 204) {
+      return body;
     }
     if (body.data === undefined) {
       throw new Error('The API returned an unexpected response.');
@@ -64,6 +85,7 @@ async function requestEnvelope<T>(
 
 export async function apiRequest<T>(path: string, options: RequestInit = {}, token?: string): Promise<T> {
   const response = await requestEnvelope<T>(path, options, token);
+  if (response.data === undefined) return undefined as T;
   return response.data as T;
 }
 
@@ -108,15 +130,16 @@ export interface ApiBrand {
 export interface ApiUnit {
   id: string;
   name: string;
-  symbol?: string;
+  symbol?: string | null;
   active?: boolean;
+  allowsDecimals: boolean;
 }
 
 export interface ApiProduct {
   id: string;
   name: string;
   brandId?: string;
-  unitId?: string;
+  unitId: string;
   sellingPrice: string | number;
   mrp: string | number;
   sku?: string;
@@ -124,7 +147,9 @@ export interface ApiProduct {
   brand?: string | ApiBrand;
   unit?: string | ApiUnit;
   brandName?: string;
-  unitName?: string;
+  unitName: string;
+  unitSymbol: string | null;
+  unitAllowsDecimals: boolean;
   active?: boolean;
   createdAt?: string;
   updatedAt?: string;
@@ -133,6 +158,8 @@ export interface ApiProduct {
 export interface CreateSalePayload {
   customerId?: string;
   discountAmount?: number;
+  couponCode?: string;
+  couponPrice?: number;
   items: Array<{
     productId: string;
     quantity: number;
@@ -155,6 +182,29 @@ export interface ApiSale {
     totalAmount: string | number;
   }>;
   createdAt?: string;
+}
+
+export interface ApiCoupon {
+  id: string;
+  code: string;
+  price: string | number;
+  isSaleBased: boolean;
+  saleId?: string | null;
+  sale?: { id: string; invoiceNumber: string } | null;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface CouponPayload {
+  code: string;
+  price: number;
+}
+
+export type CouponFilter = 'all' | 'sales-based' | 'non-sale-based';
+
+export interface ApiPage<T> {
+  data: T[];
+  meta?: { total: number; page: number; limit: number; totalPages: number };
 }
 
 export interface CreatePurchasePayload {
@@ -241,8 +291,11 @@ export const getUnits = (token: string) => getAllPages<ApiUnit>('/units', token)
 export const createBrandRequest = (token: string, name: string) =>
   apiRequest<ApiBrand>('/brands', { method: 'POST', body: JSON.stringify({ name, active: true }) }, token);
 
-export const createUnitRequest = (token: string, name: string, symbol: string) =>
-  apiRequest<ApiUnit>('/units', { method: 'POST', body: JSON.stringify({ name, symbol, active: true }) }, token);
+export const createUnitRequest = (token: string, payload: { name: string; symbol: string | null; allowsDecimals: boolean }) =>
+  apiRequest<ApiUnit>('/units', { method: 'POST', body: JSON.stringify({ ...payload, active: true }) }, token);
+
+export const updateUnitRequest = (token: string, id: string, payload: Partial<{ name: string; symbol: string | null; allowsDecimals: boolean }>) =>
+  apiRequest<ApiUnit>(`/units/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(payload) }, token);
 
 export const getCustomers = (token: string) => getAllPages<ApiCustomer>('/customers', token);
 
@@ -271,6 +324,51 @@ export const createStockAdjustmentRequest = (token: string, payload: StockAdjust
 
 export const createSaleRequest = (token: string, payload: CreateSalePayload) =>
   apiRequest<ApiSale>('/sales', { method: 'POST', body: JSON.stringify(payload) }, token);
+
+export const getCouponsRequest = async (
+  token: string,
+  type: CouponFilter,
+  page = 1,
+  limit = 100,
+): Promise<ApiPage<ApiCoupon>> => {
+  const query = new URLSearchParams({ type, page: String(page), limit: String(limit) });
+  const response = await requestEnvelope<ApiCoupon[]>(`/coupons?${query.toString()}`, {}, token);
+  return { data: response.data || [], meta: response.meta };
+};
+
+export async function getAllCouponsRequest(token: string, type: CouponFilter): Promise<ApiCoupon[]> {
+  const coupons: ApiCoupon[] = [];
+  let page = 1;
+  let totalPages = 1;
+  do {
+    const result = await getCouponsRequest(token, type, page);
+    coupons.push(...result.data);
+    totalPages = result.meta?.totalPages ?? page;
+    page += 1;
+  } while (page <= totalPages && page <= 100);
+  return coupons;
+}
+
+export const getCouponRequest = (token: string, id: string) =>
+  apiRequest<ApiCoupon>(`/coupons/${encodeURIComponent(id)}`, {}, token);
+
+export const createCouponRequest = (token: string, payload: CouponPayload) =>
+  apiRequest<ApiCoupon>('/coupons', {
+    method: 'POST',
+    body: JSON.stringify({ ...payload, code: payload.code.trim().toUpperCase() }),
+  }, token);
+
+export const updateCouponRequest = (token: string, id: string, payload: Partial<CouponPayload>) =>
+  apiRequest<ApiCoupon>(`/coupons/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      ...payload,
+      ...(payload.code !== undefined ? { code: payload.code.trim().toUpperCase() } : {}),
+    }),
+  }, token);
+
+export const deleteCouponRequest = (token: string, id: string) =>
+  apiRequest<void>(`/coupons/${encodeURIComponent(id)}`, { method: 'DELETE' }, token);
 
 export const createPurchaseRequest = (token: string, payload: CreatePurchasePayload) =>
   apiRequest<ApiPurchase>('/purchases', { method: 'POST', body: JSON.stringify(payload) }, token);

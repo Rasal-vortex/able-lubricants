@@ -2,11 +2,13 @@ import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { Product } from '../types';
 import { formatCurrency } from '../utils/currency';
+import { UnitEditorModal } from '../components/UnitEditorModal';
+import { isUnitQuantityValid, quantityStep } from '../utils/unitQuantity';
 
 const isUuid = (value: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 
 export const ProductEntryView: React.FC = () => {
-  const { authSession, products, brands, units, createBrand, createUnit, addProduct, updateProduct, adjustProductStock, deleteProduct, masterDataLoading, masterDataError, catalogLoading, catalogError, showToast } = useApp();
+  const { authSession, products, brands, units, createBrand, createUnit, updateUnit, addProduct, updateProduct, adjustProductStock, deleteProduct, masterDataLoading, masterDataError, catalogLoading, catalogError, showToast } = useApp();
 
   const [searchTerm, setSearchTerm] = useState('');
   const [brandFilter, setBrandFilter] = useState('all');
@@ -26,10 +28,12 @@ export const ProductEntryView: React.FC = () => {
   const [formSellingPrice, setFormSellingPrice] = useState('');
   const [formMRP, setFormMRP] = useState('');
   const [formSaving, setFormSaving] = useState(false);
-  const [catalogModal, setCatalogModal] = useState<'brand' | 'unit' | null>(null);
+  const [catalogModal, setCatalogModal] = useState<'brand' | null>(null);
   const [catalogName, setCatalogName] = useState('');
-  const [catalogSymbol, setCatalogSymbol] = useState('');
   const [catalogSaving, setCatalogSaving] = useState(false);
+  const [unitEditorOpen, setUnitEditorOpen] = useState(false);
+  const [unitManagerOpen, setUnitManagerOpen] = useState(false);
+  const [editingUnit, setEditingUnit] = useState<(typeof units)[number] | undefined>();
 
   // Filtering
   const filteredProducts = products.filter((p) => {
@@ -53,6 +57,8 @@ export const ProductEntryView: React.FC = () => {
   const productBeingEdited = drawerMode === 'edit' ? products.find((product) => product.id === editingId) : undefined;
   const isAdmin = authSession?.user.role === 'ADMIN';
   const quantityChanged = Boolean(productBeingEdited && Number(formQty) !== productBeingEdited.quantity);
+  const selectedUnit = units.find((unit) => unit.id === formUnitId);
+  const selectedUnitAllowsDecimals = selectedUnit?.allowsDecimals ?? productBeingEdited?.unitAllowsDecimals ?? false;
 
   const openCreateDrawer = () => {
     setDrawerMode('create');
@@ -91,6 +97,10 @@ export const ProductEntryView: React.FC = () => {
       showToast('Please fill out all required fields with valid values.', 'error');
       return;
     }
+    if (!isUnitQuantityValid(qty, selectedUnitAllowsDecimals)) {
+      showToast(selectedUnitAllowsDecimals ? 'Quantity can have up to 3 decimal places.' : 'This unit only allows whole-number quantities.', 'error');
+      return;
+    }
     if (!isUuid(formBrandId) || !isUuid(formUnitId)) {
       showToast('Choose a brand and unit with valid IDs from the API list, then try again.', 'error');
       return;
@@ -127,16 +137,19 @@ export const ProductEntryView: React.FC = () => {
   };
 
   const openCatalogModal = (kind: 'brand' | 'unit') => {
-    setCatalogModal(kind);
+    if (kind === 'unit') {
+      setEditingUnit(undefined);
+      setUnitEditorOpen(true);
+      return;
+    }
+    setCatalogModal('brand');
     setCatalogName('');
-    setCatalogSymbol('');
   };
 
   const saveCatalogOption = async () => {
     const name = catalogName.trim();
-    const symbol = catalogSymbol.trim();
-    if (!name || (catalogModal === 'unit' && !symbol)) {
-      showToast(catalogModal === 'unit' ? 'Enter both a unit name and symbol.' : 'Enter a brand name.', 'error');
+    if (!name) {
+      showToast('Enter a brand name.', 'error');
       return;
     }
 
@@ -145,18 +158,21 @@ export const ProductEntryView: React.FC = () => {
       if (catalogModal === 'brand') {
         const brand = await createBrand(name);
         setFormBrandId(brand.id);
-      } else if (catalogModal === 'unit') {
-        const unit = await createUnit(name, symbol);
-        setFormUnitId(unit.id);
       }
       setCatalogModal(null);
       setCatalogName('');
-      setCatalogSymbol('');
     } catch (error) {
       showToast(error instanceof Error ? error.message : `Unable to add the ${catalogModal || 'option'}.`, 'error');
     } finally {
       setCatalogSaving(false);
     }
+  };
+
+  const saveUnit = async (payload: { id?: string; name: string; symbol: string | null; allowsDecimals: boolean }) => {
+    const unit = payload.id
+      ? await updateUnit(payload.id, { name: payload.name, symbol: payload.symbol, allowsDecimals: payload.allowsDecimals })
+      : await createUnit(payload.name, payload.symbol, payload.allowsDecimals);
+    setFormUnitId(unit.id);
   };
 
   const handleDelete = async (id: string, name: string) => {
@@ -469,16 +485,18 @@ export const ProductEntryView: React.FC = () => {
                 </div>
                 <div className="flex flex-col gap-1.5 text-[12px] font-medium text-on-surface">
                   <label>Unit
-                    <select required value={formUnitId} onChange={(e) => setFormUnitId(e.target.value)} disabled={catalogLoading} className="mt-1.5 h-8 w-full px-2 bg-surface-container-low border border-outline-variant rounded text-on-surface font-normal">
+                    <select required value={formUnitId} onChange={(e) => setFormUnitId(e.target.value)} disabled={catalogLoading || drawerMode === 'edit'} className="mt-1.5 h-8 w-full px-2 bg-surface-container-low border border-outline-variant rounded text-on-surface font-normal disabled:opacity-70">
                       <option value="">{catalogLoading ? 'Loading units…' : 'Select unit'}</option>
                       {units.map((unit) => <option key={unit.id} value={unit.id}>{unit.name}{unit.symbol ? ` (${unit.symbol})` : ''}</option>)}
                     </select>
                   </label>
                   <button type="button" className="self-start text-primary text-xs" onClick={() => openCatalogModal('unit')}>+ Add unit</button>
+                  <button type="button" className="self-start text-primary text-xs" onClick={() => setUnitManagerOpen(true)}>Manage units</button>
+                  {drawerMode === 'edit' && <span className="text-[11px] font-normal text-on-surface-variant">Existing products keep their unit; rename it in Manage units if needed.</span>}
                 </div>
               </div>
               <label className="flex flex-col gap-1.5 text-[12px] font-medium text-on-surface">Qty
-                <input required type="number" min="0" step="0.001" value={formQty} onChange={(e) => setFormQty(e.target.value)} readOnly={drawerMode === 'edit' && !isAdmin} className="h-8 px-2 bg-surface-container-low border border-outline-variant rounded text-on-surface font-normal read-only:opacity-70" />
+                <input required type="number" min="0" step={quantityStep(selectedUnitAllowsDecimals)} value={formQty} onChange={(e) => setFormQty(e.target.value)} readOnly={drawerMode === 'edit' && !isAdmin} className="h-8 px-2 bg-surface-container-low border border-outline-variant rounded text-on-surface font-normal read-only:opacity-70" />
                 {drawerMode === 'edit' && !isAdmin && <span className="text-[11px] font-normal text-on-surface-variant">Only Admin users can adjust stock.</span>}
               </label>
               {drawerMode === 'edit' && isAdmin && quantityChanged && <label className="flex flex-col gap-1.5 text-[12px] font-medium text-on-surface">Stock adjustment reason
@@ -560,20 +578,29 @@ export const ProductEntryView: React.FC = () => {
                   <h3 id="catalog-modal-title" className="mt-1 text-lg font-semibold text-on-surface">Add {catalogModal}</h3>
                   <p className="mt-1 text-sm text-on-surface-variant">This will be saved to your catalog for future products.</p>
                 </div>
-                <div className="flex flex-col gap-space-sm">
-                  <label className="flex flex-col gap-1 text-sm font-medium text-on-surface">{catalogModal === 'brand' ? 'Brand name' : 'Unit name'}
-                    <input autoFocus value={catalogName} onChange={(event) => setCatalogName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void saveCatalogOption(); } }} placeholder={catalogModal === 'brand' ? 'e.g. Castrol' : 'e.g. Litre'} className="h-10 rounded-md border border-outline-variant/50 bg-surface-container-low px-3 text-on-surface outline-none focus:border-primary focus:ring-2 focus:ring-primary/20" />
-                  </label>
-                  {catalogModal === 'unit' && <label className="flex flex-col gap-1 text-sm font-medium text-on-surface">Unit symbol
-                    <input value={catalogSymbol} onChange={(event) => setCatalogSymbol(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void saveCatalogOption(); } }} placeholder="e.g. L" className="h-10 rounded-md border border-outline-variant/50 bg-surface-container-low px-3 text-on-surface outline-none focus:border-primary focus:ring-2 focus:ring-primary/20" />
-                  </label>}
-                </div>
+                <label className="flex flex-col gap-1 text-sm font-medium text-on-surface">Brand name
+                  <input autoFocus value={catalogName} onChange={(event) => setCatalogName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void saveCatalogOption(); } }} placeholder="e.g. Castrol" className="h-10 rounded-md border border-outline-variant/50 bg-surface-container-low px-3 text-on-surface outline-none focus:border-primary focus:ring-2 focus:ring-primary/20" />
+                </label>
                 <div className="mt-space-lg flex justify-end gap-space-sm border-t border-outline-variant/20 pt-space-md">
                   <button type="button" disabled={catalogSaving} onClick={() => setCatalogModal(null)} className="h-9 rounded-md border border-outline-variant/40 px-4 text-sm text-on-surface disabled:opacity-50">Cancel</button>
                   <button type="button" disabled={catalogSaving} onClick={() => void saveCatalogOption()} className="h-9 rounded-md bg-primary-container px-4 text-sm font-semibold text-on-primary disabled:opacity-60">{catalogSaving ? 'Saving…' : `Save ${catalogModal}`}</button>
                 </div>
               </section>
             </div>}
+            {unitManagerOpen && <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-4" onMouseDown={(event) => { if (event.target === event.currentTarget) setUnitManagerOpen(false); }}>
+              <section role="dialog" aria-modal="true" aria-labelledby="unit-manager-title" className="w-full max-w-md rounded-xl bg-white p-5 shadow-xl">
+                <div className="flex items-center justify-between gap-3">
+                  <div><h3 id="unit-manager-title" className="text-lg font-semibold text-on-surface">Manage units</h3><p className="text-sm text-on-surface-variant">Rename units without changing product references.</p></div>
+                  <button type="button" onClick={() => setUnitManagerOpen(false)} aria-label="Close" className="rounded px-2 py-1 text-on-surface-variant hover:bg-surface-container-low">✕</button>
+                </div>
+                <ul className="mt-4 max-h-72 divide-y divide-outline-variant/20 overflow-y-auto">
+                  {units.map((unit) => <li key={unit.id} className="flex items-center justify-between gap-3 py-2.5 text-sm"><span className="text-on-surface">{unit.name}{unit.symbol ? ` (${unit.symbol})` : ''}{unit.allowsDecimals ? ' · decimals' : ''}</span><button type="button" onClick={() => { setEditingUnit(unit); setUnitEditorOpen(true); }} className="rounded px-3 py-1 text-primary hover:bg-primary/10">Edit</button></li>)}
+                  {!units.length && <li className="py-5 text-center text-sm text-on-surface-variant">No units found.</li>}
+                </ul>
+                <div className="mt-4 flex justify-end"><button type="button" onClick={() => setUnitManagerOpen(false)} className="h-9 rounded-md border border-outline-variant/40 px-4 text-sm text-on-surface">Done</button></div>
+              </section>
+            </div>}
+            {unitEditorOpen && <UnitEditorModal key={editingUnit?.id || 'new-unit'} units={units} unit={editingUnit} onSave={saveUnit} onClose={() => { setUnitEditorOpen(false); setEditingUnit(undefined); }} />}
           </div>
         </div>
       )}

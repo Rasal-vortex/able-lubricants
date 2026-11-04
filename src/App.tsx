@@ -20,6 +20,7 @@ import { PurchaseBillEntryView } from './views/PurchaseBillEntryView';
 import { PartyLedgerManagementView } from './views/PartyLedgerManagementView';
 import { ReportsProfitView } from './views/ReportsProfitView';
 import { LoginView } from './views/LoginView';
+import { CouponsView } from './views/CouponsView';
 
 const MainLayout: React.FC = () => {
   const { activeScreen, authSession } = useApp();
@@ -36,6 +37,8 @@ const MainLayout: React.FC = () => {
         return <SalesBillEntryView />;
       case 'credit-bill-management':
         return <CreditBillManagementView />;
+      case 'coupons':
+        return <CouponsView />;
       case 'daily-sales-management':
         return <DailySalesManagementView />;
       case 'expense-management':
@@ -57,13 +60,13 @@ const MainLayout: React.FC = () => {
       <Sidebar />
 
       {/* Main Container Area */}
-      <div className="pl-[232px] flex-1 flex flex-col min-w-0">
+      <div className="min-w-0 flex-1 flex flex-col pl-[190px]">
         {/* Top Fixed Header */}
         <Header />
 
         {/* Primary Page Canvas */}
-        <main className="relative pt-[72px] bg-surface min-h-screen px-6 py-5">
-          <div className="max-w-7xl mx-auto w-full">
+        <main className={`relative min-h-screen bg-[#f8f5f0] px-3 pb-6 pt-[68px] sm:px-3 sm:pb-8 ${activeScreen === 'dashboard' ? 'dashboard-canvas' : ''}`}>
+          <div className={`${activeScreen === 'dashboard' ? 'w-full' : 'mx-auto w-full max-w-7xl'}`}>
             {renderActiveScreen()}
           </div>
         </main>

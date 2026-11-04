@@ -10,14 +10,6 @@ import {
   Party,
 } from '../types';
 import {
-  INITIAL_SALES,
-  INITIAL_CREDIT_BILLS,
-  INITIAL_EXPENSES,
-  INITIAL_PURCHASES,
-  INITIAL_PARTY_LEDGER,
-  INITIAL_SUPPLIER_LEDGER,
-} from '../data/initialData';
-import {
   ApiProduct,
   ApiCustomer,
   ApiBrand,
@@ -31,6 +23,7 @@ import {
   createCustomerRequest,
   createBrandRequest,
   createUnitRequest,
+  updateUnitRequest,
   createProductRequest,
   createStockAdjustmentRequest,
   createSaleRequest,
@@ -56,6 +49,8 @@ import {
   UserRole,
 } from '../services/api';
 import { formatCurrency } from '../utils/currency';
+import { getSaleCouponErrorMessage, normalizeCouponCode } from '../utils/coupons';
+import { isUnitQuantityValid } from '../utils/unitQuantity';
 
 const toPaymentMethodLabel = (method: PaymentMethod) => ({
   CASH: 'Cash',
@@ -82,12 +77,28 @@ const loadAuthSession = (): AuthSession | null => {
   }
 };
 
-const loadDemoData = <T,>(key: string, initial: T): T => {
+const DEMO_RECORD_IDS: Record<string, Set<string>> = {
+  sales: new Set(['sale-1', 'sale-2', 'sale-3', 'sale-4', 'sale-5']),
+  credit_bills: new Set(['cr-1', 'cr-2']),
+  expenses: new Set(['exp-1', 'exp-2', 'exp-3', 'exp-4']),
+  purchases: new Set(['pur-1', 'pur-2', 'pur-3']),
+  customer_ledger: new Set(['pl-cr-1', 'pl-cr-2', 'pl-payment-cr-2']),
+  supplier_ledger: new Set([
+    'sl-pur-1', 'sl-pur-2', 'sl-pur-3',
+    'sl-payment-pur-1', 'sl-payment-pur-2', 'sl-payment-pur-3',
+  ]),
+};
+
+const loadSavedData = <T extends { id: string }>(key: string): T[] => {
   try {
     const value = localStorage.getItem(DEMO_STORAGE_PREFIX + key);
-    return value ? JSON.parse(value) as T : initial;
+    if (!value) return [];
+    const records = JSON.parse(value) as T[];
+    if (!Array.isArray(records)) return [];
+    const demoIds = DEMO_RECORD_IDS[key] || new Set<string>();
+    return records.filter((record) => !demoIds.has(record.id));
   } catch {
-    return initial;
+    return [];
   }
 };
 
@@ -96,10 +107,12 @@ const mapProduct = (product: ApiProduct): Product => ({
   name: product.name,
   sku: product.sku || '',
   brandId: product.brandId || (typeof product.brand === 'object' ? product.brand?.id : undefined),
-  unitId: product.unitId || (typeof product.unit === 'object' ? product.unit?.id : undefined),
+  unitId: product.unitId,
   hsn: '',
   brand: typeof product.brand === 'string' ? product.brand : product.brand?.name || product.brandName || '',
-  unit: typeof product.unit === 'string' ? product.unit : product.unit?.symbol || product.unit?.name || product.unitName || '',
+  unit: product.unitSymbol || (typeof product.unit === 'object' ? product.unit?.symbol : undefined) || product.unitName || (typeof product.unit === 'string' ? product.unit : undefined) || (typeof product.unit === 'object' ? product.unit?.name : undefined) || '',
+  unitName: product.unitName || (typeof product.unit === 'object' ? product.unit?.name : undefined) || (typeof product.unit === 'string' ? product.unit : undefined) || product.unitSymbol || '',
+  unitAllowsDecimals: product.unitAllowsDecimals ?? (typeof product.unit === 'object' ? product.unit?.allowsDecimals : undefined) ?? false,
   sellingPrice: Number(product.sellingPrice),
   purchaseRate: 0,
   mrp: Number(product.mrp),
@@ -129,7 +142,7 @@ const mapSupplier = (supplier: ApiSupplier): Party => ({
 interface ToastInfo {
   id: string;
   message: string;
-  type?: 'success' | 'info' | 'error';
+  type?: 'success' | 'info' | 'warning' | 'error';
 }
 
 interface AppContextType {
@@ -149,7 +162,7 @@ interface AppContextType {
   searchModalOpen: boolean;
   setSearchModalOpen: (open: boolean) => void;
   toast: ToastInfo | null;
-  showToast: (message: string, type?: 'success' | 'info' | 'error') => void;
+  showToast: (message: string, type?: 'success' | 'info' | 'warning' | 'error') => void;
   hideToast: () => void;
 
   // Products
@@ -157,8 +170,9 @@ interface AppContextType {
   brands: ApiBrand[];
   units: ApiUnit[];
   createBrand: (name: string) => Promise<ApiBrand>;
-  createUnit: (name: string, symbol: string) => Promise<ApiUnit>;
-  addProduct: (product: CreateProductPayload) => Promise<void>;
+  createUnit: (name: string, symbol: string | null, allowsDecimals: boolean) => Promise<ApiUnit>;
+  updateUnit: (id: string, payload: { name: string; symbol: string | null; allowsDecimals: boolean }) => Promise<ApiUnit>;
+  addProduct: (product: CreateProductPayload) => Promise<Product>;
   updateProduct: (id: string, updates: Partial<ProductPayload>) => Promise<void>;
   adjustProductStock: (id: string, quantity: number, reason: string) => Promise<void>;
   deleteProduct: (id: string) => Promise<void>;
@@ -214,6 +228,8 @@ interface AppContextType {
     items?: Array<{ name: string; qty: number; price: number; total: number }>;
     subtotal?: number;
     billDiscount?: number;
+    couponCode?: string;
+    couponDiscount?: number;
     total: number;
     mode: string;
   } | null;
@@ -245,16 +261,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [activeReceiptToPrint, setActiveReceiptToPrint] = useState<any>(null);
 
-  // Demo data is isolated under versioned keys so it can be replaced by the API adapter later.
+  // Records without a backend list endpoint are kept locally, with no seeded sample records.
   const [products, setProducts] = useState<Product[]>([]);
   const [brands, setBrands] = useState<ApiBrand[]>([]);
   const [units, setUnits] = useState<ApiUnit[]>([]);
-  const [sales, setSales] = useState<SaleRecord[]>(() => loadDemoData('sales', INITIAL_SALES));
-  const [creditBills, setCreditBills] = useState<CreditBill[]>(() => loadDemoData('credit_bills', INITIAL_CREDIT_BILLS));
-  const [expenses, setExpenses] = useState<Expense[]>(() => loadDemoData('expenses', INITIAL_EXPENSES));
-  const [purchases, setPurchases] = useState<PurchaseBill[]>(() => loadDemoData('purchases', INITIAL_PURCHASES));
-  const [partyLedger, setPartyLedger] = useState<PartyLedgerEntry[]>(() => loadDemoData('customer_ledger', INITIAL_PARTY_LEDGER));
-  const [supplierLedger, setSupplierLedger] = useState<PartyLedgerEntry[]>(() => loadDemoData('supplier_ledger', INITIAL_SUPPLIER_LEDGER));
+  const [sales, setSales] = useState<SaleRecord[]>(() => loadSavedData('sales'));
+  const [creditBills, setCreditBills] = useState<CreditBill[]>(() => loadSavedData('credit_bills'));
+  const [expenses, setExpenses] = useState<Expense[]>(() => loadSavedData('expenses'));
+  const [purchases, setPurchases] = useState<PurchaseBill[]>(() => loadSavedData('purchases'));
+  const [partyLedger, setPartyLedger] = useState<PartyLedgerEntry[]>(() => loadSavedData('customer_ledger'));
+  const [supplierLedger, setSupplierLedger] = useState<PartyLedgerEntry[]>(() => loadSavedData('supplier_ledger'));
   const [customers, setCustomers] = useState<Party[]>([]);
   const [suppliers, setSuppliers] = useState<Party[]>([]);
 
@@ -399,7 +415,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  const showToast = (message: string, type: 'success' | 'info' | 'error' = 'success') => {
+  const showToast = (message: string, type: 'success' | 'info' | 'warning' | 'error' = 'success') => {
     const id = Date.now().toString();
     setToast({ id, message, type });
   };
@@ -439,15 +455,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return created;
   };
 
-  const createUnit = async (name: string, symbol: string) => {
+  const createUnit = async (name: string, symbol: string | null, allowsDecimals: boolean) => {
     if (!authSession) throw new Error('Sign in to add units.');
-    const existing = units.find((unit) => unit.name.trim().toLowerCase() === name.trim().toLowerCase() || unit.symbol?.trim().toLowerCase() === symbol.trim().toLowerCase());
-    if (existing) return existing;
-    const created = await createUnitRequest(authSession.token, name.trim(), symbol.trim());
+    const existing = units.find((unit) => unit.name.trim().toLowerCase() === name.trim().toLowerCase());
+    if (existing) throw new Error('A unit with this name already exists.');
+    const created = await createUnitRequest(authSession.token, { name: name.trim(), symbol: symbol?.trim() || null, allowsDecimals });
     if (!isUuid(created.id)) throw new Error('The API created the unit but did not return a valid unit UUID.');
     setUnits((previous) => [created, ...previous]);
     showToast(`Unit "${created.name}" added.`);
     return created;
+  };
+
+  const updateUnit = async (id: string, payload: { name: string; symbol: string | null; allowsDecimals: boolean }) => {
+    if (!authSession) throw new Error('Sign in to update units.');
+    const existing = units.find((unit) => unit.id !== id && unit.name.trim().toLowerCase() === payload.name.trim().toLowerCase());
+    if (existing) throw new Error('A unit with this name already exists.');
+    const updated = await updateUnitRequest(authSession.token, id, {
+      name: payload.name.trim(),
+      symbol: payload.symbol?.trim() || null,
+      allowsDecimals: payload.allowsDecimals,
+    });
+    setUnits((previous) => previous.map((unit) => unit.id === id ? updated : unit));
+    setProducts((previous) => previous.map((product) => product.unitId === id ? {
+      ...product,
+      unit: updated.symbol || updated.name,
+      unitAllowsDecimals: updated.allowsDecimals ?? false,
+    } : product));
+    showToast(`Unit "${updated.name}" updated.`);
+    return updated;
   };
 
   const addProduct = async (prodData: CreateProductPayload) => {
@@ -456,6 +491,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const newProduct = mapProduct(created);
     setProducts((prev) => [newProduct, ...prev]);
     showToast(`Product "${newProduct.name}" added to catalog.`);
+    return newProduct;
   };
 
   const updateProduct = async (id: string, updates: Partial<ProductPayload>) => {
@@ -469,6 +505,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const unit = units.find((candidate) => candidate.id === updates.unitId);
         return unit?.symbol || unit?.name || product.unit;
       })() : product.unit,
+      unitAllowsDecimals: updates.unitId ? units.find((candidate) => candidate.id === updates.unitId)?.allowsDecimals ?? false : product.unitAllowsDecimals,
     } : product));
     showToast(`Product details updated successfully.`);
   };
@@ -476,7 +513,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const adjustProductStock = async (id: string, desiredQuantity: number, reason: string) => {
     if (!authSession) throw new Error('Sign in to adjust product stock.');
     if (authSession.user.role !== 'ADMIN') throw new Error('Only Admin users can adjust product stock.');
+    const product = products.find((entry) => entry.id === id);
+    if (!product) throw new Error('Product is no longer in the catalog.');
     if (!Number.isFinite(desiredQuantity) || desiredQuantity < 0) throw new Error('Enter a valid non-negative quantity.');
+    if (!isUnitQuantityValid(desiredQuantity, product.unitAllowsDecimals ?? false)) {
+      throw new Error(product.unitAllowsDecimals ? 'Quantity can have up to 3 decimal places.' : 'This unit only allows whole-number quantities.');
+    }
     if (!reason.trim()) throw new Error('Enter a reason for changing the stock quantity.');
 
     const current = await getProductRequest(authSession.token, id);
@@ -600,6 +642,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       showToast('Add at least one catalog product to the bill.', 'error');
       return false;
     }
+    const invalidQuantity = requested.find((item) => {
+      const product = products.find((candidate) => candidate.id === item.productId);
+      return !isUnitQuantityValid(item.quantity, product?.unitAllowsDecimals ?? false);
+    });
+    if (invalidQuantity) {
+      const product = products.find((candidate) => candidate.id === invalidQuantity.productId);
+      showToast(product?.unitAllowsDecimals ? 'Quantity can have up to 3 decimal places.' : 'This unit only allows whole-number quantities.', 'error');
+      return false;
+    }
     const quantityByProduct = requested.reduce<Record<string, number>>((totals, item) => {
       totals[item.productId] = (totals[item.productId] || 0) + item.quantity;
       return totals;
@@ -627,6 +678,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const payload: CreateSalePayload = {
       ...(customer ? { customerId: customer.id } : {}),
       discountAmount: saleData.billDiscountAmount || 0,
+      ...(saleData.couponCode && saleData.couponPrice !== undefined
+        ? {
+            couponCode: normalizeCouponCode(saleData.couponCode),
+            couponPrice: saleData.couponPrice,
+          }
+        : {}),
       items: requested.map((item) => ({
         productId: item.productId,
         quantity: item.quantity,
@@ -638,7 +695,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       apiSale = await createSaleRequest(authSession.token, payload);
     } catch (error) {
-      showToast(error instanceof Error ? error.message : 'The sale could not be saved.', 'error');
+      showToast(
+        saleData.couponCode
+          ? getSaleCouponErrorMessage(error)
+          : error instanceof Error ? error.message : 'The sale could not be saved.',
+        'error',
+      );
       return false;
     }
 
@@ -804,6 +866,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const items = billData.items.filter((item) => item.productId && item.quantity > 0);
     if (!items.length || items.length !== billData.items.length) {
       showToast('Choose a catalog product and valid quantity for every purchase line.', 'error');
+      return false;
+    }
+    const invalidQuantity = items.find((item) => {
+      const product = products.find((candidate) => candidate.id === item.productId);
+      return !isUnitQuantityValid(item.quantity, product?.unitAllowsDecimals ?? false);
+    });
+    if (invalidQuantity) {
+      const product = products.find((candidate) => candidate.id === invalidQuantity.productId);
+      showToast(product?.unitAllowsDecimals ? 'Quantity can have up to 3 decimal places.' : 'This unit only allows whole-number quantities.', 'error');
       return false;
     }
 
@@ -1098,6 +1169,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         units,
         createBrand,
         createUnit,
+    updateUnit,
         addProduct,
         updateProduct,
         adjustProductStock,

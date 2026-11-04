@@ -115,7 +115,7 @@ export const GlobalSearchModal: React.FC = () => {
                       <div className="flex flex-col">
                         <span className="font-body-md text-body-md font-medium text-on-surface">{p.name}</span>
                         <span className="font-data-mono-sm text-data-mono-sm text-on-surface-variant">
-                          {p.sku} • {p.brand} • In Stock: {p.quantity} units
+                          {p.sku} • {p.brand} • In Stock: {p.quantity} {p.unit || 'units'}
                         </span>
                       </div>
                       <span className="font-data-mono-md text-data-mono-md font-bold text-primary">

@@ -142,38 +142,16 @@ export const CreditBillManagementView: React.FC = () => {
 
   return (
     <div className="flex flex-col w-full gap-space-md">
-      {/* Page Context & Primary Action Header */}
-      <div className="flex flex-col md:flex-row md:items-center justify-end gap-space-md pb-space-sm">
-        <div className="flex items-center gap-space-sm">
-          <button
-            className="h-8 px-3 rounded-lg bg-surface-container-lowest text-on-surface hover:bg-surface-container-low transition-colors font-label-md text-label-md flex items-center gap-1.5 shadow-sm border border-outline-variant/30"
-            type="button"
-            onClick={handleExportLedger}
-          >
-            <span className="material-symbols-outlined text-[16px] text-on-surface-variant">file_download</span>
-            <span>Export Ledger</span>
-          </button>
-          <button
-            className="h-8 px-3 rounded-lg bg-primary text-on-primary hover:bg-primary-container transition-colors font-label-md text-label-md flex items-center gap-1.5 shadow-sm"
-            onClick={() => setDrawerOpen(true)}
-            type="button"
-          >
-            <span className="material-symbols-outlined text-[18px]">add_circle</span>
-            <span>+ Record Credit Bill</span>
-          </button>
-        </div>
-      </div>
-
       {/* Filter & Search Controls Bar */}
       <div className="w-full bg-surface-container-lowest rounded-xl p-space-md mb-space-md shadow-sm border border-outline-variant/20">
-        <div className="grid grid-cols-1 md:grid-cols-12 gap-space-md items-center">
+        <div className="grid grid-cols-1 gap-3 items-center xl:grid-cols-[minmax(210px,1.2fr)_minmax(280px,1fr)_minmax(135px,.55fr)_auto]">
           {/* Search Input */}
-          <div className="md:col-span-5 relative">
+          <div className="relative min-w-0">
             <span className="material-symbols-outlined absolute left-2.5 top-1/2 -translate-y-1/2 text-outline text-[16px]">
               search
             </span>
             <input
-              className="w-full h-8 pl-8 pr-3 rounded-lg bg-surface-container-low font-body-md text-body-md text-on-surface placeholder:text-outline focus:outline-none focus:bg-surface-container-lowest transition-colors border border-outline-variant/20"
+              className="w-full h-10 pl-9 pr-3 rounded-lg bg-surface-container-low font-body-md text-body-md text-on-surface placeholder:text-outline focus:outline-none focus:bg-surface-container-lowest transition-colors border border-outline-variant/20"
               placeholder="Search by customer name, party, or bill number..."
               type="text"
               value={searchTerm}
@@ -182,25 +160,25 @@ export const CreditBillManagementView: React.FC = () => {
           </div>
 
           {/* Date Range */}
-          <div className="md:col-span-4 flex items-center gap-space-xs">
-            <div className="relative flex-1">
+          <div className="flex min-w-0 items-center gap-2 rounded-lg border border-[#efdcae] bg-[#fff7e7] p-1.5">
+            <div className="relative min-w-0 flex-1">
               <span className="material-symbols-outlined absolute left-2.5 top-1/2 -translate-y-1/2 text-outline text-[15px]">
                 calendar_today
               </span>
               <input
-                className="w-full h-8 pl-8 pr-2 rounded-lg bg-surface-container-low font-data-mono-sm text-data-mono-sm text-on-surface focus:outline-none focus:bg-surface-container-lowest transition-colors border border-outline-variant/20"
+                className="w-full h-9 pl-8 pr-2 rounded-md bg-[#fffdf8] font-data-mono-sm text-data-mono-sm text-on-surface focus:outline-none focus:bg-white transition-colors border border-[#ead8ad]"
                 type="date"
                 value={fromDate}
                 onChange={(e) => setFromDate(e.target.value)}
               />
             </div>
-            <span className="text-outline font-label-sm text-label-sm">to</span>
-            <div className="relative flex-1">
+            <span className="shrink-0 text-[#89795c] font-label-sm text-label-sm">to</span>
+            <div className="relative min-w-0 flex-1">
               <span className="material-symbols-outlined absolute left-2.5 top-1/2 -translate-y-1/2 text-outline text-[15px]">
                 event
               </span>
               <input
-                className="w-full h-8 pl-8 pr-2 rounded-lg bg-surface-container-low font-data-mono-sm text-data-mono-sm text-on-surface focus:outline-none focus:bg-surface-container-lowest transition-colors border border-outline-variant/20"
+                className="w-full h-9 pl-8 pr-2 rounded-md bg-[#fffdf8] font-data-mono-sm text-data-mono-sm text-on-surface focus:outline-none focus:bg-white transition-colors border border-[#ead8ad]"
                 type="date"
                 value={toDate}
                 onChange={(e) => setToDate(e.target.value)}
@@ -208,25 +186,37 @@ export const CreditBillManagementView: React.FC = () => {
             </div>
           </div>
 
-          {/* Status Tabs */}
-          <div className="md:col-span-3 flex items-center justify-end gap-space-xs">
-            <span className="font-label-sm text-label-sm text-on-surface-variant hidden xl:inline">Status:</span>
-            <div className="inline-flex rounded-lg bg-surface-container-low p-0.5 w-full md:w-auto border border-outline-variant/20">
-              {(['All', 'Overdue', 'Partial', 'Unpaid'] as const).map((tab) => (
-                <button
-                  key={tab}
-                  type="button"
-                  onClick={() => setStatusFilter(tab)}
-                  className={`px-2.5 py-1 rounded-lg font-label-sm text-label-sm transition-colors ${
-                    statusFilter === tab
-                      ? 'bg-surface-container-lowest text-primary font-semibold shadow-xs'
-                      : 'text-on-surface-variant hover:text-on-surface'
-                  }`}
-                >
-                  {tab}
-                </button>
-              ))}
-            </div>
+          {/* Status dropdown */}
+          <label className="flex min-w-0 items-center gap-2 text-sm text-on-surface-variant" htmlFor="credit-bill-status-filter">
+            <span>Status</span>
+            <select
+              id="credit-bill-status-filter"
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}
+              className="h-10 min-w-0 flex-1 rounded-lg border border-outline-variant/25 bg-surface-container-low px-3 text-sm font-medium text-on-surface outline-none focus:border-primary"
+            >
+              {(['All', 'Overdue', 'Partial', 'Unpaid'] as const).map((status) => <option key={status} value={status}>{status}</option>)}
+            </select>
+          </label>
+
+          {/* Row actions */}
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <button
+              className="h-10 whitespace-nowrap px-3 rounded-lg bg-surface-container-lowest text-on-surface hover:bg-surface-container-low transition-colors font-label-md text-label-md flex items-center gap-1.5 shadow-sm border border-outline-variant/30"
+              type="button"
+              onClick={handleExportLedger}
+            >
+              <span className="material-symbols-outlined text-[16px] text-on-surface-variant">file_download</span>
+              <span>Export Ledger</span>
+            </button>
+            <button
+              className="h-10 whitespace-nowrap px-3 rounded-lg bg-primary text-on-primary hover:bg-primary-container transition-colors font-label-md text-label-md flex items-center gap-1.5 shadow-sm"
+              onClick={() => setDrawerOpen(true)}
+              type="button"
+            >
+              <span className="material-symbols-outlined text-[18px]">add_circle</span>
+              <span>+ Record Credit Bill</span>
+            </button>
           </div>
         </div>
       </div>
@@ -272,7 +262,7 @@ export const CreditBillManagementView: React.FC = () => {
                     <div className="flex flex-col">
                       <span className="truncate">{bill.partyName}</span>
                       <span className="font-data-mono-sm text-data-mono-sm text-on-surface-variant">
-                        GSTIN: {bill.gstin} • Term: {bill.term}
+                        Term: {bill.term}
                       </span>
                     </div>
                   </td>
@@ -401,9 +391,7 @@ export const CreditBillManagementView: React.FC = () => {
                     Record Credit Bill
                   </span>
                 </div>
-                <span className="font-body-sm text-body-sm text-on-surface-variant mt-0.5">
-                  Post an unpaid or partial invoice to party ledger
-                </span>
+
               </div>
               <button
                 className="p-1 rounded-lg text-outline hover:text-on-surface hover:bg-surface-container transition-colors"
@@ -499,7 +487,6 @@ export const CreditBillManagementView: React.FC = () => {
                   <span className="font-data-mono-lg text-data-mono-lg font-bold text-error">
                     {formatCurrency(priorDue)}
                   </span>
-                  <div className="font-data-mono-sm text-data-mono-sm text-on-surface-variant">Limit: {formatCurrency(10000)}</div>
                 </div>
               </div>
 
@@ -514,7 +501,7 @@ export const CreditBillManagementView: React.FC = () => {
                   </span>
                   <input
                     type="number"
-                    step="0.01"
+                    step="1"
                     min="0"
                     required
                     className="w-full h-8 pl-7 pr-3 rounded-lg bg-surface-container-low font-data-mono-md text-data-mono-md text-on-surface focus:outline-none focus:bg-surface-container-lowest transition-colors border border-outline-variant/20"
@@ -569,10 +556,7 @@ export const CreditBillManagementView: React.FC = () => {
                 />
               </div>
 
-              <div className="flex items-center gap-space-xs text-outline font-data-mono-sm text-data-mono-sm pt-space-xs">
-                <span className="material-symbols-outlined text-[14px]">lock</span>
-                <span>Ledger lock status: Active • Automated reconciliation enabled</span>
-              </div>
+
 
               <div className="p-space-lg bg-surface-container-low flex items-center justify-end gap-space-sm -mx-space-lg -mb-space-lg border-t border-outline-variant/20 mt-4">
                 <button

@@ -28,7 +28,7 @@ export const LoginView: React.FC = () => {
     <main className="min-h-screen w-full bg-surface flex items-center justify-center px-4 py-10">
       <section className="w-full max-w-[420px] rounded-xl border border-outline-variant bg-white p-7 shadow-sm">
         <div className="mb-7 flex items-center gap-3">
-          <span className="material-symbols-outlined flex h-11 w-11 items-center justify-center rounded-xl bg-primary text-white">tire_repair</span>
+          <span className="material-symbols-outlined flex h-11 w-11 items-center justify-center rounded-xl bg-primary text-[#493819]">tire_repair</span>
           <div>
             <h1 className="text-lg font-semibold text-on-surface">Able Lubes</h1>
             <p className="text-sm text-on-surface-variant">Inventory and billing</p>
@@ -86,7 +86,7 @@ export const LoginView: React.FC = () => {
 
           {error && <p role="alert" className="rounded-md bg-error-container px-3 py-2 text-sm text-on-error-container">{error}</p>}
 
-          <button type="submit" disabled={submitting} className="h-11 w-full rounded-md bg-primary text-sm font-semibold text-white transition-opacity hover:opacity-90 disabled:cursor-wait disabled:opacity-60">
+          <button type="submit" disabled={submitting} className="h-11 w-full rounded-md bg-primary text-sm font-semibold text-[#493819] transition-opacity hover:opacity-90 disabled:cursor-wait disabled:opacity-60">
             {submitting ? 'Signing in…' : `Sign in as ${role === 'ADMIN' ? 'Admin' : 'Staff'}`}
           </button>
         </form>

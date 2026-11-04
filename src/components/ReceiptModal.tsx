@@ -7,7 +7,7 @@ export const ReceiptModal: React.FC = () => {
 
   if (!activeReceiptToPrint) return null;
 
-  const { title, refNumber, date, party, items, total, mode, subtotal, billDiscount } = activeReceiptToPrint;
+  const { title, refNumber, date, party, items, total, mode, subtotal, billDiscount, couponCode, couponDiscount } = activeReceiptToPrint;
 
   return (
     <div
@@ -68,7 +68,7 @@ export const ReceiptModal: React.FC = () => {
                   {items.map((it, idx) => (
                     <tr key={idx}>
                       <td className="p-1.5 text-on-surface font-sans">{it.name}</td>
-                      <td className="p-1.5 text-center">{it.qty}</td>
+                      <td className="p-1.5 text-center">{it.qty}{it.unit ? ` ${it.unit}` : ''}</td>
                       <td className="p-1.5 text-right">{formatCurrency(it.price)}</td>
                       <td className="p-1.5 text-right font-semibold">{formatCurrency(it.total)}</td>
                     </tr>
@@ -88,6 +88,12 @@ export const ReceiptModal: React.FC = () => {
                 <span>Bill discount</span>
                 <span className="font-mono">−{formatCurrency(billDiscount)}</span>
               </div>
+              {typeof couponDiscount === 'number' && couponDiscount > 0 && (
+                <div className="flex items-center justify-between text-on-surface-variant">
+                  <span>Coupon{couponCode ? ` (${couponCode})` : ''}</span>
+                  <span className="font-mono">−{formatCurrency(couponDiscount)}</span>
+                </div>
+              )}
             </div>
           )}
 

@@ -3,6 +3,8 @@ import { useApp } from "../context/AppContext";
 import { PurchaseLineItem } from "../types";
 import { formatCurrency } from "../utils/currency";
 import { PaymentMethod } from "../services/api";
+import { UnitEditorModal } from "../components/UnitEditorModal";
+import { isUnitQuantityInputValid, isUnitQuantityValid, quantityStep } from "../utils/unitQuantity";
 
 const localIso = () => {
   const d = new Date();
@@ -16,7 +18,12 @@ export const PurchaseBillEntryView: React.FC = () => {
   const {
     purchases,
     products,
+    brands,
+    units,
+    createBrand,
+    createUnit,
     suppliers,
+    addProduct,
     addPurchaseBill,
     showToast,
   } = useApp();
@@ -40,7 +47,20 @@ export const PurchaseBillEntryView: React.FC = () => {
       totalAmount: 0,
     },
   ]);
+  const [quantityDrafts, setQuantityDrafts] = useState<Record<string, string>>({});
   const [recentSearch, setRecentSearch] = useState("");
+  const [newProductOpen, setNewProductOpen] = useState(false);
+  const [newProductSaving, setNewProductSaving] = useState(false);
+  const [newProductName, setNewProductName] = useState("");
+  const [newProductBrandId, setNewProductBrandId] = useState("");
+  const [newProductUnitId, setNewProductUnitId] = useState("");
+  const [newProductSellingPrice, setNewProductSellingPrice] = useState("");
+  const [newProductMrp, setNewProductMrp] = useState("");
+  const [newProductPurchaseRate, setNewProductPurchaseRate] = useState("");
+  const [catalogModal, setCatalogModal] = useState<"brand" | null>(null);
+  const [catalogName, setCatalogName] = useState("");
+  const [catalogSaving, setCatalogSaving] = useState(false);
+  const [unitEditorOpen, setUnitEditorOpen] = useState(false);
   const subtotal = items.reduce(
     (sum, item) => sum + item.quantity * item.purchaseRate,
     0,
@@ -49,6 +69,7 @@ export const PurchaseBillEntryView: React.FC = () => {
   const paid = Math.min(totalAmount, Math.max(0, Number(amountPaid) || 0));
   const updateProduct = (id: string, productId: string) => {
     const product = products.find((p) => p.id === productId);
+    setQuantityDrafts((previous) => { const next = { ...previous }; delete next[id]; return next; });
     setItems((prev) =>
       prev.map((item) =>
         item.id === id
@@ -97,6 +118,95 @@ export const PurchaseBillEntryView: React.FC = () => {
         totalAmount: 0,
       },
     ]);
+  const createProductFromPurchase = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const sellingPrice = Number(newProductSellingPrice);
+    const mrp = Number(newProductMrp);
+    const purchaseRate = Number(newProductPurchaseRate);
+    if (!newProductName.trim() || !newProductBrandId || !newProductUnitId ||
+      !Number.isFinite(sellingPrice) || sellingPrice < 0 ||
+      !Number.isFinite(mrp) || mrp < 0 ||
+      !Number.isFinite(purchaseRate) || purchaseRate < 0) {
+      showToast("Enter the product name, brand, unit, and valid prices.", "error");
+      return;
+    }
+    setNewProductSaving(true);
+    try {
+      const product = await addProduct({
+        name: newProductName.trim(),
+        brandId: newProductBrandId,
+        unitId: newProductUnitId,
+        sellingPrice,
+        mrp,
+        qty: 0,
+      });
+      const emptyLine = items.find((item) => !item.productId);
+      if (emptyLine) {
+        setItems((previous) => previous.map((item) => item.id === emptyLine.id ? {
+          ...item,
+          productId: product.id,
+          name: product.name,
+          unit: product.unit,
+          sellingPrice: product.sellingPrice,
+          purchaseRate,
+          totalAmount: purchaseRate * item.quantity,
+        } : item));
+      } else {
+        setItems((previous) => [...previous, {
+          id: `line-${Date.now()}`,
+          productId: product.id,
+          name: product.name,
+          unit: product.unit,
+          quantity: 1,
+          sellingPrice: product.sellingPrice,
+          purchaseRate,
+          totalAmount: purchaseRate,
+        }]);
+      }
+      setNewProductOpen(false);
+      setNewProductName("");
+      setNewProductBrandId("");
+      setNewProductUnitId("");
+      setNewProductSellingPrice("");
+      setNewProductMrp("");
+      setNewProductPurchaseRate("");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Unable to add the product.", "error");
+    } finally {
+      setNewProductSaving(false);
+    }
+  };
+  const openCatalogModal = (kind: "brand" | "unit") => {
+    if (kind === "unit") {
+      setUnitEditorOpen(true);
+      return;
+    }
+    setCatalogModal("brand");
+    setCatalogName("");
+  };
+  const saveCatalogOption = async () => {
+    const name = catalogName.trim();
+    if (!name) {
+      showToast("Enter a brand name.", "error");
+      return;
+    }
+    setCatalogSaving(true);
+    try {
+      if (catalogModal === "brand") {
+        const brand = await createBrand(name);
+        setNewProductBrandId(brand.id);
+      }
+      setCatalogModal(null);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : `Unable to add ${catalogModal || "option"}.`, "error");
+    } finally {
+      setCatalogSaving(false);
+    }
+  };
+  const saveUnit = async (payload: { name: string; symbol: string | null; allowsDecimals: boolean }) => {
+    const unit = await createUnit(payload.name, payload.symbol, payload.allowsDecimals);
+    setNewProductUnitId(unit.id);
+  };
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
     if (saving) return;
@@ -104,11 +214,21 @@ export const PurchaseBillEntryView: React.FC = () => {
       showToast("Add a supplier before recording a purchase.", "error");
       return;
     }
+    const invalidQuantityDraft = items.some((item) => {
+      const draft = quantityDrafts[item.id];
+      const allowsDecimals = products.find((product) => product.id === item.productId)?.unitAllowsDecimals ?? false;
+      return draft !== undefined && (!draft || !isUnitQuantityInputValid(draft, allowsDecimals) || Number(draft) <= 0);
+    });
+    if (invalidQuantityDraft) {
+      showToast("Review purchase quantities; use whole numbers for package units and up to 3 decimals for measured units.", "error");
+      return;
+    }
     if (
       !billNumber.trim() ||
       items.some(
         (item) =>
-          !item.productId || item.quantity <= 0 || item.purchaseRate < 0,
+          !item.productId || item.quantity <= 0 || item.purchaseRate < 0 ||
+          !isUnitQuantityValid(item.quantity, products.find((product) => product.id === item.productId)?.unitAllowsDecimals ?? false),
       )
     ) {
       showToast(
@@ -140,6 +260,7 @@ export const PurchaseBillEntryView: React.FC = () => {
       setRemarks("");
       setAmountPaid("");
       setPaymentMethod("CASH");
+      setQuantityDrafts({});
       setItems([
         {
           id: `line-${Date.now()}`,
@@ -245,13 +366,14 @@ export const PurchaseBillEntryView: React.FC = () => {
           <div className="overflow-hidden rounded-lg border border-slate-200">
             <div className="flex items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3">
               <h2 className="font-title-md font-semibold text-slate-900">Products received</h2>
-              <button
-                type="button"
-                onClick={addLine}
-                className="h-10 px-4 rounded-lg bg-blue-600 text-white font-semibold flex items-center gap-2 shadow-sm transition hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-200"
-              >
-                <span className="material-symbols-outlined">add</span>Add product
-              </button>
+              <div className="flex flex-wrap gap-2">
+                <button type="button" onClick={addLine} className="h-10 px-4 rounded-lg border border-blue-200 bg-white text-blue-700 font-semibold flex items-center gap-2 shadow-sm transition hover:bg-blue-50">
+                  <span className="material-symbols-outlined">playlist_add</span>Add line
+                </button>
+                <button type="button" onClick={() => setNewProductOpen(true)} className="h-10 px-4 rounded-lg bg-blue-600 text-white font-semibold flex items-center gap-2 shadow-sm transition hover:bg-blue-700">
+                  <span className="material-symbols-outlined">add</span>New product
+                </button>
+              </div>
             </div>
             <div className="overflow-x-auto">
             <table className="w-full border-collapse text-left">
@@ -288,25 +410,36 @@ export const PurchaseBillEntryView: React.FC = () => {
                             <option key={p.id} value={p.id}>
                               {p.name}
                               {p.sku ? ` · ${p.sku}` : ""}
+                              {p.unit ? ` · ${p.unit}` : ""}
                             </option>
                           ))}
                       </select>
                     </td>
                     <td className="border-r border-slate-100 px-space-md py-3">
-                      <input
-                        type="number"
-                        min="1"
-                        step="1"
-                        value={item.quantity}
-                        onChange={(e) =>
-                          updateItem(
-                            item.id,
-                            "quantity",
-                            Math.max(1, Number(e.target.value) || 1),
-                          )
-                        }
-                        className="h-11 w-28 rounded-lg border border-slate-300 bg-slate-50 px-3 text-slate-900 outline-none transition focus:border-blue-500 focus:bg-white focus:ring-2 focus:ring-blue-100"
-                      />
+                      {(() => {
+                        const allowsDecimals = products.find((product) => product.id === item.productId)?.unitAllowsDecimals ?? false;
+                        return <input
+                          type="number"
+                          min={allowsDecimals ? "0.001" : "1"}
+                          step={quantityStep(allowsDecimals)}
+                          value={quantityDrafts[item.id] ?? String(item.quantity)}
+                          onChange={(event) => {
+                            const raw = event.target.value;
+                            setQuantityDrafts((previous) => ({ ...previous, [item.id]: raw }));
+                            if (!raw || !isUnitQuantityInputValid(raw, allowsDecimals)) return;
+                            const value = Number(raw);
+                            if (value > 0) updateItem(item.id, "quantity", value);
+                          }}
+                          onBlur={() => {
+                            const raw = quantityDrafts[item.id];
+                            if (raw === undefined) return;
+                            const value = Number(raw);
+                            if (raw && isUnitQuantityInputValid(raw, allowsDecimals) && value > 0) updateItem(item.id, "quantity", value);
+                            setQuantityDrafts((previous) => { const next = { ...previous }; delete next[item.id]; return next; });
+                          }}
+                          className="h-11 w-28 rounded-lg border border-slate-300 bg-slate-50 px-3 text-slate-900 outline-none transition focus:border-blue-500 focus:bg-white focus:ring-2 focus:ring-blue-100"
+                        />;
+                      })()}
                     </td>
                     <td className="border-r border-slate-100 px-space-md py-3 text-slate-600">
                       <span className="inline-flex min-w-16 justify-center rounded-md bg-slate-100 px-3 py-2">{item.unit || "—"}</span>
@@ -458,9 +591,7 @@ export const PurchaseBillEntryView: React.FC = () => {
                       {p.partyName}
                     </td>
                     <td className="px-space-md py-3 text-on-surface">
-                      {p.items
-                        .map((i) => `${i.name} × ${i.quantity}`)
-                        .join(", ")}
+                      {p.items.map((i, index) => <React.Fragment key={`${i.name}-${index}`}>{index > 0 ? ", " : ""}{i.name} × {i.quantity}</React.Fragment>)}
                     </td>
                     <td className="px-space-md py-3 text-on-surface">
                       {formatCurrency(p.totalAmount)}
@@ -491,6 +622,62 @@ export const PurchaseBillEntryView: React.FC = () => {
           </div>
         </section>
       )}
+      {newProductOpen && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-4" onMouseDown={(event) => { if (event.target === event.currentTarget && !newProductSaving) setNewProductOpen(false); }}>
+          <form onSubmit={createProductFromPurchase} className="w-full max-w-lg rounded-xl bg-white p-6 shadow-xl">
+            <h2 className="text-lg font-semibold text-slate-900">Add product to catalog</h2>
+            <p className="mt-1 text-sm text-slate-600">The product starts with zero stock. This purchase will add the received quantity.</p>
+            <div className="mt-5 grid gap-4 sm:grid-cols-2">
+              <label className="flex flex-col gap-1.5 text-sm font-medium text-slate-700 sm:col-span-2">Product name
+                <input autoFocus required value={newProductName} onChange={(event) => setNewProductName(event.target.value)} className="h-10 rounded-md border border-slate-300 px-3" placeholder="Product name" />
+              </label>
+              <label className="flex flex-col gap-1.5 text-sm font-medium text-slate-700">Brand
+                <select required value={newProductBrandId} onChange={(event) => setNewProductBrandId(event.target.value)} className="h-10 rounded-md border border-slate-300 bg-white px-3">
+                  <option value="">Select brand</option>
+                  {brands.filter((brand) => brand.active !== false).map((brand) => <option key={brand.id} value={brand.id}>{brand.name}</option>)}
+                </select>
+                <button type="button" onClick={() => openCatalogModal("brand")} className="self-start text-xs font-semibold text-blue-700 hover:underline">+ Add brand</button>
+              </label>
+              <label className="flex flex-col gap-1.5 text-sm font-medium text-slate-700">Unit
+                <select required value={newProductUnitId} onChange={(event) => setNewProductUnitId(event.target.value)} className="h-10 rounded-md border border-slate-300 bg-white px-3">
+                  <option value="">Select unit</option>
+                  {units.filter((unit) => unit.active !== false).map((unit) => <option key={unit.id} value={unit.id}>{unit.name}{unit.symbol ? ` (${unit.symbol})` : ""}</option>)}
+                </select>
+                <button type="button" onClick={() => openCatalogModal("unit")} className="self-start text-xs font-semibold text-blue-700 hover:underline">+ Add unit</button>
+              </label>
+              <label className="flex flex-col gap-1.5 text-sm font-medium text-slate-700">Selling price (₹)
+                <input required type="number" min="0" step="0.01" value={newProductSellingPrice} onChange={(event) => setNewProductSellingPrice(event.target.value)} className="h-10 rounded-md border border-slate-300 px-3" placeholder="0.00" />
+              </label>
+              <label className="flex flex-col gap-1.5 text-sm font-medium text-slate-700">MRP (₹)
+                <input required type="number" min="0" step="0.01" value={newProductMrp} onChange={(event) => setNewProductMrp(event.target.value)} className="h-10 rounded-md border border-slate-300 px-3" placeholder="0.00" />
+              </label>
+              <label className="flex flex-col gap-1.5 text-sm font-medium text-slate-700 sm:col-span-2">Purchase rate for this bill (₹)
+                <input required type="number" min="0" step="0.01" value={newProductPurchaseRate} onChange={(event) => setNewProductPurchaseRate(event.target.value)} className="h-10 rounded-md border border-slate-300 px-3" placeholder="0.00" />
+              </label>
+            </div>
+            {(!brands.length || !units.length) && <p className="mt-3 text-sm text-amber-700">Add a brand and unit above to continue.</p>}
+            <div className="mt-6 flex justify-end gap-2">
+              <button type="button" disabled={newProductSaving} onClick={() => setNewProductOpen(false)} className="h-10 rounded-md border border-slate-300 px-4 text-sm font-medium text-slate-700 disabled:opacity-50">Cancel</button>
+              <button type="submit" disabled={newProductSaving || !brands.length || !units.length} className="h-10 rounded-md bg-blue-600 px-4 text-sm font-semibold text-white disabled:opacity-50">{newProductSaving ? "Saving…" : "Create and add to purchase"}</button>
+            </div>
+          </form>
+        </div>
+      )}
+      {catalogModal && (
+        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/40 p-4" onMouseDown={(event) => { if (event.target === event.currentTarget && !catalogSaving) setCatalogModal(null); }}>
+          <section role="dialog" aria-modal="true" aria-labelledby="purchase-catalog-title" className="w-full max-w-sm rounded-xl bg-white p-5 shadow-xl">
+            <h3 id="purchase-catalog-title" className="text-lg font-semibold text-slate-900">Add brand</h3>
+            <label className="mt-4 flex flex-col gap-1.5 text-sm font-medium text-slate-700">Brand name
+              <input autoFocus value={catalogName} onChange={(event) => setCatalogName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void saveCatalogOption(); } }} className="h-10 rounded-md border border-slate-300 px-3" placeholder="Brand name" />
+            </label>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" disabled={catalogSaving} onClick={() => setCatalogModal(null)} className="h-9 rounded-md border border-slate-300 px-4 text-sm text-slate-700">Cancel</button>
+              <button type="button" disabled={catalogSaving} onClick={() => void saveCatalogOption()} className="h-9 rounded-md bg-blue-600 px-4 text-sm font-semibold text-white disabled:opacity-60">{catalogSaving ? "Saving…" : "Save brand"}</button>
+            </div>
+          </section>
+        </div>
+      )}
+      {unitEditorOpen && <UnitEditorModal units={units} onSave={saveUnit} onClose={() => setUnitEditorOpen(false)} />}
     </div>
   );
 };

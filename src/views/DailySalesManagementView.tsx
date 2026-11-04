@@ -1,344 +1,291 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import { AnimatePresence, motion } from 'motion/react';
+import {
+  CalendarDays,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
+  Download,
+  FileText,
+  Printer,
+  Search,
+  ShoppingCart,
+} from 'lucide-react';
 import { useApp } from '../context/AppContext';
+import { ExpenseManagementView } from './ExpenseManagementView';
 import { formatCurrency } from '../utils/currency';
 
+type RegisterTab = 'sales' | 'expenses';
+type PaymentMode = 'all' | 'Cash' | 'Credit' | 'UPI';
+
+const localDate = (date: Date) => {
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 10);
+};
+
+const saleDate = (date: string | undefined, dateTime: string) =>
+  (date || dateTime.slice(0, 10)).slice(0, 10);
+
+const reportDate = (date: string) => new Intl.DateTimeFormat('en-IN', {
+  day: '2-digit',
+  month: 'short',
+  year: 'numeric',
+}).format(new Date(`${date}T12:00:00`));
+
+const csvCell = (value: string | number) => `"${String(value).replace(/"/g, '""')}"`;
+
 export const DailySalesManagementView: React.FC = () => {
-  const { sales, showToast } = useApp();
-
-  const isoDate = (date: Date) => { const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000); return local.toISOString().slice(0, 10); };
-
-  const [dateFilter, setDateFilter] = useState<'today' | 'yesterday' | 'custom'>('today');
-  const [selectedDate, setSelectedDate] = useState(isoDate(new Date()));
-  const [modeFilter, setModeFilter] = useState<'all' | 'Cash' | 'Credit' | 'UPI'>('all');
+  const { sales, expenses, showToast } = useApp();
+  const today = localDate(new Date());
+  const [activeTab, setActiveTab] = useState<RegisterTab>('sales');
+  const [quickDate, setQuickDate] = useState<'today' | 'yesterday' | 'custom'>('today');
+  const [fromDate, setFromDate] = useState(today);
+  const [toDate, setToDate] = useState(today);
+  const [modeFilter, setModeFilter] = useState<PaymentMode>('all');
   const [searchTerm, setSearchTerm] = useState('');
+  const [page, setPage] = useState(1);
+  const pageSize = 5;
 
-  // Filter sales
-  const filteredSales = sales.filter((sale) => {
-    const date = sale.date || sale.dateTime.slice(0, 10);
-    if (dateFilter !== 'custom' && date !== selectedDate) return false;
-    if (dateFilter === 'custom' && date !== selectedDate) return false;
-    // Mode match
+  const inRange = (date: string) => date >= fromDate && date <= toDate;
+  const rangeSales = sales.filter((sale) => inRange(saleDate(sale.date, sale.dateTime)));
+  const rangeExpenses = expenses.filter((expense) => inRange(expense.date.slice(0, 10)));
+  const query = searchTerm.toLowerCase().trim();
+  const filteredSales = rangeSales.filter((sale) => {
     const matchesMode = modeFilter === 'all' || sale.paymentMode === modeFilter;
-
-    // Search match
-    const q = searchTerm.toLowerCase().trim();
-    const matchesSearch =
-      !q ||
-      sale.billNumber.toLowerCase().includes(q) ||
-      sale.customerName.toLowerCase().includes(q) ||
-      sale.itemsList.toLowerCase().includes(q);
-
+    const matchesSearch = !query || sale.billNumber.toLowerCase().includes(query) || sale.customerName.toLowerCase().includes(query) || sale.itemsList.toLowerCase().includes(query);
     return matchesMode && matchesSearch;
   });
+  const matchingExpenses = rangeExpenses.filter((expense) => !query || expense.description.toLowerCase().includes(query) || Boolean(expense.category?.toLowerCase().includes(query)) || Boolean(expense.notes?.toLowerCase().includes(query)));
 
-  // Calculate running cumulative totals
-  let runningSum = 0;
+  let runningTotal = 0;
   const salesWithRunningTotal = [...filteredSales].reverse().map((sale) => {
-    runningSum += sale.amount;
-    return { ...sale, runningTotal: runningSum };
+    runningTotal += sale.amount;
+    return { ...sale, runningTotal };
   }).reverse();
 
-  const totalSettled = filteredSales.filter(s => s.paymentMode !== 'Credit').reduce((sum, s) => sum + s.amount, 0);
+  const paymentsReceived = filteredSales.filter((sale) => sale.paymentMode !== 'Credit').reduce((sum, sale) => sum + sale.amount, 0);
+  const pageCount = Math.max(1, Math.ceil(salesWithRunningTotal.length / pageSize));
+  const safePage = Math.min(page, pageCount);
+  const pageSales = salesWithRunningTotal.slice((safePage - 1) * pageSize, safePage * pageSize);
+  const firstRow = salesWithRunningTotal.length ? (safePage - 1) * pageSize + 1 : 0;
+  const lastRow = Math.min(safePage * pageSize, salesWithRunningTotal.length);
+  const printSalesTotal = filteredSales.reduce((sum, sale) => sum + sale.amount, 0);
+  const printExpensesTotal = matchingExpenses.reduce((sum, expense) => sum + expense.amount, 0);
+
+  useEffect(() => {
+    setPage(1);
+  }, [activeTab, fromDate, toDate, modeFilter, searchTerm]);
+
+  const selectToday = () => {
+    const date = localDate(new Date());
+    setQuickDate('today');
+    setFromDate(date);
+    setToDate(date);
+  };
+
+  const selectYesterday = () => {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const date = localDate(yesterday);
+    setQuickDate('yesterday');
+    setFromDate(date);
+    setToDate(date);
+  };
+
+  const handlePrintRegister = () => {
+    const previousTitle = document.title;
+    document.title = activeTab === 'sales' ? 'Able Lubes - Daily Sales Register' : 'Able Lubes - Daily Expenses Register';
+    const restoreTitle = () => {
+      document.title = previousTitle;
+      window.removeEventListener('afterprint', restoreTitle);
+    };
+    window.addEventListener('afterprint', restoreTitle);
+    window.print();
+  };
 
   const handleExportDaySheet = () => {
-    const rows = [
+    const salesRows = [
       ['Date & Time', 'Bill Number', 'Customer', 'Items Breakdown', 'Amount (INR)', 'Payment Mode', 'Cumulative Sales (INR)'],
-      ...salesWithRunningTotal.map((s) => [
-        `"${s.dateTime}"`,
-        s.billNumber,
-        `"${s.customerName.replace(/"/g, '""')}"`,
-        `"${s.itemsList.replace(/"/g, '""')}"`,
-        formatCurrency(s.amount),
-        s.paymentMode,
-        formatCurrency(s.runningTotal),
-      ]),
+      ...salesWithRunningTotal.map((sale) => [sale.dateTime, sale.billNumber, sale.customerName, sale.itemsList, formatCurrency(sale.amount), sale.paymentMode, formatCurrency(sale.runningTotal)]),
     ];
-    const csv = rows.map((r) => r.join(',')).join('\n');
+    const expenseRows = [
+      [],
+      ['Expenses'],
+      ['Date', 'Description', 'Category', 'Payment Method', 'Notes', 'Amount (INR)'],
+      ...matchingExpenses.map((expense) => [expense.date, expense.description, expense.category || '', expense.paymentMethod || '', expense.notes || '', formatCurrency(expense.amount)]),
+    ];
+    const csv = [...salesRows, ...expenseRows].map((row) => row.map(csvCell).join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
-    link.download = `Daily_Sales_Sheet_${selectedDate}.csv`;
+    link.download = `Daily_Register_${fromDate}_to_${toDate}.csv`;
     link.click();
+    URL.revokeObjectURL(link.href);
     showToast('Day Sheet exported successfully.');
   };
 
   return (
-    <div className="flex flex-col w-full">
-      {/* Header Bar */}
-      <header className="flex flex-col md:flex-row md:items-center justify-end gap-space-md mb-space-lg">
-        <div className="flex items-center gap-space-sm self-start md:self-auto">
-          <button
-            className="h-8 px-space-md bg-surface-container-low hover:bg-surface-container text-on-surface font-label-md text-label-md rounded flex items-center gap-space-xs transition-colors shadow-sm border border-outline-variant/30"
-            type="button"
-            onClick={() => window.print()}
-          >
-            <span className="material-symbols-outlined text-[16px] text-on-surface-variant">print</span>
-            <span>Print Register</span>
-          </button>
-          <button
-            className="h-8 px-space-md bg-primary hover:bg-primary-container text-on-primary font-label-md text-label-md rounded flex items-center gap-space-xs transition-colors shadow-sm"
-            type="button"
-            onClick={handleExportDaySheet}
-          >
-            <span className="material-symbols-outlined text-[16px]">file_download</span>
-            <span>Export Day Sheet</span>
-          </button>
-        </div>
-      </header>
-
-      {/* Filter & Operational Toolbar */}
-      <div className="bg-surface-container-lowest rounded-xl shadow-sm p-space-md mb-space-md flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-space-md border border-outline-variant/20">
-        {/* Date Quick Selectors & Picker */}
-        <div className="flex flex-wrap items-center gap-space-xs">
-          <div className="bg-surface-container-low p-0.5 rounded-lg flex items-center text-on-surface-variant font-label-md text-label-md border border-outline-variant/20">
+    <div className="daily-register-page w-full">
+      <div className="daily-register-screen flex w-full flex-col gap-4">
+      <section className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div role="tablist" aria-label="Daily register records" className="inline-flex w-fit max-w-full items-center rounded-full border border-[#e9e3d9] bg-white p-1 shadow-[0_3px_12px_rgba(37,27,12,.08)]">
+          {([
+            { id: 'sales', label: 'Sales', count: rangeSales.length, icon: ShoppingCart },
+            { id: 'expenses', label: 'Expenses', count: rangeExpenses.length, icon: FileText },
+          ] as const).map(({ id, label, count, icon: Icon }) => (
             <button
-              className={`px-space-md py-1 rounded transition-all ${
-                dateFilter === 'today'
-                  ? 'bg-surface-container-lowest text-primary font-semibold shadow-sm'
-                  : 'text-on-surface-variant hover:text-on-surface'
-              }`}
-              onClick={() => {
-                setDateFilter('today');
-                setSelectedDate(isoDate(new Date()));
-              }}
+              key={id}
               type="button"
+              role="tab"
+              aria-selected={activeTab === id}
+              onClick={() => setActiveTab(id)}
+              className={`relative inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-full px-4 text-sm font-semibold transition-colors ${activeTab === id ? 'text-[#493819]' : 'text-[#6b665c] hover:text-[#272727]'}`}
             >
-              Today
+              {activeTab === id && <motion.span layoutId="daily-register-tab-indicator" className="absolute inset-0 rounded-full bg-[#fff1c9] shadow-sm" transition={{ duration: 0.24, ease: 'easeOut' }} aria-hidden="true" />}
+              <span className="relative z-10 inline-flex items-center gap-2"><Icon size={17} aria-hidden="true" />{label}<span className="rounded-full bg-black/5 px-2 py-0.5 text-xs">{count}</span></span>
             </button>
-            <button
-              className={`px-space-md py-1 rounded transition-all ${
-                dateFilter === 'yesterday'
-                  ? 'bg-surface-container-lowest text-primary font-semibold shadow-sm'
-                  : 'text-on-surface-variant hover:text-on-surface'
-              }`}
-              onClick={() => {
-                setDateFilter('yesterday');
-                const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1); setSelectedDate(isoDate(yesterday));
-              }}
-              type="button"
+          ))}
+        </div>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <button type="button" onClick={handlePrintRegister} className="inline-flex h-10 items-center gap-2 rounded-lg border border-[#e9e3d9] bg-white px-3 text-sm font-semibold text-[#272727] shadow-sm transition hover:bg-[#f8f6f2]">
+            <Printer size={17} aria-hidden="true" /> Print {activeTab === 'sales' ? 'Sales' : 'Expenses'} / Save PDF
+          </button>
+          <button type="button" onClick={handleExportDaySheet} className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#ffe4a0] px-3 text-sm font-semibold text-[#493819] shadow-sm transition hover:bg-[#ffdc82]">
+            <Download size={17} aria-hidden="true" /> Export Day Sheet
+          </button>
+        </div>
+      </section>
+
+      <section className="flex flex-col gap-3 rounded-xl border border-[#e9e3d9] bg-white p-3 shadow-sm lg:flex-row lg:items-center lg:justify-between" aria-label="Register filters">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="inline-flex rounded-lg bg-[#f5f3ef] p-1">
+            <button type="button" onClick={selectToday} className={`rounded-md px-3 py-1.5 text-sm font-semibold transition ${quickDate === 'today' ? 'bg-[#ffe4a0] text-[#493819] shadow-sm' : 'text-[#68645e] hover:bg-white'}`}>Today</button>
+            <button type="button" onClick={selectYesterday} className={`rounded-md px-3 py-1.5 text-sm font-semibold transition ${quickDate === 'yesterday' ? 'bg-[#ffe4a0] text-[#493819] shadow-sm' : 'text-[#68645e] hover:bg-white'}`}>Yesterday</button>
+          </div>
+          <div className="flex min-w-0 flex-wrap items-center gap-2 rounded-lg border border-[#efdcae] bg-[#fff7e7] p-1.5">
+            <label className="flex items-center gap-1.5" aria-label="From date">
+              <CalendarDays size={16} className="shrink-0 text-[#89795c]" aria-hidden="true" />
+              <input type="date" aria-label="From date" value={fromDate} onChange={(event) => { setFromDate(event.target.value); setQuickDate('custom'); }} className="h-8 min-w-[130px] rounded-md border border-[#ead8ad] bg-[#fffdf8] px-2 text-xs text-[#272727] outline-none focus:border-[#c58a00]" />
+            </label>
+            <span className="text-xs font-medium text-[#89795c]">to</span>
+            <label className="flex items-center gap-1.5" aria-label="To date">
+              <CalendarDays size={16} className="shrink-0 text-[#89795c]" aria-hidden="true" />
+              <input type="date" aria-label="To date" value={toDate} onChange={(event) => { setToDate(event.target.value); setQuickDate('custom'); }} className="h-8 min-w-[130px] rounded-md border border-[#ead8ad] bg-[#fffdf8] px-2 text-xs text-[#272727] outline-none focus:border-[#c58a00]" />
+            </label>
+          </div>
+          {activeTab === 'sales' && <label className="flex items-center gap-2 text-xs font-semibold text-[#77736d]" htmlFor="register-payment-mode">
+            <span>Mode</span>
+            <select
+              id="register-payment-mode"
+              value={modeFilter}
+              onChange={(event) => setModeFilter(event.target.value as PaymentMode)}
+              className="h-9 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-sm font-medium text-[#272727] outline-none focus:border-[#c58a00] focus:bg-white"
             >
-              Yesterday
-            </button>
-          </div>
-
-          <div className="relative flex items-center">
-            <span className="material-symbols-outlined absolute left-2 text-outline text-[16px] pointer-events-none">
-              calendar_today
-            </span>
-            <input
-              aria-label="Select custom date"
-              className="h-8 pl-7 pr-space-sm bg-surface-container-low text-on-surface font-data-mono-sm text-data-mono-sm rounded focus:bg-surface-container-lowest outline-none transition-colors border border-outline-variant/20"
-              type="date"
-              value={selectedDate}
-              onChange={(e) => {
-                setSelectedDate(e.target.value);
-                setDateFilter('custom');
-              }}
-            />
-          </div>
-
-          <div className="h-4 w-px bg-surface-container-high mx-space-xs hidden sm:block"></div>
-
-          {/* Payment Mode Filters */}
-          <div className="flex items-center gap-1">
-            <span className="font-label-sm text-label-sm text-on-surface-variant mr-1 uppercase tracking-wider">
-              Mode:
-            </span>
-            {(['all', 'Cash', 'Credit', 'UPI'] as const).map((m) => (
-              <button
-                key={m}
-                type="button"
-                onClick={() => setModeFilter(m)}
-                className={`h-7 px-space-sm rounded font-label-md text-label-md transition-colors ${
-                  modeFilter === m
-                    ? 'bg-primary text-on-primary font-medium'
-                    : 'bg-surface-container-low text-on-surface-variant hover:text-on-surface border border-outline-variant/20'
-                }`}
-              >
-                {m === 'all' ? 'All Modes' : m}
-              </button>
-            ))}
-          </div>
+              <option value="all">All Modes</option>
+              <option value="Cash">Cash</option>
+              <option value="Credit">Credit</option>
+              <option value="UPI">UPI</option>
+            </select>
+          </label>}
         </div>
+        <label className="relative block w-full lg:max-w-[320px]">
+          <Search size={17} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#89847b]" aria-hidden="true" />
+          <input type="search" value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} placeholder={activeTab === 'sales' ? 'Search bill, customer or product…' : 'Search expense or category…'} className="h-10 w-full rounded-lg border border-[#e8e4dd] bg-[#f7f7f6] pl-9 pr-3 text-sm text-[#272727] outline-none placeholder:text-[#89847b] focus:border-[#c58a00] focus:bg-white" aria-label={activeTab === 'sales' ? 'Search sales' : 'Search expenses'} />
+        </label>
+      </section>
 
-        {/* Search Input & Shift Meta */}
-        <div className="flex items-center gap-space-sm">
-          <div className="relative w-full lg:w-80">
-            <span className="material-symbols-outlined absolute left-2.5 top-1/2 -translate-y-1/2 text-outline text-[16px]">
-              search
-            </span>
-            <input
-              className="w-full h-8 pl-8 pr-7 bg-surface-container-low text-on-surface font-body-md text-body-md rounded placeholder:text-outline-variant focus:bg-surface-container-lowest outline-none transition-colors border border-outline-variant/20"
-              placeholder="Search by bill number, product name..."
-              type="text"
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-            />
-            {searchTerm && (
-              <button
-                type="button"
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-outline hover:text-on-surface"
-                onClick={() => setSearchTerm('')}
-              >
-                <span className="material-symbols-outlined text-[14px]">cancel</span>
-              </button>
-            )}
+      <AnimatePresence mode="wait" initial={false}>
+      {activeTab === 'sales' ? (
+        <motion.section key="sales-panel" initial={{ opacity: 0, y: 7 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.2, ease: 'easeOut' }} className="overflow-hidden rounded-xl border border-[#e9e3d9] bg-white shadow-sm" role="tabpanel" aria-label="Sales records">
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[850px] border-collapse text-left">
+              <thead><tr className="h-10 bg-[#f6f5f2] text-xs font-bold uppercase tracking-wide text-[#6d685f]">
+                <th className="px-4 py-2">Date &amp; time</th><th className="px-4 py-2">Bill number</th><th className="px-4 py-2">Product name</th><th className="px-4 py-2 text-right">Amount (₹)</th><th className="px-4 py-2 text-center">Mode of payment</th><th className="px-4 py-2 text-right">Total sales (₹)</th>
+              </tr></thead>
+              <tbody className="divide-y divide-[#efede8] text-sm text-[#272727]">
+                {pageSales.map((item) => (
+                  <tr key={item.id} className="h-11 transition hover:bg-[#fffdf8]">
+                    <td className="whitespace-nowrap px-4 py-2 text-xs text-[#68645e]">{item.dateTime}</td>
+                    <td className="whitespace-nowrap px-4 py-2 font-semibold text-[#a86600]">{item.billNumber}</td>
+                    <td className="max-w-[440px] px-4 py-2"><span className="block truncate" title={item.itemsList}>{item.itemsList}</span></td>
+                    <td className="whitespace-nowrap px-4 py-2 text-right font-semibold">{formatCurrency(item.amount)}</td>
+                    <td className="px-4 py-2 text-center"><span className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-semibold ${item.paymentMode === 'UPI' ? 'bg-[#eee9ff] text-[#5940a5]' : item.paymentMode === 'Cash' ? 'bg-[#f0f0ed] text-[#45443f]' : 'bg-[#eaf0ff] text-[#34549b]'}`}>
+                      <span className="material-symbols-outlined text-[14px]">{item.paymentMode === 'UPI' ? 'contactless' : item.paymentMode === 'Cash' ? 'payments' : 'credit_card'}</span>{item.paymentMode}
+                    </span></td>
+                    <td className="whitespace-nowrap px-4 py-2 text-right font-bold">{formatCurrency(item.runningTotal)}</td>
+                  </tr>
+                ))}
+                {salesWithRunningTotal.length === 0 && <tr><td colSpan={6} className="px-4 py-12 text-center text-sm text-[#77736d]">No sales match this date range and filter.</td></tr>}
+              </tbody>
+            </table>
           </div>
-         
-        </div>
+          <footer className="flex flex-col gap-3 border-t border-[#eee8df] bg-[#f8f7f4] px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[#6b665c]">
+              <span>Showing <strong className="text-[#272727]">{firstRow}-{lastRow}</strong> of <strong className="text-[#272727]">{filteredSales.length}</strong> sales</span>
+              <span className="hidden text-[#bcb6ac] sm:inline">•</span>
+              <span>Payments received: <strong className="text-[#9a6800]">{formatCurrency(paymentsReceived)}</strong></span>
+            </div>
+            <div className="flex items-center gap-1">
+              <button type="button" aria-label="First page" disabled={safePage === 1} onClick={() => setPage(1)} className="flex h-8 w-8 items-center justify-center rounded-md border border-[#e8e4dd] bg-white text-[#555] disabled:cursor-not-allowed disabled:opacity-40"><ChevronsLeft size={16} /></button>
+              <button type="button" aria-label="Previous page" disabled={safePage === 1} onClick={() => setPage((value) => Math.max(1, value - 1))} className="flex h-8 w-8 items-center justify-center rounded-md border border-[#e8e4dd] bg-white text-[#555] disabled:cursor-not-allowed disabled:opacity-40"><ChevronLeft size={16} /></button>
+              <span className="px-2 text-xs font-semibold text-[#555]">{safePage} / {pageCount}</span>
+              <button type="button" aria-label="Next page" disabled={safePage >= pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))} className="flex h-8 w-8 items-center justify-center rounded-md border border-[#e8e4dd] bg-white text-[#555] disabled:cursor-not-allowed disabled:opacity-40"><ChevronRight size={16} /></button>
+              <button type="button" aria-label="Last page" disabled={safePage >= pageCount} onClick={() => setPage(pageCount)} className="flex h-8 w-8 items-center justify-center rounded-md border border-[#e8e4dd] bg-white text-[#555] disabled:cursor-not-allowed disabled:opacity-40"><ChevronsRight size={16} /></button>
+            </div>
+          </footer>
+        </motion.section>
+      ) : (
+        <motion.div key="expenses-panel" initial={{ opacity: 0, y: 7 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.2, ease: 'easeOut' }} role="tabpanel" aria-label="Expense records">
+          <ExpenseManagementView embedded dateRange={{ from: fromDate, to: toDate }} sharedSearchTerm={searchTerm} />
+        </motion.div>
+      )}
+      </AnimatePresence>
       </div>
 
-      {/* Tabular Daily Sales Interface */}
-      <div className="bg-surface-container-lowest rounded-xl shadow-sm overflow-hidden flex flex-col border border-outline-variant/20">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse">
-            <thead>
-              <tr className="h-9 bg-surface-container-low text-on-surface-variant font-label-sm text-label-sm uppercase tracking-wider select-none">
-                <th className="px-space-md py-1 font-semibold w-44" scope="col">
-                  Date
-                </th>
-                <th className="px-space-md py-1 font-semibold w-32" scope="col">
-                  Bill Number
-                </th>
-                <th className="px-space-md py-1 font-semibold" scope="col">
-                  Product Name
-                </th>
-                <th className="px-space-md py-1 font-semibold text-right w-32" scope="col">
-                  Amount (₹)
-                </th>
-                <th className="px-space-md py-1 font-semibold text-center w-36" scope="col">
-                  Mode of Payment
-                </th>
-                <th className="px-space-md py-1 font-semibold text-right w-36" scope="col">
-                  Total Sales (₹)
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-surface-container-low text-body-md font-body-md text-on-surface">
-              {salesWithRunningTotal.map((item) => (
-                <tr key={item.id} className="h-10 hover:bg-surface-container-lowest/60 transition-colors group">
-                  <td className="px-space-md py-2 font-data-mono-sm text-data-mono-sm text-on-surface-variant whitespace-nowrap">
-                    {item.dateTime}
-                  </td>
-                  <td className="px-space-md py-2">
-                    <span className="font-data-mono-md text-data-mono-md font-semibold text-primary">
-                      {item.billNumber}
-                    </span>
-                  </td>
-                  <td className="px-space-md py-2 text-on-surface">
-                    <span className="truncate block max-w-xl">{item.itemsList}</span>
-                  </td>
-                  <td className="px-space-md py-2 text-right font-data-mono-md text-data-mono-md font-medium text-on-surface">
-                    {formatCurrency(item.amount)}
-                  </td>
-                  <td className="px-space-md py-2 text-center">
-                    <span
-                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded font-data-mono-sm text-data-mono-sm font-medium ${
-                        item.paymentMode === 'UPI'
-                          ? 'bg-surface-variant text-primary'
-                          : item.paymentMode === 'Cash'
-                          ? 'bg-surface-container-high text-on-surface'
-                          : 'bg-secondary-fixed text-on-secondary-fixed-variant'
-                      }`}
-                    >
-                      <span className="material-symbols-outlined text-[13px]">
-                        {item.paymentMode === 'UPI'
-                          ? 'contactless'
-                          : item.paymentMode === 'Cash'
-                          ? 'payments'
-                          : 'credit_card'}
-                      </span>
-                      <span>{item.paymentMode}</span>
-                    </span>
-                  </td>
-                  <td className="px-space-md py-2 text-right font-data-mono-md text-data-mono-md font-semibold text-on-surface">
-                    {formatCurrency(item.runningTotal)}
-                  </td>
-                </tr>
-              ))}
-              {salesWithRunningTotal.length === 0 && (
-                <tr>
-                  <td colSpan={6} className="text-center py-12 text-on-surface-variant font-body-sm">
-                    <span className="material-symbols-outlined text-[32px] text-outline mb-1 block">find_in_page</span>
-                    No daily sales matching criteria found.
-                  </td>
-                </tr>
-              )}
+      <article className="daily-register-print-only" aria-label="Printable daily register">
+        <div className="register-print-heading">
+          <div>
+            <p className="register-print-brand">ABLE LUBES</p>
+            <h1>{activeTab === 'sales' ? 'Daily Sales Register' : 'Daily Expenses Register'}</h1>
+            <p>{activeTab === 'sales' ? 'Sales report' : 'Expense report'}</p>
+          </div>
+          <div className="register-print-meta">
+            <strong>Period</strong><span>{reportDate(fromDate)} to {reportDate(toDate)}</span>
+          </div>
+        </div>
+
+        {activeTab === 'sales' ? <div className="register-print-totals">
+          <div><span>Total sales</span><strong>{formatCurrency(printSalesTotal)}</strong></div>
+          <div><span>Payments received</span><strong>{formatCurrency(paymentsReceived)}</strong></div>
+        </div> : <div className="register-print-totals">
+          <div><span>Total expenses</span><strong>{formatCurrency(printExpensesTotal)}</strong></div>
+        </div>}
+
+        {activeTab === 'sales' ? <section className="register-print-section">
+          <h2>Sales <span>({filteredSales.length})</span></h2>
+          <table className="register-print-sales">
+            <thead><tr><th>Date &amp; time</th><th>Bill number</th><th>Product name</th><th>Amount (₹)</th><th>Payment mode</th><th>Total sales (₹)</th></tr></thead>
+            <tbody>
+              {salesWithRunningTotal.map((sale) => <tr key={sale.id}>
+                <td>{sale.dateTime}</td><td>{sale.billNumber}</td><td>{sale.itemsList}</td><td>{formatCurrency(sale.amount)}</td><td>{sale.paymentMode}</td><td>{formatCurrency(sale.runningTotal)}</td>
+              </tr>)}
+              {filteredSales.length === 0 && <tr><td colSpan={6} className="register-print-empty">No sales in this range.</td></tr>}
             </tbody>
           </table>
-        </div>
-
-        {/* Table Summary Footer & Pagination */}
-        <footer className="h-12 px-space-md bg-surface-container-low flex flex-col sm:flex-row items-center justify-between gap-space-sm border-t border-outline-variant/20">
-          <div className="flex items-center gap-space-md">
-            <span className="font-body-sm text-body-sm text-on-surface-variant">
-              Showing <span className="font-data-mono-sm font-medium text-on-surface">1</span>-
-              <span className="font-data-mono-sm font-medium text-on-surface">{filteredSales.length}</span> of{' '}
-              <span className="font-data-mono-sm font-medium text-on-surface">{sales.length}</span> daily sales
-            </span>
-            <span className="hidden md:inline-block text-outline-variant">•</span>
-            <span className="hidden md:inline-flex items-center gap-1 font-data-mono-sm text-data-mono-sm text-on-surface-variant">
-              Payments received on selected date:{' '}
-              <span className="font-semibold text-primary">
-                {formatCurrency(totalSettled)}
-              </span>
-            </span>
-          </div>
-
-          <div className="flex items-center gap-space-xs">
-            <button
-              aria-label="First page"
-              className="w-7 h-7 flex items-center justify-center rounded bg-surface-container-lowest text-outline-variant cursor-not-allowed"
-              disabled
-              type="button"
-            >
-              <span className="material-symbols-outlined text-[16px]">first_page</span>
-            </button>
-            <button
-              aria-label="Previous page"
-              className="w-7 h-7 flex items-center justify-center rounded bg-surface-container-lowest text-outline-variant cursor-not-allowed"
-              disabled
-              type="button"
-            >
-              <span className="material-symbols-outlined text-[16px]">chevron_left</span>
-            </button>
-            <div className="flex items-center gap-1 px-1">
-              <button
-                className="w-7 h-7 rounded bg-primary text-on-primary font-data-mono-sm text-data-mono-sm font-semibold flex items-center justify-center"
-                type="button"
-              >
-                1
-              </button>
-              <button
-                className="w-7 h-7 rounded hover:bg-surface-container-lowest text-on-surface font-data-mono-sm text-data-mono-sm flex items-center justify-center transition-colors"
-                type="button"
-              >
-                2
-              </button>
-              <button
-                className="w-7 h-7 rounded hover:bg-surface-container-lowest text-on-surface font-data-mono-sm text-data-mono-sm flex items-center justify-center transition-colors"
-                type="button"
-              >
-                3
-              </button>
-            </div>
-            <button
-              aria-label="Next page"
-              className="w-7 h-7 flex items-center justify-center rounded bg-surface-container-lowest text-on-surface hover:bg-surface-container transition-colors shadow-sm"
-              type="button"
-            >
-              <span className="material-symbols-outlined text-[16px]">chevron_right</span>
-            </button>
-            <button
-              aria-label="Last page"
-              className="w-7 h-7 flex items-center justify-center rounded bg-surface-container-lowest text-on-surface hover:bg-surface-container transition-colors shadow-sm"
-              type="button"
-            >
-              <span className="material-symbols-outlined text-[16px]">last_page</span>
-            </button>
-          </div>
-        </footer>
-      </div>
+        </section> : <section className="register-print-section">
+          <h2>Expenses <span>({matchingExpenses.length})</span></h2>
+          <table className="register-print-expenses">
+            <thead><tr><th>Date</th><th>Description</th><th>Category / payment / notes</th><th>Amount (₹)</th></tr></thead>
+            <tbody>
+              {matchingExpenses.map((expense) => <tr key={expense.id}>
+                <td>{expense.date}</td><td>{expense.description}</td><td>{[expense.category, expense.paymentMethod, expense.notes].filter(Boolean).join(' · ') || '—'}</td><td>{formatCurrency(expense.amount)}</td>
+              </tr>)}
+              {matchingExpenses.length === 0 && <tr><td colSpan={4} className="register-print-empty">No expenses in this range.</td></tr>}
+            </tbody>
+          </table>
+        </section>}
+      </article>
     </div>
   );
 };

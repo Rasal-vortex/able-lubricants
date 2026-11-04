@@ -1,10 +1,10 @@
 @import "tailwindcss";
 
 @theme {
-  --color-primary: #3157d5;
-  --color-primary-container: #3157d5;
-  --color-on-primary: #ffffff;
-  --color-on-primary-container: #a8b8ff;
+  --color-primary: #bd8300;
+  --color-primary-container: #ffe4a0;
+  --color-on-primary: #493819;
+  --color-on-primary-container: #493819;
   --color-primary-fixed: #dde1ff;
   --color-primary-fixed-dim: #b8c4ff;
   --color-on-primary-fixed: #001453;
@@ -79,7 +79,7 @@
     background-color: var(--color-surface);
   }
 
-  body { background: #f7f8fa; }
+  body { background: #f8f5f0; }
   button, input, select, textarea { font: inherit; }
   button { cursor: pointer; }
   button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
@@ -91,7 +91,7 @@
 
 /* Shared CRM surfaces: quiet borders, flat white cards, and compact table rows. */
 @layer components {
-  main { background-color: #f7f8fa; }
+  main { background-color: #f8f5f0; }
   aside { background-color: #fff; border-color: #e7e9ee; }
   header { background-color: rgba(255,255,255,.96); border-color: #e7e9ee; }
   table { border-collapse: collapse; }
@@ -100,10 +100,58 @@
   input, select, textarea { border-color: #dfe2e7; }
 }
 
+/* Dashboard reference layout: five compact cards across, then a wide chart and summary. */
+.sidebar-nav-scroll {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.sidebar-nav-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+/* Keep primary actions consistently soft yellow across CRM screens. */
+.bg-primary,
+.bg-primary-container {
+  background-color: #ffe4a0;
+}
+
+.text-on-primary,
+.text-on-primary-container {
+  color: #493819;
+}
+
+.hover\:bg-primary:hover,
+.hover\:bg-primary-container:hover {
+  background-color: #ffdb7a;
+}
+
+@media (min-width: 960px) {
+  .dashboard-top-grid {
+    grid-template-columns: minmax(270px, 1.9fr) repeat(4, minmax(0, 1fr));
+  }
+  .dashboard-welcome-card {
+    grid-column: span 1;
+  }
+  .dashboard-analytics-grid {
+    grid-template-columns: minmax(0, 1.65fr) minmax(290px, .95fr);
+  }
+}
+
+@media (min-width: 640px) and (max-width: 959px) {
+  .dashboard-top-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .dashboard-welcome-card {
+    grid-column: span 2;
+  }
+}
+
 @media (max-width: 767px) {
-  .pl-\[232px\] { padding-left: 64px !important; }
+  .pl-\[190px\] { padding-left: 64px !important; }
   aside { width: 64px !important; }
   aside .sidebar-label, aside .sidebar-brand-copy, aside .sidebar-section-title { display: none !important; }
+  aside .sidebar-oil-art { display: none !important; }
   aside nav { padding-inline: 8px !important; }
   aside nav button { justify-content: center; padding-inline: 0 !important; }
   header { left: 64px !important; }
@@ -215,15 +263,164 @@
 }
 
 /* Subtle print styles */
+.daily-register-print-only {
+  display: none;
+}
+
 @media print {
+  @page {
+    size: A4 landscape;
+    margin: 0;
+  }
+
   aside, header, button:not(.print-keep), .no-print {
     display: none !important;
   }
-  .pl-\[232px\] {
+  .daily-register-screen {
+    display: none !important;
+  }
+  .daily-register-print-only {
+    display: block !important;
+    box-sizing: border-box;
+    width: 100%;
+    padding: 12mm;
+    color: #171717 !important;
+    background: #fff !important;
+    font-family: Arial, Helvetica, sans-serif;
+    font-size: 10pt;
+    line-height: 1.4;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .register-print-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 24px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid #777;
+  }
+  .register-print-brand {
+    margin: 0 0 3px;
+    color: #171717;
+    font-size: 9pt;
+    font-weight: 800;
+    letter-spacing: .12em;
+  }
+  .register-print-heading h1 {
+    margin: 0;
+    font-size: 21pt;
+    line-height: 1.1;
+  }
+  .register-print-heading p:last-child {
+    margin: 4px 0 0;
+    color: #555;
+  }
+  .register-print-meta {
+    display: grid;
+    grid-template-columns: auto auto;
+    gap: 3px 12px;
+    text-align: right;
+    font-size: 8.5pt;
+  }
+  .register-print-meta strong {
+    color: #555;
+  }
+  .register-print-totals {
+    display: flex;
+    align-items: baseline;
+    margin: 10px 0 14px;
+    padding: 7px 0;
+    border-top: 1px solid #aaa;
+    border-bottom: 1px solid #aaa;
+  }
+  .register-print-totals div {
+    display: flex;
+    flex: 1;
+    align-items: baseline;
+    gap: 7px;
+    padding: 2px 12px;
+    background: transparent !important;
+  }
+  .register-print-totals div:first-child {
+    padding-left: 0;
+  }
+  .register-print-totals div + div {
+    border-left: 1px solid #ccc;
+  }
+  .register-print-totals span {
+    color: #444;
+    font-size: 9pt;
+  }
+  .register-print-totals strong {
+    font-size: 11pt;
+  }
+  .register-print-section {
+    margin-top: 12px;
+  }
+  .register-print-section h2 {
+    margin: 0 0 5px;
+    border-bottom: 1px solid #bbb;
+    padding-bottom: 3px;
+    font-size: 11pt;
+  }
+  .register-print-section h2 span {
+    color: #666;
+    font-size: 9pt;
+    font-weight: 500;
+  }
+  .register-print-section table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: auto;
+  }
+  .register-print-section thead {
+    display: table-header-group;
+  }
+  .register-print-section th {
+    padding: 6px 7px;
+    border-bottom: 1px solid #777;
+    background: #f3f3f3 !important;
+    text-align: left;
+    font-size: 8.5pt;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .02em;
+  }
+  .register-print-section td {
+    padding: 7px;
+    border-bottom: 1px solid #d5d5d5;
+    vertical-align: top;
+    overflow-wrap: anywhere;
+  }
+  .register-print-sales th:nth-last-child(-n+3),
+  .register-print-sales td:nth-last-child(-n+3),
+  .register-print-expenses th:last-child,
+  .register-print-expenses td:last-child {
+    white-space: nowrap;
+  }
+  .register-print-section tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .register-print-empty {
+    padding: 12px !important;
+    color: #666;
+    text-align: center;
+  }
+  .pl-\[190px\] {
     padding-left: 0 !important;
   }
   main {
     padding-top: 0 !important;
     background: white !important;
   }
+}
+@keyframes toast-outline-progress {
+  from { stroke-dashoffset: 100; }
+  to { stroke-dashoffset: 0; }
+}
+
+.toast-outline-fuse {
+  animation: toast-outline-progress 5s linear forwards;
 }

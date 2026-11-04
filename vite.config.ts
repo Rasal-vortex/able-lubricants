@@ -5,7 +5,7 @@ import {defineConfig, loadEnv} from 'vite';
 
 export default defineConfig(({mode, command}) => {
   const env = loadEnv(mode, process.cwd(), '');
-  const configuredApiUrl = env.API_BASE_URL || 'https://able-lubricants-backend-3cfl.onrender.com/api/v1';
+  const configuredApiUrl = env.API_BASE_URL || 'http://192.168.220.20:3000/api/v1';
   const apiOrigin = new URL(configuredApiUrl).origin;
   const apiBaseUrl = command === 'serve' ? '/api/v1' : configuredApiUrl.replace(/\/$/, '');
   const localLoginCredentials = command === 'serve' && mode === 'development'

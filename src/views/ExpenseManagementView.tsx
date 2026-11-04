@@ -3,7 +3,13 @@ import { useApp } from '../context/AppContext';
 import { Expense } from '../types';
 import { formatCurrency } from '../utils/currency';
 
-export const ExpenseManagementView: React.FC = () => {
+interface ExpenseManagementViewProps {
+  embedded?: boolean;
+  dateRange?: { from: string; to: string };
+  sharedSearchTerm?: string;
+}
+
+export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ embedded = false, dateRange, sharedSearchTerm = '' }) => {
   const { expenses, addExpense, updateExpense, deleteExpense, showToast, setActiveReceiptToPrint } = useApp();
 
   const [searchTerm, setSearchTerm] = useState('');
@@ -26,11 +32,16 @@ export const ExpenseManagementView: React.FC = () => {
   const [expenseMethod, setExpenseMethod] = useState('Cash');
   const [expenseNotes, setExpenseNotes] = useState('');
 
-  const filteredExpenses = expenses.filter((e) => {
-    const q = searchTerm.toLowerCase().trim();
-    const date = e.date.slice(0, 10);
-    const inPeriod = date >= fromDate && date <= toDate;
-    return inPeriod && (!q || e.description.toLowerCase().includes(q) || (e.category && e.category.toLowerCase().includes(q)));
+  const effectiveFromDate = embedded && dateRange ? dateRange.from : fromDate;
+  const effectiveToDate = embedded && dateRange ? dateRange.to : toDate;
+  const effectiveSearchTerm = embedded ? sharedSearchTerm : searchTerm;
+  const expensesInRange = expenses.filter((expense) => {
+    const date = expense.date.slice(0, 10);
+    return date >= effectiveFromDate && date <= effectiveToDate;
+  });
+  const filteredExpenses = expensesInRange.filter((e) => {
+    const q = effectiveSearchTerm.toLowerCase().trim();
+    return !q || e.description.toLowerCase().includes(q) || Boolean(e.category?.toLowerCase().includes(q)) || Boolean(e.notes?.toLowerCase().includes(q));
   });
 
   const totalExpenseAmount = filteredExpenses.reduce((sum, e) => sum + e.amount, 0);
@@ -38,7 +49,7 @@ export const ExpenseManagementView: React.FC = () => {
   const openAddModal = () => {
     setModalMode('add');
     setEditingId(null);
-    setExpenseDate(localIso(new Date()));
+    setExpenseDate(embedded && dateRange ? dateRange.to : localIso(new Date()));
     setExpenseDesc('');
     setExpenseAmount('');
     setExpenseCategory('General'); setExpenseMethod('Cash'); setExpenseNotes('');
@@ -99,8 +110,8 @@ export const ExpenseManagementView: React.FC = () => {
 
   return (
     <div className="flex flex-col w-full gap-y-space-md">
-      {/* Header Bar */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-end gap-space-sm bg-surface-container-lowest p-space-lg rounded-xl shadow-sm border border-outline-variant/20">
+      {/* Keep the standalone Expenses actions, or expose Add Expense inside the register tab. */}
+      {!embedded && <div className="flex flex-col sm:flex-row sm:items-center sm:justify-end gap-space-sm bg-surface-container-lowest p-space-lg rounded-xl shadow-sm border border-outline-variant/20">
         <div className="flex items-center gap-space-sm self-start sm:self-auto">
           <button
             className="inline-flex items-center gap-space-xs bg-primary text-on-primary hover:bg-primary-container px-space-md py-2 rounded-lg font-label-md text-label-md shadow-sm transition-all focus:outline-none"
@@ -111,10 +122,10 @@ export const ExpenseManagementView: React.FC = () => {
             <span>Add expense</span>
           </button>
         </div>
-      </div>
+      </div>}
 
       {/* Search & Filter Bar */}
-      <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-space-sm bg-surface-container-lowest px-space-md py-space-sm rounded-xl shadow-sm border border-outline-variant/20">
+      {!embedded && <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-space-sm bg-surface-container-lowest px-space-md py-space-sm rounded-xl shadow-sm border border-outline-variant/20">
         <div className="flex flex-1 items-center gap-space-sm">
           <div className="relative flex-1 max-w-md">
             <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-outline text-[18px]">
@@ -159,7 +170,18 @@ export const ExpenseManagementView: React.FC = () => {
           <span className="material-symbols-outlined text-[16px] text-tertiary">date_range</span>
           {activePeriod === 'custom' ? <><input aria-label="Expense from date" type="date" value={fromDate} onChange={e=>setFromDate(e.target.value)} className="h-8 px-1 rounded border border-outline-variant/30 bg-surface-container-lowest"/><span>to</span><input aria-label="Expense to date" type="date" value={toDate} onChange={e=>setToDate(e.target.value)} className="h-8 px-1 rounded border border-outline-variant/30 bg-surface-container-lowest"/></> : <span>{fromDate} — {toDate}</span>}
         </div>
-      </div>
+      </div>}
+
+      {embedded && <div className="flex justify-end">
+        <button
+          className="inline-flex items-center gap-space-xs bg-primary text-on-primary hover:bg-primary-container px-space-md py-2 rounded-lg font-label-md text-label-md shadow-sm transition-all focus:outline-none"
+          onClick={openAddModal}
+          type="button"
+        >
+          <span className="material-symbols-outlined text-[18px]">add</span>
+          <span>Add Expense</span>
+        </button>
+      </div>}
 
       {/* Main Ledger Table */}
       <div className="w-full bg-surface-container-lowest rounded-xl shadow-sm overflow-hidden border border-outline-variant/20">
@@ -256,8 +278,8 @@ export const ExpenseManagementView: React.FC = () => {
         {/* Pagination Container */}
         <div className="flex flex-col sm:flex-row items-center justify-between px-space-md py-space-sm bg-surface-container-low gap-space-sm border-t border-outline-variant/20">
           <div className="font-data-mono-sm text-data-mono-sm text-on-surface-variant">
-            Showing <span className="font-semibold text-on-surface">1-{filteredExpenses.length}</span> of{' '}
-            <span className="font-semibold text-on-surface">{expenses.length}</span> expenses • Total:{' '}
+            Showing <span className="font-semibold text-on-surface">{filteredExpenses.length ? `1-${filteredExpenses.length}` : '0'}</span> of{' '}
+            <span className="font-semibold text-on-surface">{embedded ? expensesInRange.length : expenses.length}</span> expenses • Total:{' '}
             <strong className="text-on-surface">{formatCurrency(totalExpenseAmount)}</strong>
           </div>
         </div>
