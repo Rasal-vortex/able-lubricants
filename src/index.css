@@ -100,6 +100,23 @@
   input, select, textarea { border-color: #dfe2e7; }
 }
 
+/* Login is outside the CRM shell; keep its responsive split independent of
+   the global aside/sidebar rules above. */
+.login-card-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 0.94fr) minmax(0, 1.06fr);
+  min-height: 620px;
+}
+
+@media (max-width: 699px) {
+  .login-card-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .login-card-layout > div:first-child {
+    min-height: 340px;
+  }
+}
+
 /* Dashboard reference layout: five compact cards across, then a wide chart and summary. */
 .sidebar-nav-scroll {
   scrollbar-width: none;
