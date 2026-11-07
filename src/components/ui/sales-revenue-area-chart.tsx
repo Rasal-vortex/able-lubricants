@@ -1,6 +1,6 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo } from 'react';
 import { Area, AreaChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { SaleRecord } from '../../types';
+import { DashboardSummary } from '../../services/api';
 import { formatCurrency } from '../../utils/currency';
 
 interface RevenuePoint {
@@ -8,8 +8,6 @@ interface RevenuePoint {
   paidSales: number;
   creditSales: number;
 }
-
-const dateKey = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 
 const formatDate = (value: string) => new Date(`${value}T12:00:00`).toLocaleDateString('en-IN', { month: 'short', day: 'numeric' });
 
@@ -35,12 +33,14 @@ const RevenueAxisTick: React.FC<{ x?: number; y?: number; payload?: { value?: nu
   return <text x={x} y={y} dy={4} textAnchor="end" fill="#77736d" fontSize={11}>{label}</text>;
 };
 
-export const SalesRevenueAreaChart: React.FC<{ sales: SaleRecord[] }> = ({ sales }) => {
+export const SalesRevenueAreaChart: React.FC<{
+  summary: DashboardSummary | null;
+  selectedMonth: string;
+  onMonthChange: (month: string) => void;
+}> = ({ summary, selectedMonth, onMonthChange }) => {
   const now = new Date();
   const currentYear = now.getFullYear();
   const currentMonthIndex = now.getMonth();
-  const currentMonthKey = `${currentYear}-${String(currentMonthIndex + 1).padStart(2, '0')}`;
-  const currentDayOfMonth = now.getDate();
   const monthOptions = useMemo(() => Array.from({ length: 12 }, (_, offset) => {
     const month = new Date(currentYear, currentMonthIndex - offset, 1);
     return {
@@ -48,30 +48,11 @@ export const SalesRevenueAreaChart: React.FC<{ sales: SaleRecord[] }> = ({ sales
       label: month.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' }),
     };
   }), [currentYear, currentMonthIndex]);
-  const [selectedMonth, setSelectedMonth] = useState(() => monthOptions[0].value);
-
-  const chartData = useMemo<RevenuePoint[]>(() => {
-    const [year, month] = selectedMonth.split('-').map(Number);
-    const daysInMonth = new Date(year, month, 0).getDate();
-    const isCurrentMonth = selectedMonth === currentMonthKey;
-    const dayCount = isCurrentMonth ? currentDayOfMonth : daysInMonth;
-    const byDate = new Map<string, RevenuePoint>();
-    for (let dayOfMonth = 1; dayOfMonth <= dayCount; dayOfMonth += 1) {
-      const day = new Date(year, month - 1, dayOfMonth);
-      const key = dateKey(day);
-      byDate.set(key, { date: key, paidSales: 0, creditSales: 0 });
-    }
-
-    sales.forEach((sale) => {
-      const key = sale.date || sale.dateTime.slice(0, 10);
-      const point = byDate.get(key);
-      if (!point) return;
-      if (sale.paymentMode === 'Credit') point.creditSales += sale.amount;
-      else point.paidSales += sale.amount;
-    });
-
-    return [...byDate.values()];
-  }, [sales, selectedMonth, currentMonthKey, currentDayOfMonth]);
+  const chartData = useMemo<RevenuePoint[]>(() => (summary?.chart.days || []).map((day) => ({
+    date: day.date,
+    paidSales: Number(day.paidSales) || 0,
+    creditSales: Number(day.creditSales) || 0,
+  })), [summary]);
   const selectedMonthLabel = monthOptions.find((month) => month.value === selectedMonth)?.label || '';
   const hasMonthlySales = chartData.some((point) => point.paidSales > 0 || point.creditSales > 0);
 
@@ -86,7 +67,7 @@ export const SalesRevenueAreaChart: React.FC<{ sales: SaleRecord[] }> = ({ sales
         <select
           id="sales-revenue-range"
           value={selectedMonth}
-          onChange={(event) => setSelectedMonth(event.target.value)}
+          onChange={(event) => onMonthChange(event.target.value)}
           className="h-9 rounded-lg border border-[#e9e3d9] bg-white px-3 text-xs font-medium text-[#37332d] outline-none focus:ring-2 focus:ring-[#e8a300]/30"
         >
           {monthOptions.map((month) => <option key={month.value} value={month.value}>{month.label}</option>)}
@@ -137,7 +118,7 @@ export const SalesRevenueAreaChart: React.FC<{ sales: SaleRecord[] }> = ({ sales
           </AreaChart>
         </ResponsiveContainer>
       </div>
-      {!hasMonthlySales && <p className="px-6 pb-4 text-center text-xs text-[#77736d]">No sales recorded for {selectedMonthLabel}.</p>}
+      {summary && !hasMonthlySales && <p className="px-6 pb-4 text-center text-xs text-[#77736d]">No sales recorded for {selectedMonthLabel}.</p>}
     </section>
   );
 };

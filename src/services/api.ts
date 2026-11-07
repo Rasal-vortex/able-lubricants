@@ -12,6 +12,20 @@ export interface AuthSession {
   user: AuthUser;
 }
 
+export interface DashboardSummary {
+  today: { date: string; salesTotal: string; expensesTotal: string; paymentsCollected: string };
+  balances: { customerOutstanding: string; supplierPayable: string };
+  currentMonth: { month: string; salesCount: number };
+  chart: { month: string; days: Array<{ date: string; paidSales: string; creditSales: string }> };
+  latestSales: Array<{
+    invoiceNumber: string;
+    customerName: string;
+    paymentMethod: string;
+    total: string;
+    date: string;
+  }>;
+}
+
 interface ApiEnvelope<T> {
   success?: boolean;
   data?: T;
@@ -287,6 +301,8 @@ export const getProductRequest = (token: string, id: string) =>
   apiRequest<ApiProduct>(`/products/${encodeURIComponent(id)}`, {}, token);
 export const getBrands = (token: string) => getAllPages<ApiBrand>('/brands', token);
 export const getUnits = (token: string) => getAllPages<ApiUnit>('/units', token);
+export const getDashboardSummary = (token: string, month: string) =>
+  apiRequest<DashboardSummary>(`/dashboard/summary?month=${encodeURIComponent(month)}`, {}, token);
 
 export const createBrandRequest = (token: string, name: string) =>
   apiRequest<ApiBrand>('/brands', { method: 'POST', body: JSON.stringify({ name, active: true }) }, token);
