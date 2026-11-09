@@ -207,6 +207,18 @@ export interface ApiCoupon {
   sale?: { id: string; invoiceNumber: string } | null;
   createdAt?: string;
   updatedAt?: string;
+  redeemedAmount?: string | number;
+  remainingAmount?: string | number | null;
+  redemptions?: ApiCouponRedemption[];
+}
+
+export interface ApiCouponRedemption {
+  id: string;
+  code: string;
+  amount: string | number;
+  paymentDate: string;
+  billNumber: string;
+  customerName: string;
 }
 
 export interface CouponPayload {
@@ -256,6 +268,33 @@ export interface ApiPurchaseCancellation {
 }
 
 export type PaymentMethod = 'CASH' | 'UPI' | 'BANK_TRANSFER' | 'CHEQUE';
+export type CustomerTenderMethod = 'CASH' | 'UPI' | 'COUPON';
+
+export interface CustomerPaymentPayload {
+  customerId?: string;
+  saleId: string;
+  amount: number;
+  method: CustomerTenderMethod;
+  notes?: string;
+  paymentDate?: string;
+}
+
+export const createCustomerPaymentRequest = (token: string, payload: CustomerPaymentPayload) =>
+  apiRequest('/customer-payments', { method: 'POST', body: JSON.stringify(payload) }, token);
+
+export const getDailySalesReport = (token: string, date: string) =>
+  apiRequest<any>(`/reports/daily-sales?date=${encodeURIComponent(date)}`, {}, token);
+
+export const getProfitReport = (token: string, from: string, to: string) => {
+  const query = new URLSearchParams({ from, to });
+  return apiRequest<any>(`/reports/profit?${query.toString()}`, {}, token);
+};
+
+export const getSupplierOutstandingReport = (token: string) =>
+  apiRequest<any[]>('/reports/suppliers/outstanding', {}, token);
+
+export const getSupplierLedgerReport = (token: string, supplierId: string) =>
+  apiRequest<any>(`/reports/suppliers/${encodeURIComponent(supplierId)}/ledger`, {}, token);
 
 export interface StockAdjustmentPayload {
   productId: string;
@@ -367,6 +406,9 @@ export async function getAllCouponsRequest(token: string, type: CouponFilter): P
 
 export const getCouponRequest = (token: string, id: string) =>
   apiRequest<ApiCoupon>(`/coupons/${encodeURIComponent(id)}`, {}, token);
+
+export const getCouponRedemptionsRequest = (token: string) =>
+  apiRequest<ApiCouponRedemption[]>('/coupons/redemptions', {}, token);
 
 export const createCouponRequest = (token: string, payload: CouponPayload) =>
   apiRequest<ApiCoupon>('/coupons', {

@@ -78,16 +78,16 @@ export const ReceiptModal: React.FC = () => {
             </div>
           )}
 
-          {typeof subtotal === 'number' && typeof billDiscount === 'number' && (
+          {typeof subtotal === 'number' && (
             <div className="space-y-1 border-t border-outline-variant/30 pt-2 text-sm">
               <div className="flex items-center justify-between text-on-surface-variant">
                 <span>Subtotal</span>
                 <span className="font-mono">{formatCurrency(subtotal)}</span>
               </div>
-              <div className="flex items-center justify-between text-on-surface-variant">
+              {typeof billDiscount === 'number' && billDiscount > 0 && <div className="flex items-center justify-between text-on-surface-variant">
                 <span>Bill discount</span>
                 <span className="font-mono">−{formatCurrency(billDiscount)}</span>
-              </div>
+              </div>}
               {typeof couponDiscount === 'number' && couponDiscount > 0 && (
                 <div className="flex items-center justify-between text-on-surface-variant">
                   <span>Coupon{couponCode ? ` (${couponCode})` : ''}</span>

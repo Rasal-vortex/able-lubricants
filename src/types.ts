@@ -70,7 +70,8 @@ export interface SaleRecord {
   customerPhone?: string;
   itemsCount: number;
   itemsList: string;
-  paymentMode: 'Cash' | 'Credit' | 'UPI';
+  paymentMode: 'Cash' | 'Credit' | 'UPI' | 'Coupon' | 'Split';
+  paymentTenders?: Array<{ method: 'CASH' | 'UPI' | 'COUPON'; amount: number; notes?: string }>;
   upiRef?: string;
   amount: number;
   subtotal: number;

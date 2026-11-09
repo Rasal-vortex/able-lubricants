@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { LoaderCircle } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { CreditBill } from '../types';
 import { formatCurrency } from '../utils/currency';
@@ -25,6 +26,7 @@ export const CreditBillManagementView: React.FC = () => {
 
   // Record Drawer
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [savingCreditBill, setSavingCreditBill] = useState(false);
   const [newBillDate, setNewBillDate] = useState(localToday);
   const [newBillNumber, setNewBillNumber] = useState(() => `CR-${Date.now().toString().slice(-7)}`);
   const [selectedParty, setSelectedParty] = useState(customers[0]?.name || '');
@@ -35,8 +37,9 @@ export const CreditBillManagementView: React.FC = () => {
 
   // Inline Pay modal
   const [payModalBill, setPayModalBill] = useState<CreditBill | null>(null);
+  const [postingPayment, setPostingPayment] = useState(false);
   const [payAmountInput, setPayAmountInput] = useState('');
-  const [payMethod, setPayMethod] = useState<'Cash' | 'Bank Wire' | 'UPI Transfer'>('Bank Wire');
+  const [payMethod, setPayMethod] = useState<'Cash' | 'UPI'>('Cash');
 
   // Party balances lookup
   const priorDue = partyLedger.filter(row => row.partyName === selectedParty && row.transactionType === 'INVOICES').reduce((sum, row) => sum + row.outstandingBalance, 0);
@@ -62,31 +65,46 @@ export const CreditBillManagementView: React.FC = () => {
     const dateMatch = (!fromDate || date >= fromDate) && (!toDate || date <= toDate);
     return matchesSearch && matchesStatus && dateMatch;
   });
+  const grandTotalDue = filteredBills.reduce((total, bill) => {
+    // Sales-linked bills store this invoice's outstanding amount. Manually
+    // entered legacy bills include the prior balance in netDue, so subtract
+    // that snapshot to avoid counting earlier bills twice.
+    const currentBillDue = bill.billNumber.startsWith('CR-SB-')
+      ? bill.netDue
+      : Math.max(0, bill.netDue - bill.priorBalance);
+    return total + currentBillDue;
+  }, 0);
 
-  const handleSaveCreditBill = (e: React.FormEvent) => {
+  const handleSaveCreditBill = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (savingCreditBill) return;
     const amt = parseFloat(newBillAmount);
     if (!selectedParty || !newBillNumber.trim() || isNaN(amt) || amt <= 0) {
       showToast('Choose a customer and specify a valid bill number and amount.', 'error');
       return;
     }
 
-    addCreditBill({
-      billDate: newBillDate,
-      billNumber: newBillNumber.trim(),
-      partyName: selectedParty,
-      gstin: '',
-      term: newCreditTerm,
-      status: 'Unpaid',
-      priorBalance: priorDue,
-      billAmount: amt,
-      netDue: priorDue + amt,
-      dueDate: newDueDate,
-      remarks: newRemarks,
-    });
-
-    setDrawerOpen(false);
-    setNewBillNumber(`CR-${Date.now().toString().slice(-7)}`);
+    setSavingCreditBill(true);
+    try {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      addCreditBill({
+        billDate: newBillDate,
+        billNumber: newBillNumber.trim(),
+        partyName: selectedParty,
+        gstin: '',
+        term: newCreditTerm,
+        status: 'Unpaid',
+        priorBalance: priorDue,
+        billAmount: amt,
+        netDue: priorDue + amt,
+        dueDate: newDueDate,
+        remarks: newRemarks,
+      });
+      setDrawerOpen(false);
+      setNewBillNumber(`CR-${Date.now().toString().slice(-7)}`);
+    } finally {
+      setSavingCreditBill(false);
+    }
   };
 
   const handleOpenPayModal = (bill: CreditBill) => {
@@ -94,15 +112,20 @@ export const CreditBillManagementView: React.FC = () => {
     setPayAmountInput(bill.netDue.toString());
   };
 
-  const handleConfirmPay = () => {
-    if (!payModalBill) return;
+  const handleConfirmPay = async () => {
+    if (!payModalBill || postingPayment) return;
     const amt = parseFloat(payAmountInput);
     if (isNaN(amt) || amt <= 0) {
       showToast('Please enter a valid payment amount', 'error');
       return;
     }
-    collectCreditPayment(payModalBill.billNumber, amt, payMethod);
-    setPayModalBill(null);
+    setPostingPayment(true);
+    try {
+      const saved = await collectCreditPayment(payModalBill.billNumber, amt, payMethod);
+      if (saved) setPayModalBill(null);
+    } finally {
+      setPostingPayment(false);
+    }
   };
 
   const handleExportLedger = () => {
@@ -227,12 +250,6 @@ export const CreditBillManagementView: React.FC = () => {
           <table className="w-full text-left border-collapse">
             <thead>
               <tr className="bg-surface-container-low h-9 text-on-surface-variant font-label-sm text-label-sm uppercase tracking-wider select-none">
-                <th className="px-space-md py-2 w-10">
-                  <input
-                    className="w-3.5 h-3.5 rounded bg-surface-container-lowest text-primary focus:ring-0 cursor-pointer"
-                    type="checkbox"
-                  />
-                </th>
                 <th className="px-space-md py-2">Bill Date</th>
                 <th className="px-space-md py-2">Bill Number</th>
                 <th className="px-space-md py-2">Party / Customer Name</th>
@@ -246,12 +263,6 @@ export const CreditBillManagementView: React.FC = () => {
             <tbody className="divide-y divide-surface-container text-body-md font-body-md text-on-surface">
               {filteredBills.map((bill) => (
                 <tr key={bill.id} className="hover:bg-surface-container-low/50 transition-colors group">
-                  <td className="px-space-md py-2.5">
-                    <input
-                      className="w-3.5 h-3.5 rounded bg-surface-container-lowest text-primary focus:ring-0 cursor-pointer"
-                      type="checkbox"
-                    />
-                  </td>
                   <td className="px-space-md py-2.5 font-data-mono-sm text-data-mono-sm text-on-surface whitespace-nowrap">
                     {bill.billDate}
                   </td>
@@ -348,7 +359,12 @@ export const CreditBillManagementView: React.FC = () => {
               <strong className="text-on-surface font-semibold">{creditBills.length}</strong> credit bills
             </span>
           </div>
-          <div className="flex items-center gap-space-xs">
+          <div className="flex flex-wrap items-center justify-end gap-space-md">
+            <div className="text-right">
+              <div className="text-xs font-semibold uppercase tracking-wide text-on-surface-variant">Grand total due</div>
+              <div className="text-xl font-extrabold text-error">{formatCurrency(grandTotalDue)}</div>
+            </div>
+            <div className="flex items-center gap-space-xs">
             <button
               className="h-7 w-7 rounded-lg bg-surface-container-lowest text-outline opacity-50 flex items-center justify-center cursor-not-allowed"
               disabled
@@ -368,6 +384,7 @@ export const CreditBillManagementView: React.FC = () => {
             <button className="h-7 w-7 rounded-lg bg-surface-container-lowest text-on-surface hover:bg-surface-container flex items-center justify-center transition-colors" type="button">
               <span className="material-symbols-outlined text-[16px]">chevron_right</span>
             </button>
+            </div>
           </div>
         </div>
       </div>
@@ -568,10 +585,11 @@ export const CreditBillManagementView: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="h-8 px-4 rounded-lg bg-primary text-on-primary hover:bg-primary-container transition-colors font-label-md text-label-md flex items-center gap-1.5 shadow-sm"
+                  disabled={savingCreditBill}
+                  className="h-8 px-4 rounded-lg bg-primary text-on-primary hover:bg-primary-container transition-colors font-label-md text-label-md flex items-center gap-1.5 shadow-sm disabled:cursor-wait disabled:opacity-70"
                 >
-                  <span className="material-symbols-outlined text-[16px]">check</span>
-                  <span>Save Credit Bill</span>
+                  {savingCreditBill ? <LoaderCircle size={16} className="animate-spin" aria-hidden="true" /> : <span className="material-symbols-outlined text-[16px]">check</span>}
+                  <span>{savingCreditBill ? 'Saving…' : 'Save Credit Bill'}</span>
                 </button>
               </div>
             </form>
@@ -583,7 +601,7 @@ export const CreditBillManagementView: React.FC = () => {
       {payModalBill && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-inverse-surface/40 p-4"
-          onClick={() => setPayModalBill(null)}
+          onClick={() => { if (!postingPayment) setPayModalBill(null); }}
         >
           <div
             className="bg-surface-container-lowest rounded-xl max-w-md w-full p-space-lg shadow-xl animate-in fade-in zoom-in-95 duration-150"
@@ -595,8 +613,9 @@ export const CreditBillManagementView: React.FC = () => {
               </h3>
               <button
                 type="button"
+                disabled={postingPayment}
                 className="text-on-surface-variant hover:text-on-surface p-1"
-                onClick={() => setPayModalBill(null)}
+                onClick={() => { if (!postingPayment) setPayModalBill(null); }}
               >
                 <span className="material-symbols-outlined text-[18px]">close</span>
               </button>
@@ -634,9 +653,8 @@ export const CreditBillManagementView: React.FC = () => {
                   onChange={(e) => setPayMethod(e.target.value as any)}
                   className="w-full h-8 px-2.5 rounded bg-surface-container-low font-body-md text-body-md text-on-surface focus:outline-none border border-outline-variant/30"
                 >
-                  <option value="Bank Wire">Bank Wire</option>
                   <option value="Cash">Cash</option>
-                  <option value="UPI Transfer">UPI Transfer</option>
+                  <option value="UPI">UPI</option>
                 </select>
               </div>
             </div>
@@ -644,17 +662,20 @@ export const CreditBillManagementView: React.FC = () => {
             <div className="flex items-center justify-end gap-2 pt-space-sm border-t border-surface-container">
               <button
                 type="button"
+                disabled={postingPayment}
                 className="h-8 px-3 rounded font-label-md text-label-md text-on-surface-variant hover:bg-surface-container"
-                onClick={() => setPayModalBill(null)}
+                onClick={() => { if (!postingPayment) setPayModalBill(null); }}
               >
                 Cancel
               </button>
               <button
                 type="button"
-                className="h-8 px-4 rounded bg-primary text-on-primary font-label-md text-label-md font-semibold hover:bg-primary-container shadow-sm"
+                disabled={postingPayment}
+                className="h-8 px-4 rounded bg-primary text-on-primary font-label-md text-label-md font-semibold hover:bg-primary-container shadow-sm flex items-center gap-2 disabled:cursor-wait disabled:opacity-70"
                 onClick={handleConfirmPay}
               >
-                Post Payment
+                {postingPayment && <LoaderCircle size={15} className="animate-spin" aria-hidden="true" />}
+                {postingPayment ? 'Posting…' : 'Post Payment'}
               </button>
             </div>
           </div>

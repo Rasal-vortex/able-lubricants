@@ -15,9 +15,10 @@ import {
 import { useApp } from '../context/AppContext';
 import { ExpenseManagementView } from './ExpenseManagementView';
 import { formatCurrency } from '../utils/currency';
+import { getDailySalesReport } from '../services/api';
 
 type RegisterTab = 'sales' | 'expenses';
-type PaymentMode = 'all' | 'Cash' | 'Credit' | 'UPI';
+type PaymentMode = 'all' | 'Cash' | 'Credit' | 'UPI' | 'Coupon';
 
 const localDate = (date: Date) => {
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
@@ -26,6 +27,15 @@ const localDate = (date: Date) => {
 
 const saleDate = (date: string | undefined, dateTime: string) =>
   (date || dateTime.slice(0, 10)).slice(0, 10);
+
+const formatSaleDateTime = (value: string) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat('en-IN', {
+    day: '2-digit', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: true,
+  }).format(date);
+};
 
 const reportDate = (date: string) => new Intl.DateTimeFormat('en-IN', {
   day: '2-digit',
@@ -36,7 +46,7 @@ const reportDate = (date: string) => new Intl.DateTimeFormat('en-IN', {
 const csvCell = (value: string | number) => `"${String(value).replace(/"/g, '""')}"`;
 
 export const DailySalesManagementView: React.FC = () => {
-  const { sales, expenses, showToast } = useApp();
+  const { sales, expenses, showToast, authSession } = useApp();
   const today = localDate(new Date());
   const [activeTab, setActiveTab] = useState<RegisterTab>('sales');
   const [quickDate, setQuickDate] = useState<'today' | 'yesterday' | 'custom'>('today');
@@ -45,31 +55,65 @@ export const DailySalesManagementView: React.FC = () => {
   const [modeFilter, setModeFilter] = useState<PaymentMode>('all');
   const [searchTerm, setSearchTerm] = useState('');
   const [page, setPage] = useState(1);
+  const [apiSales, setApiSales] = useState<typeof sales | null>(null);
+  const [apiLoading, setApiLoading] = useState(false);
   const pageSize = 5;
 
+  useEffect(() => {
+    if (!authSession) { setApiSales(null); return; }
+    const start = new Date(`${fromDate}T12:00:00`);
+    const end = new Date(`${toDate}T12:00:00`);
+    const dates: string[] = [];
+    for (const cursor = new Date(start); cursor <= end && dates.length < 32; cursor.setDate(cursor.getDate() + 1)) dates.push(localDate(cursor));
+    if (!dates.length) return;
+    let cancelled = false;
+    setApiLoading(true);
+    void Promise.all(dates.map((date) => getDailySalesReport(authSession.token, date))).then((reports) => {
+      if (cancelled) return;
+      const rows: typeof sales = [];
+      for (const report of reports) for (const invoice of report.invoices || []) {
+        const products = invoice.products || [];
+        const payments = invoice.payments || [];
+        const totalCollected = payments.reduce((sum: number, payment: any) => sum + Number(payment.amount), 0);
+        const productsTotal = products.reduce((sum: number, product: any) => sum + Number(product.lineTotal || 0), 0);
+        let allocatedSoFar = 0;
+        const paymentBreakdown = payments.map((payment: any) => {
+          const method = payment.method === 'COUPON' ? 'Coupon' : payment.method === 'UPI' ? 'UPI' : 'Cash';
+          const code = method === 'Coupon' ? payment.notes?.match(/^Coupon code: (.+)$/)?.[1] : undefined;
+          return `${method}${code ? ` ${code}` : ''} ${Number(payment.amount).toFixed(2)}`;
+        }).join(' · ');
+        for (const [productIndex, product] of products.entries()) {
+          const paymentDate = payments[0]?.date || invoice.billDate;
+          const productAmount = productIndex === products.length - 1
+            ? totalCollected - allocatedSoFar
+            : productsTotal > 0 ? Math.round(totalCollected * Number(product.lineTotal || 0) / productsTotal * 100) / 100 : 0;
+          allocatedSoFar += productAmount;
+          rows.push({ id: `${report.date}-${invoice.invoiceNumber}-${product.productId}`, billNumber: invoice.invoiceNumber, dateTime: paymentDate, date: report.date, customerName: invoice.customer, customerType: 'registered', itemsCount: 1, itemsList: `${product.productName} × ${product.quantity}${product.unitSymbol ? ` ${product.unitSymbol}` : ''}`, paymentMode: paymentBreakdown as any, amount: productAmount, subtotal: totalCollected, lineItems: [], });
+        }
+      }
+      setApiSales(rows);
+    }).catch((error) => { if (!cancelled) { setApiSales([]); showToast(error instanceof Error ? error.message : 'Daily sales could not be loaded.', 'error'); } }).finally(() => { if (!cancelled) setApiLoading(false); });
+    return () => { cancelled = true; };
+  }, [authSession, fromDate, toDate, showToast]);
+
   const inRange = (date: string) => date >= fromDate && date <= toDate;
-  const rangeSales = sales.filter((sale) => inRange(saleDate(sale.date, sale.dateTime)));
+  const rangeSales = (apiSales ?? sales)
+    .filter((sale) => inRange(saleDate(sale.date, sale.dateTime)))
+    .sort((a, b) => new Date(b.dateTime).getTime() - new Date(a.dateTime).getTime());
   const rangeExpenses = expenses.filter((expense) => inRange(expense.date.slice(0, 10)));
   const query = searchTerm.toLowerCase().trim();
   const filteredSales = rangeSales.filter((sale) => {
-    const matchesMode = modeFilter === 'all' || sale.paymentMode === modeFilter;
+    const matchesMode = modeFilter === 'all' || sale.paymentMode === modeFilter || sale.paymentMode.includes(`${modeFilter} `);
     const matchesSearch = !query || sale.billNumber.toLowerCase().includes(query) || sale.customerName.toLowerCase().includes(query) || sale.itemsList.toLowerCase().includes(query);
     return matchesMode && matchesSearch;
   });
   const matchingExpenses = rangeExpenses.filter((expense) => !query || expense.description.toLowerCase().includes(query) || Boolean(expense.category?.toLowerCase().includes(query)) || Boolean(expense.notes?.toLowerCase().includes(query)));
 
-  let runningTotal = 0;
-  const salesWithRunningTotal = [...filteredSales].reverse().map((sale) => {
-    runningTotal += sale.amount;
-    return { ...sale, runningTotal };
-  }).reverse();
-
-  const paymentsReceived = filteredSales.filter((sale) => sale.paymentMode !== 'Credit').reduce((sum, sale) => sum + sale.amount, 0);
-  const pageCount = Math.max(1, Math.ceil(salesWithRunningTotal.length / pageSize));
+  const pageCount = Math.max(1, Math.ceil(filteredSales.length / pageSize));
   const safePage = Math.min(page, pageCount);
-  const pageSales = salesWithRunningTotal.slice((safePage - 1) * pageSize, safePage * pageSize);
-  const firstRow = salesWithRunningTotal.length ? (safePage - 1) * pageSize + 1 : 0;
-  const lastRow = Math.min(safePage * pageSize, salesWithRunningTotal.length);
+  const pageSales = filteredSales.slice((safePage - 1) * pageSize, safePage * pageSize);
+  const firstRow = filteredSales.length ? (safePage - 1) * pageSize + 1 : 0;
+  const lastRow = Math.min(safePage * pageSize, filteredSales.length);
   const printSalesTotal = filteredSales.reduce((sum, sale) => sum + sale.amount, 0);
   const printExpensesTotal = matchingExpenses.reduce((sum, expense) => sum + expense.amount, 0);
 
@@ -106,8 +150,8 @@ export const DailySalesManagementView: React.FC = () => {
 
   const handleExportDaySheet = () => {
     const salesRows = [
-      ['Date & Time', 'Bill Number', 'Customer', 'Items Breakdown', 'Amount (INR)', 'Payment Mode', 'Cumulative Sales (INR)'],
-      ...salesWithRunningTotal.map((sale) => [sale.dateTime, sale.billNumber, sale.customerName, sale.itemsList, formatCurrency(sale.amount), sale.paymentMode, formatCurrency(sale.runningTotal)]),
+      ['Date & Time', 'Bill Number', 'Customer', 'Product', 'Product Amount (INR)', 'Payment Mode'],
+      ...filteredSales.map((sale) => [formatSaleDateTime(sale.dateTime), sale.billNumber, sale.customerName, sale.itemsList, formatCurrency(sale.amount), sale.paymentMode]),
     ];
     const expenseRows = [
       [],
@@ -186,6 +230,7 @@ export const DailySalesManagementView: React.FC = () => {
               <option value="Cash">Cash</option>
               <option value="Credit">Credit</option>
               <option value="UPI">UPI</option>
+              <option value="Coupon">Coupon</option>
             </select>
           </label>}
         </div>
@@ -201,37 +246,37 @@ export const DailySalesManagementView: React.FC = () => {
           <div className="overflow-x-auto">
             <table className="w-full min-w-[850px] border-collapse text-left">
               <thead><tr className="h-10 bg-[#f6f5f2] text-xs font-bold uppercase tracking-wide text-[#6d685f]">
-                <th className="px-4 py-2">Date &amp; time</th><th className="px-4 py-2">Bill number</th><th className="px-4 py-2">Product name</th><th className="px-4 py-2 text-right">Amount (₹)</th><th className="px-4 py-2 text-center">Mode of payment</th><th className="px-4 py-2 text-right">Total sales (₹)</th>
+                <th className="px-4 py-2">Date &amp; time</th><th className="px-4 py-2">Bill number</th><th className="px-4 py-2">Product name</th><th className="px-4 py-2 text-right">Product amount (₹)</th><th className="px-4 py-2 text-center">Mode of payment</th>
               </tr></thead>
               <tbody className="divide-y divide-[#efede8] text-sm text-[#272727]">
                 {pageSales.map((item) => (
                   <tr key={item.id} className="h-11 transition hover:bg-[#fffdf8]">
-                    <td className="whitespace-nowrap px-4 py-2 text-xs text-[#68645e]">{item.dateTime}</td>
+                    <td className="whitespace-nowrap px-4 py-2 text-xs text-[#68645e]">{formatSaleDateTime(item.dateTime)}</td>
                     <td className="whitespace-nowrap px-4 py-2 font-semibold text-[#a86600]">{item.billNumber}</td>
                     <td className="max-w-[440px] px-4 py-2"><span className="block truncate" title={item.itemsList}>{item.itemsList}</span></td>
                     <td className="whitespace-nowrap px-4 py-2 text-right font-semibold">{formatCurrency(item.amount)}</td>
                     <td className="px-4 py-2 text-center"><span className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-semibold ${item.paymentMode === 'UPI' ? 'bg-[#eee9ff] text-[#5940a5]' : item.paymentMode === 'Cash' ? 'bg-[#f0f0ed] text-[#45443f]' : 'bg-[#eaf0ff] text-[#34549b]'}`}>
                       <span className="material-symbols-outlined text-[14px]">{item.paymentMode === 'UPI' ? 'contactless' : item.paymentMode === 'Cash' ? 'payments' : 'credit_card'}</span>{item.paymentMode}
                     </span></td>
-                    <td className="whitespace-nowrap px-4 py-2 text-right font-bold">{formatCurrency(item.runningTotal)}</td>
                   </tr>
                 ))}
-                {salesWithRunningTotal.length === 0 && <tr><td colSpan={6} className="px-4 py-12 text-center text-sm text-[#77736d]">No sales match this date range and filter.</td></tr>}
+                {filteredSales.length === 0 && <tr><td colSpan={5} className="px-4 py-12 text-center text-sm text-[#77736d]">No sales match this date range and filter.</td></tr>}
               </tbody>
             </table>
           </div>
           <footer className="flex flex-col gap-3 border-t border-[#eee8df] bg-[#f8f7f4] px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[#6b665c]">
-              <span>Showing <strong className="text-[#272727]">{firstRow}-{lastRow}</strong> of <strong className="text-[#272727]">{filteredSales.length}</strong> sales</span>
-              <span className="hidden text-[#bcb6ac] sm:inline">•</span>
-              <span>Payments received: <strong className="text-[#9a6800]">{formatCurrency(paymentsReceived)}</strong></span>
+              <span>Showing <strong className="text-[#272727]">{firstRow}-{lastRow}</strong> of <strong className="text-[#272727]">{filteredSales.length}</strong> products</span>
             </div>
-            <div className="flex items-center gap-1">
-              <button type="button" aria-label="First page" disabled={safePage === 1} onClick={() => setPage(1)} className="flex h-8 w-8 items-center justify-center rounded-md border border-[#e8e4dd] bg-white text-[#555] disabled:cursor-not-allowed disabled:opacity-40"><ChevronsLeft size={16} /></button>
-              <button type="button" aria-label="Previous page" disabled={safePage === 1} onClick={() => setPage((value) => Math.max(1, value - 1))} className="flex h-8 w-8 items-center justify-center rounded-md border border-[#e8e4dd] bg-white text-[#555] disabled:cursor-not-allowed disabled:opacity-40"><ChevronLeft size={16} /></button>
-              <span className="px-2 text-xs font-semibold text-[#555]">{safePage} / {pageCount}</span>
-              <button type="button" aria-label="Next page" disabled={safePage >= pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))} className="flex h-8 w-8 items-center justify-center rounded-md border border-[#e8e4dd] bg-white text-[#555] disabled:cursor-not-allowed disabled:opacity-40"><ChevronRight size={16} /></button>
-              <button type="button" aria-label="Last page" disabled={safePage >= pageCount} onClick={() => setPage(pageCount)} className="flex h-8 w-8 items-center justify-center rounded-md border border-[#e8e4dd] bg-white text-[#555] disabled:cursor-not-allowed disabled:opacity-40"><ChevronsRight size={16} /></button>
+            <div className="flex flex-wrap items-center justify-end gap-4">
+              <div className="text-right"><div className="text-xs font-semibold uppercase tracking-wide text-[#77736d]">Grand total</div><div className="text-xl font-extrabold text-[#493819]">{formatCurrency(printSalesTotal)}</div></div>
+              <div className="flex items-center gap-1">
+                <button type="button" aria-label="First page" disabled={safePage === 1} onClick={() => setPage(1)} className="flex h-8 w-8 items-center justify-center rounded-md border border-[#e8e4dd] bg-white text-[#555] disabled:cursor-not-allowed disabled:opacity-40"><ChevronsLeft size={16} /></button>
+                <button type="button" aria-label="Previous page" disabled={safePage === 1} onClick={() => setPage((value) => Math.max(1, value - 1))} className="flex h-8 w-8 items-center justify-center rounded-md border border-[#e8e4dd] bg-white text-[#555] disabled:cursor-not-allowed disabled:opacity-40"><ChevronLeft size={16} /></button>
+                <span className="px-2 text-xs font-semibold text-[#555]">{safePage} / {pageCount}</span>
+                <button type="button" aria-label="Next page" disabled={safePage >= pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))} className="flex h-8 w-8 items-center justify-center rounded-md border border-[#e8e4dd] bg-white text-[#555] disabled:cursor-not-allowed disabled:opacity-40"><ChevronRight size={16} /></button>
+                <button type="button" aria-label="Last page" disabled={safePage >= pageCount} onClick={() => setPage(pageCount)} className="flex h-8 w-8 items-center justify-center rounded-md border border-[#e8e4dd] bg-white text-[#555] disabled:cursor-not-allowed disabled:opacity-40"><ChevronsRight size={16} /></button>
+              </div>
             </div>
           </footer>
         </motion.section>
@@ -257,7 +302,6 @@ export const DailySalesManagementView: React.FC = () => {
 
         {activeTab === 'sales' ? <div className="register-print-totals">
           <div><span>Total sales</span><strong>{formatCurrency(printSalesTotal)}</strong></div>
-          <div><span>Payments received</span><strong>{formatCurrency(paymentsReceived)}</strong></div>
         </div> : <div className="register-print-totals">
           <div><span>Total expenses</span><strong>{formatCurrency(printExpensesTotal)}</strong></div>
         </div>}
@@ -265,12 +309,13 @@ export const DailySalesManagementView: React.FC = () => {
         {activeTab === 'sales' ? <section className="register-print-section">
           <h2>Sales <span>({filteredSales.length})</span></h2>
           <table className="register-print-sales">
-            <thead><tr><th>Date &amp; time</th><th>Bill number</th><th>Product name</th><th>Amount (₹)</th><th>Payment mode</th><th>Total sales (₹)</th></tr></thead>
+            <thead><tr><th>Date &amp; time</th><th>Bill number</th><th>Product name</th><th>Product amount (₹)</th><th>Payment mode</th></tr></thead>
             <tbody>
-              {salesWithRunningTotal.map((sale) => <tr key={sale.id}>
-                <td>{sale.dateTime}</td><td>{sale.billNumber}</td><td>{sale.itemsList}</td><td>{formatCurrency(sale.amount)}</td><td>{sale.paymentMode}</td><td>{formatCurrency(sale.runningTotal)}</td>
+              {filteredSales.map((sale) => <tr key={sale.id}>
+                <td>{formatSaleDateTime(sale.dateTime)}</td><td>{sale.billNumber}</td><td>{sale.itemsList}</td><td>{formatCurrency(sale.amount)}</td><td>{sale.paymentMode}</td>
               </tr>)}
-              {filteredSales.length === 0 && <tr><td colSpan={6} className="register-print-empty">No sales in this range.</td></tr>}
+              {filteredSales.length === 0 && <tr><td colSpan={5} className="register-print-empty">No sales in this range.</td></tr>}
+              {filteredSales.length > 0 && <tr><td colSpan={3}><strong>Grand total</strong></td><td><strong>{formatCurrency(printSalesTotal)}</strong></td><td /></tr>}
             </tbody>
           </table>
         </section> : <section className="register-print-section">

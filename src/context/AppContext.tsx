@@ -27,6 +27,7 @@ import {
   createProductRequest,
   createStockAdjustmentRequest,
   createSaleRequest,
+  createCustomerPaymentRequest,
   createPurchaseRequest,
   createSupplierPaymentRequest,
   cancelPurchaseRequest,
@@ -184,7 +185,7 @@ interface AppContextType {
   // Credit Bills
   creditBills: CreditBill[];
   addCreditBill: (bill: Omit<CreditBill, 'id'>) => void;
-  collectCreditPayment: (billNumber: string, amount: number, paymentMethod: string) => void;
+  collectCreditPayment: (billNumber: string, amount: number, paymentMethod: string) => Promise<boolean>;
 
   // Expenses
   expenses: Expense[];
@@ -225,7 +226,7 @@ interface AppContextType {
     refNumber: string;
     date: string;
     party: string;
-    items?: Array<{ name: string; qty: number; price: number; total: number }>;
+    items?: Array<{ name: string; qty: number; price: number; total: number; unit?: string }>;
     subtotal?: number;
     billDiscount?: number;
     couponCode?: string;
@@ -637,6 +638,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       showToast('Sign in before completing a sale.', 'error');
       return false;
     }
+
     const requested = saleData.lineItems || [];
     if (!requested.length) {
       showToast('Add at least one catalog product to the bill.', 'error');
@@ -704,6 +706,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return false;
     }
 
+    const tenderPayments = saleData.paymentTenders?.length
+      ? saleData.paymentTenders
+      : saleData.paymentMode === 'Cash' || saleData.paymentMode === 'UPI' || saleData.paymentMode === 'Coupon'
+        ? [{ method: saleData.paymentMode.toUpperCase() as 'CASH' | 'UPI' | 'COUPON', amount: saleData.amount }]
+        : [];
+    let paymentRecordedAmount = 0;
+    let paymentWarning: string | undefined;
+    if (tenderPayments.length) {
+      try {
+        for (const tender of tenderPayments) {
+          if (tender.amount <= 0) continue;
+          await createCustomerPaymentRequest(authSession.token, {
+            ...(customer ? { customerId: customer.id } : {}),
+            saleId: apiSale.id,
+            amount: tender.amount,
+            method: tender.method,
+            ...(tender.notes ? { notes: tender.notes } : {}),
+          });
+          paymentRecordedAmount += tender.amount;
+        }
+      } catch (error) {
+        paymentWarning = error instanceof Error ? error.message : 'A payment could not be recorded.';
+      }
+    }
+
     const newSale: SaleRecord = {
       ...saleData,
       id: apiSale.id,
@@ -717,8 +744,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }));
 
     // If sale was made via Credit, add to credit bills and party ledger
-    if (newSale.paymentMode === 'Credit') {
+    if (newSale.paymentMode === 'Credit' || (newSale.paymentMode === 'Split' && paymentRecordedAmount < newSale.amount)) {
       const priorBalance = creditBills.filter((bill) => bill.partyName === newSale.customerName).reduce((sum, bill) => sum + bill.netDue, 0);
+      const outstanding = Math.max(0, newSale.amount - paymentRecordedAmount);
       const newCreditBill: CreditBill = {
         id: 'cr-' + Date.now(),
         billDate: new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
@@ -726,10 +754,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         partyName: newSale.customerName,
         gstin: '',
         term: 'Due on agreed date',
-        status: 'Unpaid',
+        status: outstanding === 0 ? 'Settled' : paymentRecordedAmount > 0 ? 'Partially Paid' : 'Unpaid',
         priorBalance,
         billAmount: newSale.amount,
-        netDue: priorBalance + newSale.amount,
+        netDue: outstanding,
         dueDate: newSale.creditDueDate || new Date().toISOString().slice(0, 10),
         remarks: `Generated from Sales Bill ${newSale.billNumber}`,
       };
@@ -742,16 +770,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         invoiceNumber: 'CR-' + newSale.billNumber,
         invoiceDate: new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
         billAmount: newSale.amount,
-        paymentDate: '-',
-        amountPaid: 0,
-        outstandingBalance: priorBalance + newSale.amount,
+        paymentDate: paymentRecordedAmount > 0 ? new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : '-',
+        amountPaid: paymentRecordedAmount,
+        outstandingBalance: outstanding,
         transactionType: 'INVOICES',
         partyType: 'customer',
       };
       setPartyLedger((prev) => [newLedgerEntry, ...prev]);
     }
 
-    showToast(`Sale Bill ${newSale.billNumber} created successfully! (${formatCurrency(newSale.amount)})`);
+    if (paymentWarning) {
+      const followUp = saleData.paymentMode === 'Split' || saleData.paymentMode === 'Credit'
+        ? 'The unpaid amount remains on the customer credit balance.'
+        : 'Check the payment status before retrying.';
+      showToast(`Sale saved, but a payment was not recorded: ${paymentWarning}. ${followUp}`, 'error');
+    } else {
+      showToast(`Sale Bill ${newSale.billNumber} created successfully! (${formatCurrency(newSale.amount)})`);
+    }
     return true;
   };
 
@@ -781,11 +816,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     showToast(`Credit Bill ${newBill.billNumber} recorded for ${newBill.partyName}.`);
   };
 
-  const collectCreditPayment = (billNumber: string, amount: number, paymentMethod: string) => {
+  const collectCreditPayment = async (billNumber: string, amount: number, paymentMethod: string): Promise<boolean> => {
     const target = creditBills.find((bill) => bill.billNumber === billNumber);
     if (!target || amount <= 0 || amount > target.netDue) {
       showToast(target ? 'Receipt must be positive and cannot exceed the outstanding balance.' : 'Credit bill was not found.', 'error');
-      return;
+      return false;
+    }
+    const sale = sales.find((entry) => entry.billNumber === billNumber.replace(/^CR-/, ''));
+    const customer = customers.find((entry) => entry.name === target.partyName);
+    const method = paymentMethod.toLowerCase().includes('coupon') ? 'COUPON' : paymentMethod.toLowerCase().includes('upi') ? 'UPI' : 'CASH';
+    if (!authSession || !sale) {
+      showToast('This credit bill is not linked to a saved API sale.', 'error');
+      return false;
+    }
+    try {
+      await createCustomerPaymentRequest(authSession.token, {
+        ...(customer ? { customerId: customer.id } : {}),
+        saleId: sale.id,
+        amount,
+        method,
+        paymentDate: new Date().toISOString(),
+      });
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'The credit payment could not be saved.', 'error');
+      return false;
     }
     const newDue = target.netDue - amount;
     setCreditBills((prev) => prev.map((bill) => bill.id === target.id ? {
@@ -827,6 +881,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }, ...prev]);
 
     showToast(`Payment receipt of ${formatCurrency(amount)} recorded for bill ${billNumber} via ${paymentMethod}.`);
+    return true;
   };
 
   // Expense Actions

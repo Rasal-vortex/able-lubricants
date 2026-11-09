@@ -485,7 +485,7 @@ export const ProductEntryView: React.FC = () => {
                 </div>
                 <div className="flex flex-col gap-1.5 text-[12px] font-medium text-on-surface">
                   <label>Unit
-                    <select required value={formUnitId} onChange={(e) => setFormUnitId(e.target.value)} disabled={catalogLoading || drawerMode === 'edit'} className="mt-1.5 h-8 w-full px-2 bg-surface-container-low border border-outline-variant rounded text-on-surface font-normal disabled:opacity-70">
+                    <select required value={formUnitId} onChange={(e) => setFormUnitId(e.target.value)} disabled={catalogLoading} className="mt-1.5 h-8 w-full px-2 bg-surface-container-low border border-outline-variant rounded text-on-surface font-normal disabled:opacity-70">
                       <option value="">{catalogLoading ? 'Loading units…' : 'Select unit'}</option>
                       {units.map((unit) => <option key={unit.id} value={unit.id}>{unit.name}{unit.symbol ? ` (${unit.symbol})` : ''}</option>)}
                     </select>
