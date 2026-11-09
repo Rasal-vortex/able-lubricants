@@ -108,6 +108,32 @@
   min-height: 620px;
 }
 
+.login-role-switch-indicator {
+  position: absolute;
+  z-index: 1;
+  top: 6px;
+  bottom: 6px;
+  left: 6px;
+  width: calc(50% - 6px);
+  transform: translateX(0);
+  border: 1px solid rgba(243, 198, 77, .8);
+  border-radius: 9999px;
+  background: #ffedbd;
+  box-shadow: 0 2px 5px rgba(42, 34, 15, .1);
+  transition: transform 380ms cubic-bezier(.22, 1, .36, 1);
+  pointer-events: none;
+}
+
+.login-role-switch-indicator--staff {
+  transform: translateX(100%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .login-role-switch-indicator {
+    transition: none;
+  }
+}
+
 @media (max-width: 699px) {
   .login-card-layout {
     grid-template-columns: minmax(0, 1fr);

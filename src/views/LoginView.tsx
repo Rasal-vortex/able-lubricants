@@ -65,7 +65,8 @@ export const LoginView: React.FC = () => {
               <p className="mt-2 text-base leading-relaxed text-[#68707d]">Choose your account type and enter your credentials.</p>
             </div>
 
-            <div className="grid grid-cols-2 rounded-full bg-[#f0f1f4] p-1.5" role="group" aria-label="Account type">
+            <div className="login-role-switch relative grid grid-cols-2 rounded-full bg-[#f0f1f4] p-1.5" role="group" aria-label="Account type">
+              <span aria-hidden="true" className={`login-role-switch-indicator ${role === 'STAFF' ? 'login-role-switch-indicator--staff' : ''}`} />
               {(['ADMIN', 'STAFF'] as const).map((accountRole) => (
                 <button
                   key={accountRole}
@@ -77,7 +78,7 @@ export const LoginView: React.FC = () => {
                     setPassword(localCredentials?.[accountRole].password ?? '');
                     setError('');
                   }}
-                  className={`h-12 rounded-full text-sm font-semibold transition-all duration-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#d99a00] sm:text-base ${role === accountRole ? 'bg-[#ffedbd] text-[#17191d] shadow-sm ring-1 ring-[#f3c64d]/70' : 'text-[#606775] hover:text-[#17191d]'}`}
+                  className={`relative z-10 h-12 rounded-full text-sm font-semibold transition-colors duration-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#d99a00] sm:text-base ${role === accountRole ? 'text-[#17191d]' : 'text-[#606775] hover:text-[#17191d]'}`}
                 >
                   {accountRole === 'ADMIN' ? 'Admin' : 'Staff'}
                 </button>
