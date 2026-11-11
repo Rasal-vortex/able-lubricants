@@ -5,7 +5,6 @@ export type NavScreen =
   | 'credit-bill-management'
   | 'coupons'
   | 'daily-sales-management'
-  | 'expense-management'
   | 'purchase-bill-entry'
   | 'party-ledger-management'
   | 'reports-and-profit-calculation';
@@ -44,9 +43,11 @@ export interface SaleLineItem {
   sku: string;
   unit: string;
   quantity: number;
+  displayQuantity?: number;
+  displayUnitName?: string;
+  displayUnitSymbol?: string;
   sellingPrice: number;
   purchaseRate: number;
-  discount: number;
   tax: number;
 }
 
@@ -58,7 +59,6 @@ export interface CartItem {
   tax: number;
   quantity: number;
   price: number;
-  discount: number; // percentage
 }
 
 export interface SaleRecord {
@@ -75,6 +75,7 @@ export interface SaleRecord {
   upiRef?: string;
   amount: number;
   subtotal: number;
+  billTotal?: number;
   couponCode?: string;
   couponPrice?: number;
   discountAmount?: number;

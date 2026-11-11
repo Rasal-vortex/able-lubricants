@@ -115,7 +115,7 @@ const mapProduct = (product: ApiProduct): Product => ({
   unitName: product.unitName || (typeof product.unit === 'object' ? product.unit?.name : undefined) || (typeof product.unit === 'string' ? product.unit : undefined) || product.unitSymbol || '',
   unitAllowsDecimals: product.unitAllowsDecimals ?? (typeof product.unit === 'object' ? product.unit?.allowsDecimals : undefined) ?? false,
   sellingPrice: Number(product.sellingPrice),
-  purchaseRate: 0,
+  purchaseRate: Number(product.purchaseRate),
   mrp: Number(product.mrp),
   quantity: Number(product.currentStock),
   status: product.active === false ? 'Inactive' : 'Active',
@@ -160,6 +160,8 @@ interface AppContextType {
   catalogError: string | null;
   activeScreen: NavScreen;
   setActiveScreen: (screen: NavScreen) => void;
+  creditBillPartyTarget: { type: 'customers' | 'suppliers'; name: string } | null;
+  setCreditBillPartyTarget: (target: { type: 'customers' | 'suppliers'; name: string } | null) => void;
   searchModalOpen: boolean;
   setSearchModalOpen: (open: boolean) => void;
   toast: ToastInfo | null;
@@ -216,7 +218,7 @@ interface AppContextType {
     paymentDate: string,
     paymentMode: string
   ) => void;
-  recordSupplierPayment: (invoiceNumber: string, partyName: string, amount: number, paymentDate: string, paymentMode: string) => Promise<boolean>;
+  recordSupplierPayment: (invoiceNumber: string, partyName: string, amount: number, paymentDate: string, paymentMode: string, purchaseId: string, outstandingBalance: number, invoiceDate?: string) => Promise<boolean>;
 
   // Quick Action Modals
   quickCollectTarget: { party: string; bill: string; amount: number } | null;
@@ -250,6 +252,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [activeScreen, setActiveScreen] = useState<NavScreen>('dashboard');
+  const [creditBillPartyTarget, setCreditBillPartyTarget] = useState<{ type: 'customers' | 'suppliers'; name: string } | null>(null);
   const [searchModalOpen, setSearchModalOpen] = useState(false);
   const [toast, setToast] = useState<ToastInfo | null>(null);
 
@@ -501,6 +504,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setProducts((prev) => prev.map((product) => product.id === id ? {
       ...product,
       ...updates,
+      mrp: updates.mrp === null ? 0 : updates.mrp ?? product.mrp,
       brand: updates.brandId ? brands.find((brand) => brand.id === updates.brandId)?.name || product.brand : product.brand,
       unit: updates.unitId ? (() => {
         const unit = units.find((candidate) => candidate.id === updates.unitId);
@@ -689,7 +693,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       items: requested.map((item) => ({
         productId: item.productId,
         quantity: item.quantity,
-        discountAmount: item.quantity * item.sellingPrice * (item.discount / 100),
+        ...(item.displayQuantity !== undefined && item.displayUnitName
+          ? {
+              displayQuantity: item.displayQuantity,
+              displayUnitName: item.displayUnitName,
+              displayUnitSymbol: item.displayUnitSymbol,
+            }
+          : {}),
+        discountAmount: 0,
       })),
     };
 
@@ -891,7 +902,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       id: 'exp-' + Date.now(),
     };
     setExpenses((prev) => [newExpense, ...prev]);
-    showToast(`Expense of ${formatCurrency(newExpense.amount)} for "${newExpense.description}" logged.`);
+    showToast(`Expense of ${formatCurrency(newExpense.amount)}${newExpense.description.trim() ? ` for "${newExpense.description.trim()}"` : ''} logged.`);
   };
 
   const deleteExpense = (id: string) => {
@@ -1133,15 +1144,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     showToast(`Payment of ${formatCurrency(amount)} recorded for ${invoiceNumber}.`);
   };
 
-  const recordSupplierPayment = async (invoiceNumber: string, partyName: string, amount: number, paymentDate: string, paymentMode: string): Promise<boolean> => {
-    const purchase = purchases.find((entry) => entry.invoiceNumber === invoiceNumber && entry.partyName === partyName);
-    const due = purchase?.outstandingBalance ?? 0;
-    if (!purchase || amount <= 0 || amount > due) {
-      showToast(purchase ? 'Payment cannot exceed the outstanding balance.' : 'Supplier invoice was not found.', 'error');
+  const recordSupplierPayment = async (invoiceNumber: string, partyName: string, amount: number, paymentDate: string, paymentMode: string, purchaseId: string, outstandingBalance: number, invoiceDate?: string): Promise<boolean> => {
+    const purchase = purchases.find((entry) => entry.id === purchaseId);
+    const due = outstandingBalance;
+    if (!isUuid(purchaseId) || amount <= 0 || amount > due) {
+      showToast(!isUuid(purchaseId) ? 'The selected purchase is missing its saved purchase ID. Refresh the supplier ledger and try again.' : 'Payment cannot exceed the outstanding balance.', 'error');
       return false;
     }
-    if (!authSession || !isUuid(purchase.id)) {
-      showToast('This invoice is not linked to a saved API purchase and cannot accept a backend payment.', 'error');
+    if (!authSession) {
+      showToast('Sign in before recording a supplier payment.', 'error');
       return false;
     }
     const supplier = suppliers.find((entry) => entry.name === partyName);
@@ -1159,7 +1170,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       await createSupplierPaymentRequest(authSession.token, {
         supplierId: supplier.id,
-        purchaseId: purchase.id,
+        purchaseId,
         amount,
         method: normalizedPaymentMethod,
       });
@@ -1168,7 +1179,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return false;
     }
     const outstanding = due - amount;
-    setPurchases((prev) => prev.map((entry) => entry.id === purchase.id ? {
+    setPurchases((prev) => prev.map((entry) => entry.id === purchaseId ? {
       ...entry,
       status: outstanding === 0 ? 'PAID' : 'PARTIALLY_PAID',
       amountPaid: (entry.amountPaid || 0) + amount,
@@ -1185,7 +1196,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       id: `supplier-payment-${Date.now()}`,
       partyName,
       invoiceNumber,
-      invoiceDate: purchase.invoiceDate,
+      invoiceDate: purchase?.invoiceDate || invoiceDate || paymentDate,
       billAmount: 0,
       paymentDate,
       amountPaid: amount,
@@ -1214,6 +1225,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         catalogError,
         activeScreen,
         setActiveScreen,
+        creditBillPartyTarget,
+        setCreditBillPartyTarget,
         searchModalOpen,
         setSearchModalOpen,
         toast,

@@ -33,7 +33,6 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
       },
       { id: "coupons", label: "Coupons", icon: "confirmation_number" },
       { id: "purchase-bill-entry", label: "Purchases", icon: "local_shipping" },
-      { id: "expense-management", label: "Expenses", icon: "account_balance_wallet" },
       {
         id: "party-ledger-management",
         label: "Party ledger",
@@ -63,9 +62,11 @@ export const Sidebar: React.FC = () => {
         onClick={() => setActiveScreen("dashboard")}
         className="flex h-[80px] items-center gap-2.5 border-b border-[#eee8df] px-3 text-left"
       >
-        <span className="flex h-[60px] w-[48px] shrink-0 flex-col items-center justify-center border-2 border-[#171717] bg-[#f4b600] text-[9px] font-black leading-[10px] text-[#111] shadow-[inset_0_0_0_2px_#f4b600]">
-          ABLE<br />LUBES<span className="text-[7px]">SINCE 1986</span>
-        </span>
+        <img
+          src="/assets/Able%20Lubes%20Neon%20Logo.png"
+          alt="Able Lubes logo"
+          className="h-[56px] w-[56px] shrink-0 object-contain"
+        />
         <span className="sidebar-brand-copy flex flex-col">
           <span className="text-[14px] font-extrabold tracking-tight text-[#171717]">
             Able Lubes

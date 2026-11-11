@@ -15,7 +15,6 @@ import { ProductEntryView } from './views/ProductEntryView';
 import { SalesBillEntryView } from './views/SalesBillEntryView';
 import { CreditBillManagementView } from './views/CreditBillManagementView';
 import { DailySalesManagementView } from './views/DailySalesManagementView';
-import { ExpenseManagementView } from './views/ExpenseManagementView';
 import { PurchaseBillEntryView } from './views/PurchaseBillEntryView';
 import { PartyLedgerManagementView } from './views/PartyLedgerManagementView';
 import { ReportsProfitView } from './views/ReportsProfitView';
@@ -41,8 +40,6 @@ const MainLayout: React.FC = () => {
         return <CouponsView />;
       case 'daily-sales-management':
         return <DailySalesManagementView />;
-      case 'expense-management':
-        return <ExpenseManagementView />;
       case 'purchase-bill-entry':
         return <PurchaseBillEntryView />;
       case 'party-ledger-management':

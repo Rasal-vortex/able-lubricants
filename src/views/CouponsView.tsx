@@ -56,13 +56,12 @@ export const CouponsView: React.FC = () => {
     setLoading(true);
     setLoadError("");
     try {
-      const [result, allCouponRows, redemptionRows] = await Promise.all([
-        getAllCouponsRequest(authSession.token, filter),
+      const [allCouponRows, redemptionRows] = await Promise.all([
         getAllCouponsRequest(authSession.token, 'all'),
         getCouponRedemptionsRequest(authSession.token),
       ]);
-      setCoupons(result);
-      setCouponRecordCodes(allCouponRows.map((coupon) => coupon.code));
+      setCoupons(allCouponRows);
+      setCouponRecordCodes(allCouponRows.map((coupon) => normalizeCouponCode(coupon.code)));
       setRedemptions(redemptionRows);
     } catch (error) {
       setLoadError(
@@ -71,7 +70,7 @@ export const CouponsView: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [authSession, filter]);
+  }, [authSession]);
 
   useEffect(() => {
     void loadCoupons();
@@ -163,36 +162,31 @@ export const CouponsView: React.FC = () => {
     }
   };
 
-  const legacyCouponUses = filter === 'all'
+  const saleBasedRedemptionCodes = new Set(
+    redemptions
+      .filter((redemption) => redemption.isSaleBased ?? Boolean(redemption.saleId))
+      .map((redemption) => normalizeCouponCode(redemption.code)),
+  );
+  const isSaleBasedCoupon = (coupon: ApiCoupon) =>
+    coupon.isSaleBased || saleBasedRedemptionCodes.has(normalizeCouponCode(coupon.code));
+  const visibleCoupons = coupons.filter((coupon) =>
+    filter === 'all' || (filter === 'sales-based'
+      ? isSaleBasedCoupon(coupon)
+      : !isSaleBasedCoupon(coupon)),
+  );
+  const legacyCouponUses = filter === 'all' || filter === 'sales-based'
     ? Object.entries(redemptions.reduce<Record<string, number>>((totals, redemption) => {
-        if (!couponRecordCodes.includes(redemption.code)) {
-          totals[redemption.code] = (totals[redemption.code] || 0) + Number(redemption.amount);
+        const code = normalizeCouponCode(redemption.code);
+        if ((redemption.isSaleBased ?? Boolean(redemption.saleId)) && !couponRecordCodes.includes(code)) {
+          totals[code] = (totals[code] || 0) + Number(redemption.amount);
         }
         return totals;
       }, {}))
     : [];
-  const hasVisibleCoupons = coupons.length > 0 || legacyCouponUses.length > 0;
+  const hasVisibleCoupons = visibleCoupons.length > 0 || legacyCouponUses.length > 0;
 
   return (
     <div className="flex flex-col gap-space-md">
-      <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <h1 className="text-title-lg font-semibold text-on-surface">
-            Coupons
-          </h1>
-          <p className="mt-1 text-sm text-on-surface-variant">
-            Manage regular records and review coupons attached to sales.
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={openCreateForm}
-          className="h-10 rounded-md bg-primary px-4 text-sm font-semibold text-on-primary hover:bg-primary/90"
-        >
-          Create regular coupon
-        </button>
-      </header>
-
       <section className="overflow-hidden rounded-lg border border-outline-variant/20 bg-surface-container-lowest shadow-sm">
         <div className="flex flex-col gap-3 border-b border-outline-variant/20 p-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
@@ -201,23 +195,32 @@ export const CouponsView: React.FC = () => {
               Sale-based coupons are read-only.
             </p>
           </div>
-          <label className="flex items-center gap-2 text-sm text-on-surface-variant">
-            <span>Show</span>
-            <select
-              aria-label="Filter coupons"
-              value={filter}
-              onChange={(event) =>
-                setFilter(event.target.value as CouponFilter)
-              }
-              className="h-9 rounded border border-outline-variant/30 bg-white px-2 text-on-surface"
+          <div className="flex flex-wrap items-center justify-end gap-3">
+            <button
+              type="button"
+              onClick={openCreateForm}
+              className="h-10 rounded-md bg-primary px-4 text-sm font-semibold text-on-primary hover:bg-primary/90"
             >
-              {FILTERS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
+              Create regular coupon
+            </button>
+            <label className="flex items-center gap-2 text-sm text-on-surface-variant">
+              <span>Show</span>
+              <select
+                aria-label="Filter coupons"
+                value={filter}
+                onChange={(event) =>
+                  setFilter(event.target.value as CouponFilter)
+                }
+                className="h-9 rounded border border-outline-variant/30 bg-white px-2 text-on-surface"
+              >
+                {FILTERS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
         </div>
 
         {loadError && (
@@ -278,7 +281,7 @@ export const CouponsView: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-outline-variant/20">
-                {coupons.map((coupon) => (
+                {visibleCoupons.map((coupon) => (
                   <tr
                     key={coupon.id}
                     className="hover:bg-surface-container-low/50"
@@ -297,13 +300,13 @@ export const CouponsView: React.FC = () => {
                     </td>
                     <td className="px-4 py-3">
                       <span
-                        className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${coupon.isSaleBased ? "bg-surface-variant text-on-surface-variant" : "bg-primary-container/20 text-primary"}`}
+                        className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${isSaleBasedCoupon(coupon) ? "bg-surface-variant text-on-surface-variant" : "bg-primary-container/20 text-primary"}`}
                       >
-                        {coupon.isSaleBased ? "Sale-based" : "Regular"}
+                        {isSaleBasedCoupon(coupon) ? "Sale-based" : "Regular"}
                       </span>
                     </td>
                     <td className="px-4 py-3 text-right">
-                      {!coupon.isSaleBased ? (
+                      {!isSaleBasedCoupon(coupon) ? (
                         <div className="inline-flex items-center gap-2">
                           <button
                             type="button"
@@ -337,7 +340,7 @@ export const CouponsView: React.FC = () => {
                     <td className="px-4 py-3 text-right font-mono text-on-surface">{formatCurrency(amount)}</td>
                     <td className="px-4 py-3 text-right font-mono text-on-surface-variant">{formatCurrency(amount)}</td>
                     <td className="px-4 py-3 text-right font-mono text-on-surface-variant">—</td>
-                    <td className="px-4 py-3"><span className="inline-flex rounded-full bg-primary-container/20 px-2.5 py-1 text-xs font-medium text-primary">Regular</span></td>
+                    <td className="px-4 py-3"><span className="inline-flex rounded-full bg-surface-variant px-2.5 py-1 text-xs font-medium text-on-surface-variant">Sale-based</span></td>
                     <td className="px-4 py-3 text-right text-xs text-on-surface-variant">Used in bill</td>
                   </tr>
                 ))}

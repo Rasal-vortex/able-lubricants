@@ -9,7 +9,6 @@ export const GlobalSearchModal: React.FC = () => {
     products,
     sales,
     creditBills,
-    expenses,
     setActiveScreen,
   } = useApp();
 
@@ -39,15 +38,10 @@ export const GlobalSearchModal: React.FC = () => {
     ? creditBills.filter((c) => c.billNumber.toLowerCase().includes(q) || c.partyName.toLowerCase().includes(q)).slice(0, 3)
     : [];
 
-  const matchedExpenses = q
-    ? expenses.filter((e) => e.description.toLowerCase().includes(q)).slice(0, 3)
-    : [];
-
   const hasResults =
     matchedProducts.length > 0 ||
     matchedSales.length > 0 ||
-    matchedCredits.length > 0 ||
-    matchedExpenses.length > 0;
+    matchedCredits.length > 0;
 
   return (
     <div
@@ -65,7 +59,7 @@ export const GlobalSearchModal: React.FC = () => {
             ref={inputRef}
             type="text"
             className="flex-1 bg-transparent text-on-surface font-body-md text-body-md focus:outline-none placeholder:text-outline"
-            placeholder="Search products, invoices, customers, expenses, or SKUs..."
+            placeholder="Search products, invoices, customers, or SKUs..."
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
@@ -87,7 +81,6 @@ export const GlobalSearchModal: React.FC = () => {
                 <span className="bg-surface-container-low px-2 py-0.5 rounded">Products</span>
                 <span className="bg-surface-container-low px-2 py-0.5 rounded">Sales Bills</span>
                 <span className="bg-surface-container-low px-2 py-0.5 rounded">Credit Invoices</span>
-                <span className="bg-surface-container-low px-2 py-0.5 rounded">Expenses</span>
               </div>
             </div>
           ) : !hasResults ? (
@@ -184,29 +177,6 @@ export const GlobalSearchModal: React.FC = () => {
                 </div>
               )}
 
-              {/* Expenses */}
-              {matchedExpenses.length > 0 && (
-                <div>
-                  <div className="px-2 py-1 text-[11px] font-semibold text-outline uppercase tracking-wider">
-                    Expenses ({matchedExpenses.length})
-                  </div>
-                  {matchedExpenses.map((e) => (
-                    <div
-                      key={e.id}
-                      onClick={() => {
-                        setActiveScreen('expense-management');
-                        setSearchModalOpen(false);
-                      }}
-                      className="p-2 rounded hover:bg-surface-container-low cursor-pointer flex items-center justify-between"
-                    >
-                      <span className="font-body-md text-body-md text-on-surface">{e.description}</span>
-                      <span className="font-data-mono-md text-data-mono-md font-semibold text-on-surface">
-                        {formatCurrency(e.amount)}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
             </div>
           )}
         </div>

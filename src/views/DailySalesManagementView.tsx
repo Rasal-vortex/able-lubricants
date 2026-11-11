@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   CalendarDays,
@@ -9,6 +9,7 @@ import {
   Download,
   FileText,
   Printer,
+  Plus,
   Search,
   ShoppingCart,
 } from 'lucide-react';
@@ -57,6 +58,8 @@ export const DailySalesManagementView: React.FC = () => {
   const [page, setPage] = useState(1);
   const [apiSales, setApiSales] = useState<typeof sales | null>(null);
   const [apiLoading, setApiLoading] = useState(false);
+  const [openExpenseModal, setOpenExpenseModal] = useState<() => void>(() => () => {});
+  const registerAddExpense = useCallback((openModal: () => void) => setOpenExpenseModal(() => openModal), []);
   const pageSize = 5;
 
   useEffect(() => {
@@ -75,21 +78,47 @@ export const DailySalesManagementView: React.FC = () => {
         const products = invoice.products || [];
         const payments = invoice.payments || [];
         const totalCollected = payments.reduce((sum: number, payment: any) => sum + Number(payment.amount), 0);
-        const productsTotal = products.reduce((sum: number, product: any) => sum + Number(product.lineTotal || 0), 0);
-        let allocatedSoFar = 0;
+        const invoiceDiscountTotal = Math.max(
+          0,
+          Number(invoice.discountAmount ?? invoice.billDiscountAmount ?? 0) || 0,
+        );
+        const productDiscountTotal = products.reduce(
+          (sum: number, product: any) =>
+            sum + Math.max(0, Number(product.discountAmount || 0)),
+          0,
+        );
+        const unallocatedDiscount = Math.max(
+          0,
+          invoiceDiscountTotal - productDiscountTotal,
+        );
+        const isCreditSettlement =
+          report.date > saleDate(undefined, String(invoice.billDate || ""));
         const paymentBreakdown = payments.map((payment: any) => {
           const method = payment.method === 'COUPON' ? 'Coupon' : payment.method === 'UPI' ? 'UPI' : 'Cash';
           const code = method === 'Coupon' ? payment.notes?.match(/^Coupon code: (.+)$/)?.[1] : undefined;
-          return `${method}${code ? ` ${code}` : ''} ${Number(payment.amount).toFixed(2)}`;
+          return `${isCreditSettlement ? 'Credit settlement · ' : ''}${method}${code ? ` ${code}` : ''} ${Number(payment.amount).toFixed(2)}`;
         }).join(' · ');
-        for (const [productIndex, product] of products.entries()) {
-          const paymentDate = payments[0]?.date || invoice.billDate;
-          const productAmount = productIndex === products.length - 1
-            ? totalCollected - allocatedSoFar
-            : productsTotal > 0 ? Math.round(totalCollected * Number(product.lineTotal || 0) / productsTotal * 100) / 100 : 0;
-          allocatedSoFar += productAmount;
-          rows.push({ id: `${report.date}-${invoice.invoiceNumber}-${product.productId}`, billNumber: invoice.invoiceNumber, dateTime: paymentDate, date: report.date, customerName: invoice.customer, customerType: 'registered', itemsCount: 1, itemsList: `${product.productName} × ${product.quantity}${product.unitSymbol ? ` ${product.unitSymbol}` : ''}`, paymentMode: paymentBreakdown as any, amount: productAmount, subtotal: totalCollected, lineItems: [], });
-        }
+        const paymentDate = payments[0]?.date || invoice.billDate;
+        const itemsList = products.map((product: any) =>
+          `${product.productName} × ${product.displayQuantity ?? product.quantity}${product.displayUnitSymbol || product.unitSymbol ? ` ${product.displayUnitSymbol || product.unitSymbol}` : ''}`,
+        ).join('\n');
+        const discountAmount = productDiscountTotal + unallocatedDiscount;
+        rows.push({
+          id: `${report.date}-${invoice.invoiceNumber}`,
+          billNumber: invoice.invoiceNumber,
+          dateTime: paymentDate,
+          date: report.date,
+          customerName: invoice.customer,
+          customerType: 'registered',
+          itemsCount: products.length,
+          itemsList,
+          paymentMode: paymentBreakdown as any,
+          amount: totalCollected,
+          billTotal: Number(invoice.totalAmount || 0),
+          discountAmount,
+          subtotal: totalCollected,
+          lineItems: [],
+        });
       }
       setApiSales(rows);
     }).catch((error) => { if (!cancelled) { setApiSales([]); showToast(error instanceof Error ? error.message : 'Daily sales could not be loaded.', 'error'); } }).finally(() => { if (!cancelled) setApiLoading(false); });
@@ -150,8 +179,8 @@ export const DailySalesManagementView: React.FC = () => {
 
   const handleExportDaySheet = () => {
     const salesRows = [
-      ['Date & Time', 'Bill Number', 'Customer', 'Product', 'Product Amount (INR)', 'Payment Mode'],
-      ...filteredSales.map((sale) => [formatSaleDateTime(sale.dateTime), sale.billNumber, sale.customerName, sale.itemsList, formatCurrency(sale.amount), sale.paymentMode]),
+      ['Date & Time', 'Bill Number', 'Customer', 'Product', 'Payment Received (INR)', 'Bill Total (INR)', 'Discount Given (INR)', 'Payment Mode'],
+      ...filteredSales.map((sale) => [formatSaleDateTime(sale.dateTime), sale.billNumber, sale.customerName, sale.itemsList, formatCurrency(sale.amount), sale.paymentMode.includes('Credit settlement') && sale.billTotal !== undefined ? formatCurrency(sale.billTotal) : '', (sale.discountAmount || 0) > 0 ? formatCurrency(sale.discountAmount || 0) : '', sale.paymentMode]),
     ];
     const expenseRows = [
       [],
@@ -192,6 +221,9 @@ export const DailySalesManagementView: React.FC = () => {
           ))}
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
+          {activeTab === 'expenses' && <button type="button" onClick={openExpenseModal} className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#ffe4a0] px-3 text-sm font-semibold text-[#493819] shadow-sm transition hover:bg-[#ffdc82]">
+            <Plus size={17} aria-hidden="true" /> Add Expense
+          </button>}
           <button type="button" onClick={handlePrintRegister} className="inline-flex h-10 items-center gap-2 rounded-lg border border-[#e9e3d9] bg-white px-3 text-sm font-semibold text-[#272727] shadow-sm transition hover:bg-[#f8f6f2]">
             <Printer size={17} aria-hidden="true" /> Print {activeTab === 'sales' ? 'Sales' : 'Expenses'} / Save PDF
           </button>
@@ -246,17 +278,35 @@ export const DailySalesManagementView: React.FC = () => {
           <div className="overflow-x-auto">
             <table className="w-full min-w-[850px] border-collapse text-left">
               <thead><tr className="h-10 bg-[#f6f5f2] text-xs font-bold uppercase tracking-wide text-[#6d685f]">
-                <th className="px-4 py-2">Date &amp; time</th><th className="px-4 py-2">Bill number</th><th className="px-4 py-2">Product name</th><th className="px-4 py-2 text-right">Product amount (₹)</th><th className="px-4 py-2 text-center">Mode of payment</th>
+                <th className="px-4 py-2">Date &amp; time</th><th className="px-4 py-2">Bill number</th><th className="px-4 py-2">Product name</th><th className="px-4 py-2 text-right">Received today (₹)</th><th className="px-4 py-2 text-center">Mode of payment</th>
               </tr></thead>
               <tbody className="divide-y divide-[#efede8] text-sm text-[#272727]">
                 {pageSales.map((item) => (
                   <tr key={item.id} className="h-11 transition hover:bg-[#fffdf8]">
                     <td className="whitespace-nowrap px-4 py-2 text-xs text-[#68645e]">{formatSaleDateTime(item.dateTime)}</td>
                     <td className="whitespace-nowrap px-4 py-2 font-semibold text-[#a86600]">{item.billNumber}</td>
-                    <td className="max-w-[440px] px-4 py-2"><span className="block truncate" title={item.itemsList}>{item.itemsList}</span></td>
-                    <td className="whitespace-nowrap px-4 py-2 text-right font-semibold">{formatCurrency(item.amount)}</td>
-                    <td className="px-4 py-2 text-center"><span className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-semibold ${item.paymentMode === 'UPI' ? 'bg-[#eee9ff] text-[#5940a5]' : item.paymentMode === 'Cash' ? 'bg-[#f0f0ed] text-[#45443f]' : 'bg-[#eaf0ff] text-[#34549b]'}`}>
-                      <span className="material-symbols-outlined text-[14px]">{item.paymentMode === 'UPI' ? 'contactless' : item.paymentMode === 'Cash' ? 'payments' : 'credit_card'}</span>{item.paymentMode}
+                    <td className="max-w-[440px] px-4 py-2">
+                      <div className="space-y-1" title={item.itemsList}>
+                        {item.itemsList.split('\n').map((productName, index) => (
+                          <div key={`${item.id}-${index}`} className="truncate">{productName}</div>
+                        ))}
+                      </div>
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-2 text-right font-semibold">
+                      <span>{formatCurrency(item.amount)}</span>
+                      {(item.discountAmount || 0) > 0 && (
+                        <span className="mt-1 block text-[11px] font-medium text-[#9a6700]">
+                          Discount {formatCurrency(item.discountAmount || 0)}
+                        </span>
+                      )}
+                      {item.paymentMode.includes('Credit settlement') && item.billTotal !== undefined && (
+                        <span className="mt-1 block text-[11px] font-medium text-[#68645e]">
+                          Bill total {formatCurrency(item.billTotal)}
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-4 py-2 text-center"><span className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-semibold ${item.paymentMode.includes('UPI') ? 'bg-[#eee9ff] text-[#5940a5]' : item.paymentMode.includes('Cash') ? 'bg-[#f0f0ed] text-[#45443f]' : 'bg-[#eaf0ff] text-[#34549b]'}`}>
+                      <span className="material-symbols-outlined text-[14px]">{item.paymentMode.includes('UPI') ? 'contactless' : item.paymentMode.includes('Cash') ? 'payments' : 'credit_card'}</span>{item.paymentMode}
                     </span></td>
                   </tr>
                 ))}
@@ -266,7 +316,7 @@ export const DailySalesManagementView: React.FC = () => {
           </div>
           <footer className="flex flex-col gap-3 border-t border-[#eee8df] bg-[#f8f7f4] px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[#6b665c]">
-              <span>Showing <strong className="text-[#272727]">{firstRow}-{lastRow}</strong> of <strong className="text-[#272727]">{filteredSales.length}</strong> products</span>
+              <span>Showing <strong className="text-[#272727]">{firstRow}-{lastRow}</strong> of <strong className="text-[#272727]">{filteredSales.length}</strong> bills</span>
             </div>
             <div className="flex flex-wrap items-center justify-end gap-4">
               <div className="text-right"><div className="text-xs font-semibold uppercase tracking-wide text-[#77736d]">Grand total</div><div className="text-xl font-extrabold text-[#493819]">{formatCurrency(printSalesTotal)}</div></div>
@@ -282,7 +332,7 @@ export const DailySalesManagementView: React.FC = () => {
         </motion.section>
       ) : (
         <motion.div key="expenses-panel" initial={{ opacity: 0, y: 7 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.2, ease: 'easeOut' }} role="tabpanel" aria-label="Expense records">
-          <ExpenseManagementView embedded dateRange={{ from: fromDate, to: toDate }} sharedSearchTerm={searchTerm} />
+          <ExpenseManagementView embedded dateRange={{ from: fromDate, to: toDate }} sharedSearchTerm={searchTerm} onRegisterAddExpense={registerAddExpense} />
         </motion.div>
       )}
       </AnimatePresence>
@@ -309,13 +359,13 @@ export const DailySalesManagementView: React.FC = () => {
         {activeTab === 'sales' ? <section className="register-print-section">
           <h2>Sales <span>({filteredSales.length})</span></h2>
           <table className="register-print-sales">
-            <thead><tr><th>Date &amp; time</th><th>Bill number</th><th>Product name</th><th>Product amount (₹)</th><th>Payment mode</th></tr></thead>
+            <thead><tr><th>Date &amp; time</th><th>Bill number</th><th>Product name</th><th>Payment received (₹)</th><th>Bill total (₹)</th><th>Discount given (₹)</th><th>Payment mode</th></tr></thead>
             <tbody>
               {filteredSales.map((sale) => <tr key={sale.id}>
-                <td>{formatSaleDateTime(sale.dateTime)}</td><td>{sale.billNumber}</td><td>{sale.itemsList}</td><td>{formatCurrency(sale.amount)}</td><td>{sale.paymentMode}</td>
+                <td>{formatSaleDateTime(sale.dateTime)}</td><td>{sale.billNumber}</td><td style={{ whiteSpace: 'pre-line' }}>{sale.itemsList}</td><td>{formatCurrency(sale.amount)}</td><td>{sale.paymentMode.includes('Credit settlement') && sale.billTotal !== undefined ? formatCurrency(sale.billTotal) : '—'}</td><td>{(sale.discountAmount || 0) > 0 ? formatCurrency(sale.discountAmount || 0) : '—'}</td><td>{sale.paymentMode}</td>
               </tr>)}
-              {filteredSales.length === 0 && <tr><td colSpan={5} className="register-print-empty">No sales in this range.</td></tr>}
-              {filteredSales.length > 0 && <tr><td colSpan={3}><strong>Grand total</strong></td><td><strong>{formatCurrency(printSalesTotal)}</strong></td><td /></tr>}
+              {filteredSales.length === 0 && <tr><td colSpan={7} className="register-print-empty">No sales in this range.</td></tr>}
+              {filteredSales.length > 0 && <tr><td colSpan={3}><strong>Grand total</strong></td><td><strong>{formatCurrency(printSalesTotal)}</strong></td><td /><td /><td /></tr>}
             </tbody>
           </table>
         </section> : <section className="register-print-section">

@@ -2,6 +2,9 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { formatCurrency } from '../utils/currency';
 import { getProfitReport } from '../services/api';
+import LoaderOne from '../components/ui/loader-one';
+import CountUp from '../components/ReactBitsCountUp';
+import { Package, ShoppingCart, TrendingUp, Wallet, type LucideIcon } from 'lucide-react';
 
 const localDate = (d: Date) => { const x = new Date(d.getTime() - d.getTimezoneOffset() * 60000); return x.toISOString().slice(0, 10); };
 
@@ -47,7 +50,13 @@ export const ReportsProfitView: React.FC = () => {
       ...creditBills.filter(b => b.netDue > 0 && inRange(b.billDate)).map(b => ['Customer', b.partyName, b.billNumber, b.dueDate, formatCurrency(b.netDue), b.status]),
       ...purchases.filter(p => (p.outstandingBalance || 0) > 0 && inRange(p.invoiceDate)).map(p => ['Supplier', p.partyName, p.invoiceNumber, p.invoiceDate, formatCurrency(p.outstandingBalance || 0), 'Payable']),
     ];
-    if (report === 'profit' && apiProfit) return (apiProfit.invoices || []).flatMap((invoice: any) => (invoice.items || []).map((item: any) => [normalizeDate(invoice.date), invoice.invoiceNumber, item.productName, item.quantity, formatCurrency(Number(item.saleAmount)), formatCurrency(Number(item.purchaseRate)), formatCurrency(Number(item.profit))]));
+    if (report === 'profit' && apiProfit) {
+      const newestFirst = [...(apiProfit.invoices || [])].sort((a: any, b: any) => {
+        const dateDifference = new Date(b.date).getTime() - new Date(a.date).getTime();
+        return dateDifference || String(b.invoiceNumber || '').localeCompare(String(a.invoiceNumber || ''));
+      });
+      return newestFirst.flatMap((invoice: any) => (invoice.items || []).map((item: any) => [normalizeDate(invoice.date), item.productName, item.quantity, formatCurrency(Number(item.saleAmount)), formatCurrency(Number(item.purchaseRate)), formatCurrency(Number(item.profit))]));
+    }
     if (report === 'profit') return [];
     const dates = Array.from(new Set([...rangedSales.map(s => (s.date || s.dateTime).slice(0,10)), ...rangedExpenses.map(e => e.date.slice(0,10))])).sort((a,b) => b.localeCompare(a));
     return dates.map(date => {
@@ -56,25 +65,79 @@ export const ReportsProfitView: React.FC = () => {
       return [date, formatCurrency(daySales), formatCurrency(dayExpense), formatCurrency(daySales-dayExpense)];
     });
   }, [report, rangedSales, rangedPurchases, rangedExpenses, products, creditBills, totalSales, totalExpenses, totalCogs, apiProfit]);
-  const columns = report === 'sales' ? ['Date', 'Bill', 'Customer', 'Payment', 'Total (INR)'] : report === 'purchases' ? ['Date', 'Supplier invoice', 'Supplier', 'Items', 'Total (INR)', 'Balance (INR)'] : report === 'stock' ? ['SKU', 'Product', 'Unit', 'On hand', 'Status'] : report === 'outstanding' ? ['Party type', 'Party', 'Reference', 'Due date', 'Outstanding (INR)', 'Status'] : report === 'profit' ? ['Date', 'Bill', 'Product', 'Quantity', 'Sale (INR)', 'Purchase rate (INR)', 'Profit (INR)'] : ['Date', 'Sales (INR)', 'Expenses (INR)', 'Net (INR)'];
+  const columns = report === 'sales' ? ['Date', 'Bill', 'Customer', 'Payment', 'Total (INR)'] : report === 'purchases' ? ['Date', 'Supplier invoice', 'Supplier', 'Items', 'Total (INR)', 'Balance (INR)'] : report === 'stock' ? ['SKU', 'Product', 'Unit', 'On hand', 'Status'] : report === 'outstanding' ? ['Party type', 'Party', 'Reference', 'Due date', 'Outstanding (INR)', 'Status'] : report === 'profit' ? ['Date', 'Product', 'Quantity', 'Sale (INR)', 'Purchase rate (INR)', 'Profit (INR)'] : ['Date', 'Sales (INR)', 'Expenses (INR)', 'Net (INR)'];
   const exportCsv = () => {
     const csv = [columns, ...reportRows].map(row => row.map(value => `"${String(value).replace(/"/g, '""')}"`).join(',')).join('\n');
     const link = document.createElement('a'); link.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' })); link.download = `able-lubes-${report}-${today}.csv`; link.click(); URL.revokeObjectURL(link.href); showToast('Report exported.');
   };
 
-  return <div className="flex flex-col w-full gap-space-md">
-    <section className="bg-surface-container-lowest p-space-md rounded-lg border border-outline-variant/20 flex flex-wrap gap-space-sm items-end justify-between">
-      <div className="flex flex-wrap gap-space-sm items-end">
-        <label className="flex flex-col gap-1 font-label-sm text-on-surface-variant">Report<select value={report} onChange={e => setReport(e.target.value as typeof report)} className="h-9 px-2 rounded border border-outline-variant/30 bg-surface-container-lowest text-on-surface"><option value="daily">Daily summary</option><option value="sales">Sales</option><option value="purchases">Purchases</option><option value="stock">Stock</option><option value="profit">Profit &amp; loss</option><option value="outstanding">Customer outstanding</option></select></label>
-        <label className="flex flex-col gap-1 font-label-sm text-on-surface-variant">From<input type="date" value={from} onChange={e => setFrom(e.target.value)} className="h-9 px-2 rounded border border-outline-variant/30 bg-surface-container-lowest text-on-surface" /></label>
-        <label className="flex flex-col gap-1 font-label-sm text-on-surface-variant">To<input type="date" value={to} onChange={e => setTo(e.target.value)} className="h-9 px-2 rounded border border-outline-variant/30 bg-surface-container-lowest text-on-surface" /></label>
+  return (
+    <div className="daily-register-page w-full">
+      <div className="daily-register-screen flex w-full flex-col gap-4">
+        <section className="flex flex-col gap-3 rounded-2xl border border-[#e9e3d9] bg-white p-4 shadow-[0_3px_12px_rgba(37,27,12,.06)] sm:flex-row sm:flex-wrap sm:items-end">
+          <label className="flex min-w-[190px] flex-1 flex-col gap-1.5 text-xs font-semibold text-[#77736d]">Report
+            <select value={report} onChange={e => setReport(e.target.value as typeof report)} className="h-10 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-sm font-normal text-[#272727] outline-none transition focus:border-[#c58a00] focus:bg-white">
+              <option value="daily">Daily summary</option><option value="sales">Sales</option><option value="purchases">Purchases</option><option value="stock">Stock</option><option value="profit">Profit &amp; loss</option><option value="outstanding">Customer outstanding</option>
+            </select>
+          </label>
+          <label className="flex min-w-[155px] flex-1 flex-col gap-1.5 text-xs font-semibold text-[#77736d]">From
+            <input type="date" value={from} onChange={e => setFrom(e.target.value)} className="h-10 rounded-lg border border-[#ead8ad] bg-[#fff7e7] px-3 text-sm font-normal text-[#272727] outline-none transition focus:border-[#c58a00] focus:bg-white" />
+          </label>
+          <label className="flex min-w-[155px] flex-1 flex-col gap-1.5 text-xs font-semibold text-[#77736d]">To
+            <input type="date" value={to} onChange={e => setTo(e.target.value)} className="h-10 rounded-lg border border-[#ead8ad] bg-[#fff7e7] px-3 text-sm font-normal text-[#272727] outline-none transition focus:border-[#c58a00] focus:bg-white" />
+          </label>
+          <button type="button" onClick={exportCsv} className="inline-flex h-10 items-center justify-center rounded-lg bg-[#ffe4a0] px-4 text-sm font-semibold text-[#493819] shadow-sm transition hover:bg-[#ffdc82] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#d59a12] sm:ml-auto">Export CSV</button>
+        </section>
+
+        {(report === 'daily' || report === 'profit') && (
+          <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            {([
+              ['Net sales', totalSales, ShoppingCart],
+              ['Purchases', rangedPurchases.reduce((n, p) => n + p.totalAmount, 0), Package],
+              ['Expenses', totalExpenses, Wallet],
+              ['Net profit', report === 'profit' && profitTotals ? Number(profitTotals.totalProfit) - totalExpenses : totalSales - totalCogs - totalExpenses, TrendingUp],
+            ] as Array<[string, number, LucideIcon]>).map(([label, value, Icon], index) => (
+              <div key={label} className="relative isolate overflow-hidden rounded-2xl border border-[#e7e4de] bg-gradient-to-br from-white via-[#fbfaf8] to-[#f1efeb] p-4 shadow-[0_3px_12px_rgba(37,27,12,.06)]">
+                <Icon aria-hidden="true" size={76} strokeWidth={1.5} className="pointer-events-none absolute -bottom-3 -right-2 -z-10 text-[#77736d] opacity-[0.09]" />
+                <div className="relative text-sm font-medium text-[#77736d]">{label}</div>
+                <div className="relative mt-2 text-2xl font-bold tracking-tight text-[#262522]">
+                  <CountUp
+                    to={Number(value)}
+                    duration={0.8}
+                    delay={index * 0.08}
+                    trigger="view"
+                    easing="easeOut"
+                    formatter={(amount) => formatCurrency(Number.isInteger(value) ? Math.round(amount) : Number(amount.toFixed(2)))}
+                  />
+                </div>
+              </div>
+            ))}
+          </section>
+        )}
+
+
+
+        <section className="overflow-hidden rounded-2xl border border-[#e9e3d9] bg-white shadow-[0_3px_12px_rgba(37,27,12,.06)]">
+          <div className="flex items-center justify-between border-b border-[#eee8df] px-4 py-3">
+            <h2 className="text-sm font-bold text-[#272727]">{report === 'daily' ? 'Daily summary' : report === 'profit' ? 'Product profit details' : `${columns[0]} report`}</h2>
+            <span className="text-xs text-[#77736d]">{reportRows.length} {reportRows.length === 1 ? 'record' : 'records'}</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[680px] text-left">
+              <thead><tr className="h-11 bg-[#f6f5f2] text-xs font-bold uppercase tracking-wide text-[#6d685f]">{columns.map(col => <th key={col} className="whitespace-nowrap px-4 py-3">{col}</th>)}</tr></thead>
+              <tbody className="divide-y divide-[#efede8] text-sm text-[#272727]">
+                {profitLoading ? (
+                  <tr><td colSpan={columns.length} className="px-4 py-14 text-center"><LoaderOne /></td></tr>
+                ) : reportRows.length ? (
+                  reportRows.map((row, i) => <tr key={i} className="transition hover:bg-[#fffdf8]">{row.map((cell, j) => <td key={j} className="px-4 py-3">{cell}</td>)}</tr>)
+                ) : (
+                  <tr><td colSpan={columns.length} className="px-4 py-14 text-center text-sm text-[#77736d]">No records in this date range.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
       </div>
-      <button type="button" onClick={exportCsv} className="h-9 px-space-md rounded bg-primary-container text-on-primary font-label-md">Export CSV</button>
-    </section>
-    {(report === 'daily' || report === 'profit') && <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-space-sm">{([
-      ['Net sales', totalSales], ['Purchases', rangedPurchases.reduce((n,p)=>n+p.totalAmount,0)], ['Expenses', report === 'profit' && profitTotals ? Number(profitTotals.totalExpenses) : totalExpenses], ['Net profit', report === 'profit' && profitTotals ? Number(profitTotals.finalProfit) : totalSales-totalCogs-totalExpenses],
-    ] as Array<[string, number]>).map(([label,value]) => <div key={label} className="bg-surface-container-lowest p-space-md rounded-lg border border-outline-variant/20"><div className="font-label-sm text-on-surface-variant">{label}</div><div className="mt-1 text-title-lg font-semibold text-on-surface">{formatCurrency(Number(value))}</div></div>)}</section>}
-    {report === 'profit' && <p className="text-label-sm text-on-surface-variant">{profitLoading ? 'Loading profit report…' : apiProfit ? `Total product profit: ${formatCurrency(Number(profitTotals?.totalProfit || 0))} · expenses are deducted to calculate final profit.` : 'Sign in to load the authoritative product cost and profit report.'}</p>}
-    <section className="bg-surface-container-lowest rounded-lg border border-outline-variant/20 overflow-hidden"><div className="overflow-x-auto"><table className="w-full text-left"><thead><tr className="bg-surface-container-low">{columns.map(col=><th key={col} className="px-space-md py-3 text-label-sm uppercase text-on-surface-variant">{col}</th>)}</tr></thead><tbody className="divide-y divide-outline-variant/10">{reportRows.map((row,i)=><tr key={i} className="hover:bg-surface-container-low/50">{row.map((cell,j)=><td key={j} className="px-space-md py-3 text-body-md text-on-surface">{cell}</td>)}</tr>)}{!reportRows.length && <tr><td colSpan={columns.length} className="px-space-md py-10 text-center text-on-surface-variant">No records in this date range.</td></tr>}</tbody></table></div></section>
-  </div>;
+    </div>
+  );
 };

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { Expense } from '../types';
 import { formatCurrency } from '../utils/currency';
@@ -7,9 +7,10 @@ interface ExpenseManagementViewProps {
   embedded?: boolean;
   dateRange?: { from: string; to: string };
   sharedSearchTerm?: string;
+  onRegisterAddExpense?: (openModal: () => void) => void;
 }
 
-export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ embedded = false, dateRange, sharedSearchTerm = '' }) => {
+export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ embedded = false, dateRange, sharedSearchTerm = '', onRegisterAddExpense }) => {
   const { expenses, addExpense, updateExpense, deleteExpense, showToast, setActiveReceiptToPrint } = useApp();
 
   const [searchTerm, setSearchTerm] = useState('');
@@ -30,7 +31,6 @@ export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ em
   const [expenseAmount, setExpenseAmount] = useState('');
   const [expenseCategory, setExpenseCategory] = useState('General');
   const [expenseMethod, setExpenseMethod] = useState('Cash');
-  const [expenseNotes, setExpenseNotes] = useState('');
 
   const effectiveFromDate = embedded && dateRange ? dateRange.from : fromDate;
   const effectiveToDate = embedded && dateRange ? dateRange.to : toDate;
@@ -52,9 +52,18 @@ export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ em
     setExpenseDate(embedded && dateRange ? dateRange.to : localIso(new Date()));
     setExpenseDesc('');
     setExpenseAmount('');
-    setExpenseCategory('General'); setExpenseMethod('Cash'); setExpenseNotes('');
+    setExpenseCategory('General'); setExpenseMethod('Cash');
     setModalOpen(true);
   };
+
+  const openAddModalRef = useRef(openAddModal);
+  openAddModalRef.current = openAddModal;
+  useEffect(() => {
+    if (!embedded || !onRegisterAddExpense) return;
+    const openRegisteredModal = () => openAddModalRef.current();
+    onRegisterAddExpense(openRegisteredModal);
+    return () => onRegisterAddExpense(() => {});
+  }, [embedded, onRegisterAddExpense]);
 
   const openEditModal = (expense: Expense) => {
     setModalMode('edit');
@@ -62,15 +71,15 @@ export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ em
     setExpenseDate(expense.date);
     setExpenseDesc(expense.description);
     setExpenseAmount(expense.amount.toString());
-    setExpenseCategory(expense.category || 'General'); setExpenseMethod(expense.paymentMethod || 'Cash'); setExpenseNotes(expense.notes || '');
+    setExpenseCategory(expense.category || 'General'); setExpenseMethod(expense.paymentMethod || 'Cash');
     setModalOpen(true);
   };
 
   const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const amt = parseFloat(expenseAmount);
-    if (!expenseDesc.trim() || isNaN(amt) || amt <= 0) {
-      showToast('Please provide valid description and positive amount.', 'error');
+    if (isNaN(amt) || amt <= 0) {
+      showToast('Please enter a positive expense amount.', 'error');
       return;
     }
 
@@ -81,7 +90,6 @@ export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ em
         amount: amt,
         category: expenseCategory,
         paymentMethod: expenseMethod,
-        notes: expenseNotes.trim(),
       });
     } else if (editingId) {
       updateExpense(editingId, {
@@ -90,7 +98,6 @@ export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ em
         amount: amt,
         category: expenseCategory,
         paymentMethod: expenseMethod,
-        notes: expenseNotes.trim(),
       });
     }
 
@@ -102,7 +109,7 @@ export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ em
       title: 'Operational Expense Voucher',
       refNumber: 'EXP-' + expense.id.slice(-6).toUpperCase(),
       date: expense.date,
-      party: 'Disbursement: ' + expense.description,
+      party: 'Disbursement: ' + (expense.description.trim() || expense.category || 'Expense'),
       total: expense.amount,
       mode: 'Cash / Ledger Outflow',
     });
@@ -110,7 +117,7 @@ export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ em
 
   return (
     <div className="flex flex-col w-full gap-y-space-md">
-      {/* Keep the standalone Expenses actions, or expose Add Expense inside the register tab. */}
+      {/* Standalone expense-page action; the daily register places this in its top action row. */}
       {!embedded && <div className="flex flex-col sm:flex-row sm:items-center sm:justify-end gap-space-sm bg-surface-container-lowest p-space-lg rounded-xl shadow-sm border border-outline-variant/20">
         <div className="flex items-center gap-space-sm self-start sm:self-auto">
           <button
@@ -172,17 +179,6 @@ export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ em
         </div>
       </div>}
 
-      {embedded && <div className="flex justify-end">
-        <button
-          className="inline-flex items-center gap-space-xs bg-primary text-on-primary hover:bg-primary-container px-space-md py-2 rounded-lg font-label-md text-label-md shadow-sm transition-all focus:outline-none"
-          onClick={openAddModal}
-          type="button"
-        >
-          <span className="material-symbols-outlined text-[18px]">add</span>
-          <span>Add Expense</span>
-        </button>
-      </div>}
-
       {/* Main Ledger Table */}
       <div className="w-full bg-surface-container-lowest rounded-xl shadow-sm overflow-hidden border border-outline-variant/20">
         <div className="w-full overflow-x-auto">
@@ -223,7 +219,7 @@ export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ em
                             isUtility ? 'bg-secondary' : 'bg-outline-variant'
                           }`}
                         ></span>
-                        <span className="flex flex-col"><span>{exp.description}</span><span className="text-[11px] font-normal text-on-surface-variant">{[exp.category, exp.paymentMethod, exp.notes].filter(Boolean).join(' · ')}</span></span>
+                        <span className="flex flex-col"><span>{exp.description.trim() || exp.category || 'Expense'}</span><span className="text-[11px] font-normal text-on-surface-variant">{[exp.description.trim() ? exp.category : null, exp.paymentMethod, exp.notes].filter(Boolean).join(' · ')}</span></span>
                       </div>
                     </td>
                     <td className="py-2.5 px-space-md text-right font-data-mono-md text-data-mono-md text-on-surface whitespace-nowrap">
@@ -279,8 +275,11 @@ export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ em
         <div className="flex flex-col sm:flex-row items-center justify-between px-space-md py-space-sm bg-surface-container-low gap-space-sm border-t border-outline-variant/20">
           <div className="font-data-mono-sm text-data-mono-sm text-on-surface-variant">
             Showing <span className="font-semibold text-on-surface">{filteredExpenses.length ? `1-${filteredExpenses.length}` : '0'}</span> of{' '}
-            <span className="font-semibold text-on-surface">{embedded ? expensesInRange.length : expenses.length}</span> expenses • Total:{' '}
-            <strong className="text-on-surface">{formatCurrency(totalExpenseAmount)}</strong>
+            <span className="font-semibold text-on-surface">{embedded ? expensesInRange.length : expenses.length}</span> expenses
+          </div>
+          <div className="text-right">
+            <div className="text-xs font-semibold uppercase tracking-wide text-on-surface-variant">Grand Total</div>
+            <div className="text-2xl font-extrabold tracking-tight text-on-surface">{formatCurrency(totalExpenseAmount)}</div>
           </div>
         </div>
       </div>
@@ -329,20 +328,6 @@ export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ em
 
               <div className="flex flex-col gap-1">
                 <label className="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wider">
-                  Expense Description <span className="text-error">*</span>
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. Electricity Bill for October, Shop Cleaning Supplies"
-                  className="w-full h-9 px-space-sm bg-surface text-on-surface placeholder:text-outline font-body-md text-body-md rounded-lg focus:outline-none focus:bg-surface-container-lowest focus:ring-1 focus:ring-primary border border-outline-variant/30"
-                  value={expenseDesc}
-                  onChange={(e) => setExpenseDesc(e.target.value)}
-                />
-              </div>
-
-              <div className="flex flex-col gap-1">
-                <label className="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wider">
                   Amount (₹) <span className="text-error">*</span>
                 </label>
                 <div className="relative">
@@ -366,7 +351,19 @@ export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ em
                 <label className="flex flex-col gap-1 font-label-sm text-on-surface-variant">Category<select value={expenseCategory} onChange={e=>setExpenseCategory(e.target.value)} className="h-9 px-2 rounded-lg border border-outline-variant/30 bg-surface-container-lowest text-on-surface">{['General','Rent','Utilities','Transport','Maintenance','Supplies','Other'].map(value=><option key={value}>{value}</option>)}</select></label>
                 <label className="flex flex-col gap-1 font-label-sm text-on-surface-variant">Payment method<select value={expenseMethod} onChange={e=>setExpenseMethod(e.target.value)} className="h-9 px-2 rounded-lg border border-outline-variant/30 bg-surface-container-lowest text-on-surface">{['Cash','UPI','Bank transfer','Card','Other'].map(value=><option key={value}>{value}</option>)}</select></label>
               </div>
-              <label className="flex flex-col gap-1 font-label-sm text-on-surface-variant">Notes (optional)<textarea value={expenseNotes} onChange={e=>setExpenseNotes(e.target.value)} rows={2} className="px-2 py-1 rounded-lg border border-outline-variant/30 bg-surface-container-lowest text-on-surface" /></label>
+              <div className="flex flex-col gap-1">
+                <label className="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wider" htmlFor="expense-description">
+                  Expense Description <span className="normal-case text-on-surface-variant">(optional)</span>
+                </label>
+                <input
+                  id="expense-description"
+                  type="text"
+                  placeholder="e.g. Electricity Bill for October, Shop Cleaning Supplies"
+                  className="w-full h-9 px-space-sm bg-surface text-on-surface placeholder:text-outline font-body-md text-body-md rounded-lg focus:outline-none focus:bg-surface-container-lowest focus:ring-1 focus:ring-primary border border-outline-variant/30"
+                  value={expenseDesc}
+                  onChange={(e) => setExpenseDesc(e.target.value)}
+                />
+              </div>
 
               <div className="flex items-center justify-end gap-space-sm pt-space-md border-t border-outline-variant/20">
                 <button

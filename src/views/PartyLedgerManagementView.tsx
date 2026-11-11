@@ -1,151 +1,130 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useState } from 'react';
+import { motion } from 'motion/react';
 import { useApp } from '../context/AppContext';
-import { formatCurrency } from '../utils/currency';
-import { getSupplierLedgerReport, getSupplierOutstandingReport } from '../services/api';
-
-const todayIso = () => { const d = new Date(); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); };
 
 export const PartyLedgerManagementView: React.FC = () => {
-  const { customers, suppliers, partyLedger, supplierLedger, addSupplier, updateSupplier, deactivateSupplier, supplierLoading, supplierError, addCustomer, updateCustomer, deactivateCustomer, customerLoading, customerError, recordPartyPayment, recordSupplierPayment, showToast, authSession } = useApp();
-  const [tab, setTab] = useState<'customers' | 'suppliers' | 'customer-ledger' | 'supplier-ledger'>('customers');
-  const [partyFilter, setPartyFilter] = useState('ALL');
-  const [from, setFrom] = useState('');
-  const [to, setTo] = useState('');
-  const [modalOpen, setModalOpen] = useState(false);
+  const {
+    customers, suppliers, addSupplier, updateSupplier, deactivateSupplier, supplierLoading, supplierError,
+    addCustomer, updateCustomer, deactivateCustomer, customerLoading, customerError, showToast,
+    setActiveScreen, setCreditBillPartyTarget,
+  } = useApp();
+  const [tab, setTab] = useState<'customers' | 'suppliers'>('customers');
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
   const [address, setAddress] = useState('');
   const [editingPartyId, setEditingPartyId] = useState<string | null>(null);
   const [partySaving, setPartySaving] = useState(false);
-  const [partyName, setPartyName] = useState('');
-  const [invoiceNumber, setInvoiceNumber] = useState('');
-  const [amount, setAmount] = useState('');
-  const [paymentDate, setPaymentDate] = useState(todayIso());
-  const [paymentMode, setPaymentMode] = useState('Cash');
-  const [supplierBalances, setSupplierBalances] = useState<any[]>([]);
-  const [selectedSupplierId, setSelectedSupplierId] = useState('');
-  const [selectedSupplierLedger, setSelectedSupplierLedger] = useState<any>(null);
-  const [ledgerLoading, setLedgerLoading] = useState(false);
-  const isSupplier = tab === 'suppliers' || tab === 'supplier-ledger';
-  useEffect(() => {
-    if (!authSession) { setSupplierBalances([]); return; }
-    void getSupplierOutstandingReport(authSession.token).then(setSupplierBalances).catch((error) => showToast(error instanceof Error ? error.message : 'Supplier balances could not be loaded.', 'error'));
-  }, [authSession, showToast]);
-  useEffect(() => {
-    if (tab !== 'supplier-ledger' || !authSession || !selectedSupplierId) { setSelectedSupplierLedger(null); return; }
-    let cancelled = false;
-    setLedgerLoading(true);
-    void getSupplierLedgerReport(authSession.token, selectedSupplierId).then((ledgerResult) => { if (!cancelled) setSelectedSupplierLedger(ledgerResult); }).catch((error) => { if (!cancelled) showToast(error instanceof Error ? error.message : 'Supplier ledger could not be loaded.', 'error'); }).finally(() => { if (!cancelled) setLedgerLoading(false); });
-    return () => { cancelled = true; };
-  }, [tab, authSession, selectedSupplierId, showToast]);
-  const ledger = isSupplier ? supplierLedger : partyLedger;
-  const currentInvoices = ledger.filter(entry => entry.transactionType === 'INVOICES' && entry.outstandingBalance > 0);
-  const selectedInvoice = currentInvoices.find(entry => entry.invoiceNumber === invoiceNumber);
-  const visibleLedger = ledger.filter(entry => {
-    const rawDate = entry.transactionType === 'PAYMENTS' ? entry.paymentDate : entry.invoiceDate;
-    const parsed = new Date(rawDate);
-    const date = rawDate === '-' || /^\d{4}-\d{2}-\d{2}$/.test(rawDate) || Number.isNaN(parsed.getTime()) ? rawDate : new Date(parsed.getTime() - parsed.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
-    return (partyFilter === 'ALL' || entry.partyName === partyFilter) && (!from || date >= from) && (!to || date <= to);
-  });
+  const isSupplier = tab === 'suppliers';
   const parties = isSupplier ? suppliers : customers;
-  const partyBalances = useMemo(() => parties.map(party => ({
-    ...party,
-    invoices: ledger.filter(row => row.partyName === party.name && row.transactionType === 'INVOICES'),
-    due: ledger.filter(row => row.partyName === party.name && row.transactionType === 'INVOICES').reduce((sum,row) => sum + row.outstandingBalance, 0),
-    total: ledger.filter(row => row.partyName === party.name && row.transactionType === 'INVOICES').reduce((sum,row) => sum + row.billAmount, 0),
-  })), [parties, ledger]);
+  const loading = isSupplier ? supplierLoading : customerLoading;
+  const error = isSupplier ? supplierError : customerError;
 
-  const openPayment = (entry?: { invoiceNumber: string; partyName: string; outstandingBalance: number }) => {
-    const invoice = entry || currentInvoices[0];
-    if (!invoice) { showToast('There are no outstanding invoices to pay.', 'info'); return; }
-    setPartyName(invoice.partyName); setInvoiceNumber(invoice.invoiceNumber); setAmount(String(invoice.outstandingBalance)); setPaymentDate(todayIso()); setModalOpen(true);
-  };
   const resetPartyForm = () => {
     setName('');
     setPhone('');
     setAddress('');
     setEditingPartyId(null);
   };
+
   const submitParty = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!name.trim()) return;
-    const phoneValue = phone.replace(/\D/g, '');
+    const payload = { name: name.trim(), phone: phone.replace(/\D/g, ''), address: address.trim() };
     setPartySaving(true);
     try {
       if (isSupplier) {
-        const payload = { name: name.trim(), phone: phoneValue, address: address.trim() };
         if (editingPartyId) await updateSupplier(editingPartyId, payload);
         else await addSupplier(payload);
       } else if (editingPartyId) {
-        await updateCustomer(editingPartyId, { name: name.trim(), phone: phoneValue, address: address.trim() });
+        await updateCustomer(editingPartyId, payload);
       } else {
-        await addCustomer({ name: name.trim(), phone: phoneValue, address: address.trim() });
+        await addCustomer(payload);
       }
       resetPartyForm();
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : `Unable to save the ${isSupplier ? 'supplier' : 'customer'}.`, 'error');
+    } catch (saveError) {
+      showToast(saveError instanceof Error ? saveError.message : `Unable to save the ${isSupplier ? 'supplier' : 'customer'}.`, 'error');
     } finally {
       setPartySaving(false);
     }
   };
+
   const editParty = (party: (typeof customers)[number]) => {
     setEditingPartyId(party.id);
     setName(party.name);
     setPhone(party.phone.replace(/\D/g, ''));
     setAddress(party.address || '');
   };
+
   const removeParty = async (party: (typeof customers)[number]) => {
     const partyType = isSupplier ? 'supplier' : 'customer';
     if (!window.confirm(`Deactivate ${party.name}? They will no longer appear in ${partyType} selection.`)) return;
     try {
       if (isSupplier) await deactivateSupplier(party.id);
       else await deactivateCustomer(party.id);
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : `Unable to deactivate the ${partyType}.`, 'error');
+    } catch (removeError) {
+      showToast(removeError instanceof Error ? removeError.message : `Unable to deactivate the ${partyType}.`, 'error');
     }
   };
-  const savePayment = async () => {
-    const value = Number(amount);
-    if (!partyName || !invoiceNumber || !Number.isFinite(value) || value <= 0 || !selectedInvoice || value > selectedInvoice.outstandingBalance) {
-      showToast('Choose an unpaid invoice and enter a valid amount within its balance.', 'error'); return;
-    }
-    if (isSupplier) {
-      const saved = await recordSupplierPayment(invoiceNumber, partyName, value, paymentDate, paymentMode);
-      if (!saved) return;
-    } else {
-      recordPartyPayment(invoiceNumber, partyName, value, paymentDate, paymentMode);
-    }
-    setModalOpen(false);
-  };
-  const exportCsv = () => {
-    const rows = [['Party','Invoice','Date','Bill amount (INR)','Paid (INR)','Outstanding (INR)','Type'], ...visibleLedger.map(row => [row.partyName,row.invoiceNumber,row.invoiceDate,formatCurrency(row.billAmount),formatCurrency(row.amountPaid),formatCurrency(row.outstandingBalance),row.transactionType])];
-    const csv = rows.map(row => row.map(cell => `"${String(cell).replace(/"/g,'""')}"`).join(',')).join('\n');
-    const link = document.createElement('a'); link.href = URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'})); link.download = `${isSupplier?'supplier':'customer'}-ledger-${todayIso()}.csv`; link.click(); URL.revokeObjectURL(link.href); showToast('Ledger exported.');
-  };
-  const tabs: Array<[typeof tab,string]> = [['customers','Customers'],['suppliers','Suppliers'],['supplier-ledger','Supplier ledger']];
 
-  return <div className="flex flex-col w-full gap-space-md">
-    <div className="flex flex-wrap items-center justify-between gap-space-sm"><div className="flex flex-wrap gap-1 bg-surface-container-low p-1 rounded-lg">{tabs.map(([key,label])=><button key={key} type="button" onClick={()=>{setTab(key);setPartyFilter('ALL');resetPartyForm();}} className={`px-space-sm py-2 rounded font-label-md ${tab===key?'bg-primary-container text-on-primary':'text-on-surface-variant hover:text-on-surface'}`}>{label}</button>)}</div>
-      {(tab.endsWith('ledger')) && <div className="flex gap-space-xs"><button type="button" onClick={exportCsv} className="h-9 px-space-md rounded border border-outline-variant/30 bg-surface-container-lowest text-on-surface">Export CSV</button><button type="button" onClick={()=>openPayment()} className="h-9 px-space-md rounded bg-primary-container text-on-primary">Record payment</button></div>}
+  const viewPartyCredits = (partyName: string) => {
+    setCreditBillPartyTarget({ type: isSupplier ? 'suppliers' : 'customers', name: partyName });
+    setActiveScreen('credit-bill-management');
+  };
+
+  return (
+    <div className="daily-register-page w-full">
+      <div className="daily-register-screen flex w-full flex-col gap-4">
+        <div role="tablist" aria-label="Party records" className="inline-flex w-fit max-w-full items-center rounded-full border border-[#e9e3d9] bg-white p-1 shadow-[0_3px_12px_rgba(37,27,12,.08)]">
+          {([['customers', 'Customers'], ['suppliers', 'Suppliers']] as const).map(([key, label]) => (
+            <button key={key} type="button" role="tab" aria-selected={tab === key} onClick={() => { setTab(key); resetPartyForm(); }} className={`relative inline-flex h-10 items-center justify-center rounded-full px-5 text-sm font-semibold transition-colors ${tab === key ? 'text-[#493819]' : 'text-[#6b665c] hover:text-[#272727]'}`}>
+              {tab === key && <motion.span layoutId="party-ledger-tab-indicator" className="absolute inset-0 rounded-full bg-[#fff1c9] shadow-sm" transition={{ duration: 0.24, ease: 'easeOut' }} aria-hidden="true" />}
+              <span className="relative z-10">{label}</span>
+            </button>
+          ))}
+        </div>
+
+        <form onSubmit={submitParty} className="flex flex-wrap items-end gap-3 rounded-xl border border-[#e9e3d9] bg-white p-3 shadow-sm">
+          <label className="flex min-w-[220px] flex-1 flex-col gap-1.5 text-xs font-semibold text-[#77736d]">
+            {isSupplier ? 'Supplier name' : 'Customer name'}
+            <input required value={name} onChange={event => setName(event.target.value)} className="h-10 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-sm font-normal text-[#272727] outline-none focus:border-[#c58a00] focus:bg-white" placeholder="Business or person name" />
+          </label>
+          <label className="flex min-w-[160px] flex-col gap-1.5 text-xs font-semibold text-[#77736d]">
+            Phone
+            <input type="text" inputMode="numeric" pattern="[0-9]*" value={phone} onChange={event => setPhone(event.target.value.replace(/\D/g, ''))} onPaste={event => { event.preventDefault(); setPhone(event.clipboardData.getData('text').replace(/\D/g, '')); }} className="h-10 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-sm font-normal text-[#272727] outline-none focus:border-[#c58a00] focus:bg-white" placeholder="Optional" />
+          </label>
+          <label className="flex min-w-[220px] flex-[1.4] flex-col gap-1.5 text-xs font-semibold text-[#77736d]">
+            Address
+            <input required value={address} onChange={event => setAddress(event.target.value)} className="h-10 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-sm font-normal text-[#272727] outline-none focus:border-[#c58a00] focus:bg-white" placeholder={`${isSupplier ? 'Supplier' : 'Customer'} address`} />
+          </label>
+          <div className="flex gap-2">
+            <button disabled={partySaving} className="h-10 rounded-lg bg-[#ffe4a0] px-4 text-sm font-semibold text-[#493819] shadow-sm transition hover:bg-[#ffdc82] disabled:cursor-not-allowed disabled:opacity-60" type="submit">{partySaving ? 'Saving…' : editingPartyId ? `Update ${isSupplier ? 'supplier' : 'customer'}` : `Add ${isSupplier ? 'supplier' : 'customer'}`}</button>
+            {editingPartyId && <button className="h-10 rounded-lg border border-[#e9e3d9] bg-white px-4 text-sm font-semibold text-[#555] shadow-sm hover:bg-[#f8f6f2]" type="button" onClick={resetPartyForm}>Cancel</button>}
+          </div>
+        </form>
+
+        {error && <p role="alert" className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">{isSupplier ? 'Suppliers' : 'Customers'} could not be loaded: {error}</p>}
+        <section className="overflow-hidden rounded-xl border border-[#e9e3d9] bg-white shadow-sm">
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[640px] border-collapse text-left">
+              <thead><tr className="h-10 bg-[#f6f5f2] text-xs font-bold uppercase tracking-wide text-[#6d685f]">
+                {[isSupplier ? 'Supplier' : 'Customer', 'Phone', 'Address', 'Actions'].map(header => <th key={header} className="px-4 py-2">{header}</th>)}
+              </tr></thead>
+              <tbody className="divide-y divide-[#efede8] text-sm text-[#272727]">
+                {loading && <tr><td colSpan={4} className="px-4 py-12 text-center text-sm text-[#77736d]">Loading {isSupplier ? 'suppliers' : 'customers'}…</td></tr>}
+                {!loading && parties.map(party => (
+                  <tr key={party.id} className="h-12 transition hover:bg-[#fffdf8]">
+                    <td className="px-4 py-3 font-semibold text-[#a86600]">{party.name}</td>
+                    <td className="px-4 py-3 text-[#68645e]">{party.phone || '—'}</td>
+                    <td className="px-4 py-3 text-[#68645e]">{party.address || '—'}</td>
+                    <td className="whitespace-nowrap px-4 py-3"><button type="button" onClick={() => viewPartyCredits(party.name)} className="mr-3 text-sm font-semibold text-[#a86600] hover:underline">View credits</button><button type="button" onClick={() => editParty(party)} className="mr-3 text-sm font-semibold text-[#a86600] hover:underline">Edit</button><button type="button" onClick={() => void removeParty(party)} className="text-sm font-semibold text-[#b42318] hover:underline">Deactivate</button></td>
+                  </tr>
+                ))}
+                {!loading && !parties.length && <tr><td colSpan={4} className="px-4 py-12 text-center text-sm text-[#77736d]">No records yet.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
     </div>
-    {!tab.endsWith('ledger') ? <>
-      <form onSubmit={submitParty} className="bg-surface-container-lowest p-space-md rounded-lg border border-outline-variant/20 flex flex-wrap gap-space-sm items-end">
-        <label className="flex flex-col gap-1 font-label-sm text-on-surface-variant">{isSupplier ? 'Supplier' : 'Customer'} name<input required value={name} onChange={e => setName(e.target.value)} className="h-9 px-2 rounded border border-outline-variant/30 text-on-surface" placeholder="Business or person name" /></label>
-        <label className="flex flex-col gap-1 font-label-sm text-on-surface-variant">Phone<input type="tel" inputMode="numeric" pattern="[0-9]*" value={phone} onChange={e => setPhone(e.target.value.replace(/\D/g, ''))} className="h-9 px-2 rounded border border-outline-variant/30 text-on-surface" placeholder="Optional" /></label>
-        <label className="flex flex-col gap-1 font-label-sm text-on-surface-variant">Address<input required value={address} onChange={e => setAddress(e.target.value)} className="h-9 px-2 rounded border border-outline-variant/30 text-on-surface" placeholder={`${isSupplier ? 'Supplier' : 'Customer'} address`} /></label>
-        <button disabled={partySaving} className="h-9 px-space-md rounded bg-primary-container text-on-primary disabled:opacity-60" type="submit">{partySaving ? 'Saving…' : editingPartyId ? `Update ${isSupplier ? 'supplier' : 'customer'}` : `Add ${isSupplier ? 'supplier' : 'customer'}`}</button>
-        {editingPartyId && <button className="h-9 px-space-md rounded border border-outline-variant/30 text-on-surface" type="button" onClick={resetPartyForm}>Cancel</button>}
-      </form>
-      {(isSupplier ? supplierError : customerError) && <p role="alert" className="rounded-md bg-error-container p-3 text-on-error-container">{isSupplier ? 'Suppliers' : 'Customers'} could not be loaded: {isSupplier ? supplierError : customerError}</p>}
-      <div className="bg-surface-container-lowest rounded-lg border border-outline-variant/20 overflow-x-auto"><table className="w-full text-left"><thead><tr className="bg-surface-container-low">{[isSupplier?'Supplier':'Name','Phone','Address',...(isSupplier?['Total outstanding (₹)']:[]),'Actions'].map(h=><th key={h} className="px-space-md py-3 text-label-sm uppercase text-on-surface-variant">{h}</th>)}</tr></thead><tbody className="divide-y divide-outline-variant/10">
-        {(isSupplier ? supplierLoading : customerLoading) && <tr><td colSpan={isSupplier?5:4} className="p-8 text-center text-on-surface-variant">Loading {isSupplier ? 'suppliers' : 'customers'}…</td></tr>}
-        {partyBalances.map(p=><tr key={p.id}><td className="px-space-md py-3 font-medium text-on-surface">{isSupplier ? <button type="button" className="text-primary underline" onClick={()=>{setSelectedSupplierId(p.id);setTab('supplier-ledger');setPartyFilter(p.name);}}>{p.name}</button> : p.name}</td><td className="px-space-md py-3 text-on-surface-variant">{p.phone||'—'}</td><td className="px-space-md py-3 text-on-surface-variant">{p.address || '—'}</td>{isSupplier && <td className="px-space-md py-3 font-semibold text-on-surface">{formatCurrency(Number(supplierBalances.find((s:any)=>s.id===p.id)?.outstanding || 0))}</td>}<td className="px-space-md py-3 whitespace-nowrap"><button type="button" onClick={() => editParty(p)} className="mr-3 text-primary">Edit</button><button type="button" onClick={() => void removeParty(p)} className="text-error">Deactivate</button></td></tr>)}
-        {!(isSupplier ? supplierLoading : customerLoading) && !partyBalances.length && <tr><td colSpan={isSupplier?5:4} className="p-8 text-center text-on-surface-variant">No records yet.</td></tr>}
-      </tbody></table></div>
-    </> : <>
-      <section className="bg-surface-container-lowest p-space-md rounded-lg border border-outline-variant/20 flex flex-wrap gap-space-sm items-end">{isSupplier ? <label className="flex flex-col gap-1 font-label-sm text-on-surface-variant">Supplier<select value={selectedSupplierId} onChange={e=>setSelectedSupplierId(e.target.value)} className="h-9 px-2 rounded border border-outline-variant/30 bg-surface-container-lowest text-on-surface"><option value="">Choose supplier</option>{suppliers.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></label> : <label className="flex flex-col gap-1 font-label-sm text-on-surface-variant">Party<select value={partyFilter} onChange={e=>setPartyFilter(e.target.value)} className="h-9 px-2 rounded border border-outline-variant/30 bg-surface-container-lowest text-on-surface"><option value="ALL">All customers</option>{parties.map(p=><option key={p.id} value={p.name}>{p.name}</option>)}</select></label>}<label className="flex flex-col gap-1 font-label-sm text-on-surface-variant">From<input type="date" value={from} onChange={e=>setFrom(e.target.value)} className="h-9 px-2 rounded border border-outline-variant/30 text-on-surface" /></label><label className="flex flex-col gap-1 font-label-sm text-on-surface-variant">To<input type="date" value={to} onChange={e=>setTo(e.target.value)} className="h-9 px-2 rounded border border-outline-variant/30 text-on-surface" /></label><button type="button" onClick={()=>{setFrom('');setTo('');setPartyFilter('ALL');}} className="h-9 px-space-md rounded border border-outline-variant/30 text-on-surface">Reset</button></section>
-      {isSupplier ? <>{ledgerLoading && <p className="p-4 text-on-surface-variant">Loading supplier ledger…</p>}{selectedSupplierLedger && <><section className="rounded-lg border border-outline-variant/20 bg-surface-container-lowest p-space-md"><h2 className="text-title-md font-semibold">{selectedSupplierLedger.supplier.name} · Total outstanding {formatCurrency(Number(selectedSupplierLedger.totals.outstanding))}</h2><p className="mt-1 text-sm text-on-surface-variant">Total billed {formatCurrency(Number(selectedSupplierLedger.totals.billed))} · Total paid {formatCurrency(Number(selectedSupplierLedger.totals.paid))}</p></section><div className="bg-surface-container-lowest rounded-lg border border-outline-variant/20 overflow-x-auto"><table className="w-full text-left"><thead><tr className="bg-surface-container-low">{['Purchase','Date','Total (₹)','Paid (₹)','Payments'].map(h=><th key={h} className="px-space-md py-3 text-label-sm uppercase text-on-surface-variant">{h}</th>)}</tr></thead><tbody className="divide-y divide-outline-variant/10">{(selectedSupplierLedger.purchases||[]).map((purchase:any)=><tr key={purchase.purchaseNumber}><td className="px-space-md py-3 font-mono text-primary">{purchase.purchaseNumber}</td><td className="px-space-md py-3">{String(purchase.date).slice(0,10)}</td><td className="px-space-md py-3">{formatCurrency(Number(purchase.total))}</td><td className="px-space-md py-3">{formatCurrency(Number(purchase.paid))}</td><td className="px-space-md py-3">{(purchase.payments||[]).map((payment:any)=>`${payment.method} ${formatCurrency(Number(payment.amount))}`).join(' · ')||'—'}</td></tr>)}</tbody></table></div></>}</> : <div className="p-5 text-on-surface-variant">Customer ledger has been removed. Customer credit settlements are managed from the Credit page.</div>}
-    </>}
-    {modalOpen&&<div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={()=>setModalOpen(false)}><div className="w-full max-w-md bg-surface-container-lowest rounded-xl border border-outline-variant/30 p-space-md flex flex-col gap-space-sm" onClick={e=>e.stopPropagation()}><h2 className="font-title-md text-on-surface">Record {isSupplier?'supplier payment':'customer receipt'}</h2><label className="flex flex-col gap-1 text-label-sm text-on-surface-variant">Invoice<select value={invoiceNumber} onChange={e=>{const row=currentInvoices.find(r=>r.invoiceNumber===e.target.value);setInvoiceNumber(e.target.value);if(row){setPartyName(row.partyName);setAmount(String(row.outstandingBalance));}}} className="h-9 px-2 rounded border border-outline-variant/30 text-on-surface">{currentInvoices.map(row=><option key={row.id} value={row.invoiceNumber}>{row.partyName} · {row.invoiceNumber} · {formatCurrency(row.outstandingBalance)} due</option>)}</select></label><div className="text-label-sm text-on-surface-variant">{partyName} · Remaining balance {formatCurrency(selectedInvoice?.outstandingBalance||0)}</div><label className="flex flex-col gap-1 text-label-sm text-on-surface-variant">Amount (₹)<input type="number" min="0.01" step="0.01" max={selectedInvoice?.outstandingBalance} value={amount} onChange={e=>setAmount(e.target.value)} className="h-9 px-2 rounded border border-outline-variant/30 text-on-surface" /></label><label className="flex flex-col gap-1 text-label-sm text-on-surface-variant">Payment date<input type="date" value={paymentDate} onChange={e=>setPaymentDate(e.target.value)} className="h-9 px-2 rounded border border-outline-variant/30 text-on-surface" /></label><label className="flex flex-col gap-1 text-label-sm text-on-surface-variant">Method<select value={paymentMode} onChange={e=>setPaymentMode(e.target.value)} className="h-9 px-2 rounded border border-outline-variant/30 text-on-surface">{['Cash','UPI','Bank transfer','Cheque'].map(m=><option key={m}>{m}</option>)}</select></label><div className="flex justify-end gap-2 pt-2"><button type="button" onClick={()=>setModalOpen(false)} className="h-9 px-space-md rounded border border-outline-variant/30">Cancel</button><button type="button" onClick={savePayment} className="h-9 px-space-md rounded bg-primary-container text-on-primary">Save payment</button></div></div></div>}
-  </div>;
+  );
 };

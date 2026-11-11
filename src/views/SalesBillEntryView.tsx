@@ -10,6 +10,12 @@ import {
   quantityStep,
 } from "../utils/unitQuantity";
 
+const isKilogramProduct = (product?: { unit?: string; unitName?: string }) => {
+  const name = product?.unitName?.trim().toLowerCase();
+  const unit = product?.unit?.trim().toLowerCase();
+  return name === "kilogram" || name === "kilograms" || unit === "kg";
+};
+
 export const SalesBillEntryView: React.FC = () => {
   const { products, customers, addSale, showToast, setActiveReceiptToPrint } =
     useApp();
@@ -40,7 +46,6 @@ export const SalesBillEntryView: React.FC = () => {
 
   // Discounts & Coupons
   const [billDiscount, setBillDiscount] = useState(0);
-  const [discountEntryOpen, setDiscountEntryOpen] = useState(false);
   const [couponCode, setCouponCode] = useState("");
   const [couponPrice, setCouponPrice] = useState("");
   const [couponEnabled, setCouponEnabled] = useState(false);
@@ -69,11 +74,10 @@ export const SalesBillEntryView: React.FC = () => {
   const [savingSale, setSavingSale] = useState(false);
 
   // Recalculations
-  const grossSubtotal = cartItems.reduce((acc, item) => {
-    const gross = item.quantity * item.price;
-    const net = gross - gross * (item.discount / 100);
-    return acc + net;
-  }, 0);
+  const grossSubtotal = cartItems.reduce(
+    (acc, item) => acc + item.quantity * item.price,
+    0,
+  );
 
   const remainingBeforeCoupon = Math.max(0, grossSubtotal - billDiscount);
   const enteredCouponPrice = couponPrice.trim() ? Number(couponPrice) : 0;
@@ -183,7 +187,6 @@ export const SalesBillEntryView: React.FC = () => {
         tax: 0,
         quantity: qty,
         price: product.sellingPrice,
-        discount: 0,
       };
       setCartItems((prev) => [...prev, newItem]);
     }
@@ -219,10 +222,12 @@ export const SalesBillEntryView: React.FC = () => {
       if (draft === undefined) return false;
       const product = products.find((entry) => entry.id === item.productId);
       const allowsDecimals = product?.unitAllowsDecimals ?? false;
-      const quantity = Number(draft);
+      const gramEntry = isKilogramProduct(product);
+      const enteredQuantity = Number(draft);
+      const quantity = gramEntry ? enteredQuantity / 1000 : enteredQuantity;
       return (
         !draft ||
-        !isUnitQuantityInputValid(draft, allowsDecimals) ||
+        (gramEntry ? !/^\d+$/.test(draft) : !isUnitQuantityInputValid(draft, allowsDecimals)) ||
         quantity <= 0 ||
         quantity > (product?.quantity ?? 0)
       );
@@ -313,7 +318,11 @@ export const SalesBillEntryView: React.FC = () => {
       return;
     }
     const itemNames = cartItems
-      .map((c) => `${c.name} (x${c.quantity})`)
+      .map((item) => {
+        const product = products.find((entry) => entry.id === item.productId);
+        const gramEntry = isKilogramProduct(product);
+        return `${item.name} (×${gramEntry ? `${Math.round(item.quantity * 1000)} g` : `${item.quantity} ${product?.unitName || product?.unit || ""}`})`;
+      })
       .join(", ");
 
     setSavingSale(true);
@@ -356,6 +365,7 @@ export const SalesBillEntryView: React.FC = () => {
         upiRef:
           paymentMode === "UPI" && upiRef.trim() ? upiRef.trim() : undefined,
         amount: finalTotal,
+        billTotal: finalTotal,
         subtotal: grossSubtotal,
         ...(couponCodeProvided
           ? {
@@ -363,12 +373,7 @@ export const SalesBillEntryView: React.FC = () => {
               couponPrice: enteredCouponPrice,
             }
           : {}),
-        discountAmount:
-          cartItems.reduce(
-            (sum, item) =>
-              sum + item.quantity * item.price * (item.discount / 100),
-            0,
-          ) + billDiscount,
+        discountAmount: billDiscount,
         billDiscountAmount: billDiscount,
         cashReceived: paymentMode === "Cash" ? finalTotal : undefined,
         changeGiven: paymentMode === "Cash" ? 0 : undefined,
@@ -387,9 +392,15 @@ export const SalesBillEntryView: React.FC = () => {
             sku: product.sku,
             unit: product.unit,
             quantity: item.quantity,
+            ...(isKilogramProduct(product)
+              ? {
+                  displayQuantity: Math.round(item.quantity * 1000),
+                  displayUnitName: "Gram",
+                  displayUnitSymbol: "g",
+                }
+              : {}),
             sellingPrice: item.price,
             purchaseRate: product.purchaseRate,
-            discount: item.discount,
             tax: 0,
           };
         }),
@@ -400,7 +411,6 @@ export const SalesBillEntryView: React.FC = () => {
         setBillDate(new Date().toISOString().slice(0, 10));
         setCartItems([]);
         setBillDiscount(0);
-        setDiscountEntryOpen(false);
         setSplitAmounts({ cash: "", upi: "", coupon: "", credit: "" });
         setSplitCouponCode("");
         setCouponCode("");
@@ -426,12 +436,12 @@ export const SalesBillEntryView: React.FC = () => {
         }),
       party: customerName,
       items: cartItems.map((c) => ({
+        ...(isKilogramProduct(products.find((product) => product.id === c.productId))
+          ? { qty: Math.round(c.quantity * 1000), unit: "g" }
+          : { qty: c.quantity, unit: products.find((product) => product.id === c.productId)?.unit || "" }),
         name: c.name,
-        qty: c.quantity,
-        unit:
-          products.find((product) => product.id === c.productId)?.unit || "",
         price: c.price,
-        total: c.quantity * c.price * (1 - c.discount / 100),
+        total: c.quantity * c.price,
       })),
       subtotal: grossSubtotal,
       billDiscount,
@@ -671,26 +681,28 @@ export const SalesBillEntryView: React.FC = () => {
                   </th>
                   <th className="py-2 px-space-sm">Brand</th>
                   <th className="py-2 px-space-sm w-32 text-center">
-                    Quantity
+                    Quantity / unit
                   </th>
                   <th className="py-2 px-space-sm w-28 text-right">Price</th>
-                  <th className="py-2 px-space-sm w-24 text-right">Disc (%)</th>
                   <th className="py-2 px-space-md w-28 text-right">Total</th>
                   <th className="py-2 px-space-sm w-12 text-center">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-surface-container">
                 {cartItems.map((item, index) => {
-                  const gross = item.quantity * item.price;
-                  const net = gross - gross * (item.discount / 100);
+                  const net = item.quantity * item.price;
                   const product = products.find(
                     (entry) => entry.id === item.productId,
                   );
                   const allowsDecimals = product?.unitAllowsDecimals ?? false;
-                  const minimumQuantity = allowsDecimals ? 0.001 : 1;
-                  const quantityIncrement = allowsDecimals ? 0.1 : 1;
+                  const gramEntry = isKilogramProduct(product);
+                  const quantityScale = gramEntry ? 1000 : 1;
+                  const minimumInputQuantity = gramEntry ? 1 : allowsDecimals ? 0.001 : 1;
+                  const minimumQuantity = minimumInputQuantity / quantityScale;
+                  const quantityIncrement = (gramEntry ? 1 : allowsDecimals ? 0.1 : 1) / quantityScale;
+                  const displayUnit = gramEntry ? "g" : product?.unitName || product?.unit || "unit";
                   const inputQuantity =
-                    quantityDrafts[item.id] ?? String(item.quantity);
+                    quantityDrafts[item.id] ?? String(gramEntry ? Math.round(item.quantity * quantityScale) : item.quantity);
                   return (
                     <tr
                       key={item.id}
@@ -734,10 +746,7 @@ export const SalesBillEntryView: React.FC = () => {
                                         ...it,
                                         quantity: Math.max(
                                           minimumQuantity,
-                                          Math.round(
-                                            (it.quantity - quantityIncrement) *
-                                              1000,
-                                          ) / 1000,
+                                          Math.round((it.quantity - quantityIncrement) * 1000) / 1000,
                                         ),
                                       }
                                     : it,
@@ -749,10 +758,11 @@ export const SalesBillEntryView: React.FC = () => {
                           </button>
                           <input
                             type="number"
-                            min={minimumQuantity}
-                            step={quantityStep(allowsDecimals)}
-                            max={product?.quantity ?? 0}
-                            className="w-10 text-center font-data-mono-md text-data-mono-md bg-transparent text-on-surface focus:outline-none"
+                            min={minimumInputQuantity}
+                            step={gramEntry ? 1 : quantityStep(allowsDecimals)}
+                            max={(product?.quantity ?? 0) * quantityScale}
+                            aria-label={`Quantity in ${displayUnit}`}
+                            className="w-16 text-center font-data-mono-md text-data-mono-md bg-transparent text-on-surface focus:outline-none"
                             value={inputQuantity}
                             onChange={(e) => {
                               const raw = e.target.value;
@@ -760,18 +770,21 @@ export const SalesBillEntryView: React.FC = () => {
                                 ...previous,
                                 [item.id]: raw,
                               }));
-                              if (
-                                !raw ||
-                                !isUnitQuantityInputValid(raw, allowsDecimals)
-                              ) {
+                              const entered = Number(raw);
+                              const requested = entered / quantityScale;
+                              const validInput = gramEntry
+                                ? /^\d+$/.test(raw)
+                                : isUnitQuantityInputValid(raw, allowsDecimals);
+                              if (!raw || !validInput) {
                                 setStockWarning(
-                                  allowsDecimals
+                                  gramEntry
+                                    ? "Enter grams as a whole number."
+                                    : allowsDecimals
                                     ? "Use no more than 3 decimal places for this quantity."
                                     : "This unit only allows whole-number quantities.",
                                 );
                                 return;
                               }
-                              const requested = Number(raw);
                               const maximum = product?.quantity ?? 0;
                               if (
                                 requested < minimumQuantity ||
@@ -796,13 +809,14 @@ export const SalesBillEntryView: React.FC = () => {
                             onBlur={() => {
                               const raw = quantityDrafts[item.id];
                               if (raw === undefined) return;
-                              const requested = Number(raw);
+                              const entered = Number(raw);
+                              const requested = entered / quantityScale;
+                              const validInput = gramEntry
+                                ? /^\d+$/.test(raw)
+                                : isUnitQuantityInputValid(raw, allowsDecimals);
                               if (
                                 !raw ||
-                                !isUnitQuantityInputValid(
-                                  raw,
-                                  allowsDecimals,
-                                ) ||
+                                !validInput ||
                                 requested < minimumQuantity ||
                                 requested > (product?.quantity ?? 0)
                               ) {
@@ -827,6 +841,7 @@ export const SalesBillEntryView: React.FC = () => {
                               }
                             }}
                           />
+                          <span className="pr-1 text-[10px] font-semibold text-on-surface-variant">{displayUnit}</span>
                           <button
                             type="button"
                             aria-label={`Increase ${item.name} quantity`}
@@ -893,27 +908,6 @@ export const SalesBillEntryView: React.FC = () => {
                           }}
                         />
                       </td>
-                      <td className="py-2 px-space-sm text-right">
-                        <input
-                          type="number"
-                          step="1"
-                          min="0"
-                          max="100"
-                          className="w-16 text-right font-data-mono-md text-data-mono-md bg-surface-container-low px-1.5 py-0.5 rounded text-on-surface focus:outline-none focus:bg-surface-container-lowest border border-outline-variant/30"
-                          value={item.discount || ""}
-                          placeholder="0"
-                          onChange={(e) => {
-                            const val = parseFloat(e.target.value) || 0;
-                            setCartItems((prev) =>
-                              prev.map((it) =>
-                                it.id === item.id
-                                  ? { ...it, discount: val }
-                                  : it,
-                              ),
-                            );
-                          }}
-                        />
-                      </td>
                       <td className="py-2 px-space-md text-right font-data-mono-md text-data-mono-md font-semibold text-on-surface">
                         {formatCurrency(net)}
                       </td>
@@ -938,7 +932,7 @@ export const SalesBillEntryView: React.FC = () => {
                 {cartItems.length === 0 && (
                   <tr>
                     <td
-                      colSpan={8}
+                      colSpan={7}
                       className="text-center py-8 text-on-surface-variant font-body-sm"
                     >
                       No products added yet. Search above and choose a product
@@ -980,43 +974,31 @@ export const SalesBillEntryView: React.FC = () => {
                   {formatCurrency(grossSubtotal)}
                 </span>
               </div>
-              {billDiscount > 0 || discountEntryOpen ? (
-                <div className="py-1">
-                  <label
-                    className="flex items-center justify-between gap-2 text-on-surface-variant"
-                    htmlFor="bill-discount"
-                  >
-                    <span>Bill discount (₹)</span>
-                    <input
-                      id="bill-discount"
-                      type="number"
-                      min="0"
-                      max={grossSubtotal}
-                      step="1"
-                      value={billDiscount || ""}
-                      placeholder="Enter amount"
-                      onChange={(e) => {
-                        if (!/^\d*$/.test(e.target.value)) return;
-                        setBillDiscount(
-                          Math.min(
-                            grossSubtotal,
-                            Math.max(0, Number(e.target.value) || 0),
-                          ),
-                        );
-                      }}
-                      className="h-7 w-24 px-2 text-right bg-surface-container-lowest rounded border border-outline-variant/30 text-on-surface"
-                    />
-                  </label>
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => setDiscountEntryOpen(true)}
-                  className="self-start rounded border border-outline-variant/30 px-3 py-1.5 text-xs font-semibold text-primary"
-                >
-                  Add discount
-                </button>
-              )}
+              <label
+                className="flex items-center justify-between gap-3 py-1 text-sm text-on-surface-variant"
+                htmlFor="bill-discount"
+              >
+                <span>Discount (₹)</span>
+                <input
+                  id="bill-discount"
+                  type="number"
+                  min="0"
+                  max={grossSubtotal}
+                  step="1"
+                  value={billDiscount || ""}
+                  placeholder="0"
+                  onChange={(e) => {
+                    if (!/^\d*$/.test(e.target.value)) return;
+                    setBillDiscount(
+                      Math.min(
+                        grossSubtotal,
+                        Math.max(0, Number(e.target.value) || 0),
+                      ),
+                    );
+                  }}
+                  className="h-9 w-32 rounded-md border border-outline-variant/30 bg-surface-container-lowest px-2 text-right text-base font-semibold text-on-surface outline-none focus:border-primary"
+                />
+              </label>
               <button
                 type="button"
                 role="switch"

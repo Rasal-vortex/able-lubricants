@@ -9,7 +9,6 @@ const SCREEN_LABELS: Record<string, string> = {
   'credit-bill-management': 'Credit bills',
   coupons: 'Coupons',
   'daily-sales-management': 'Daily sales',
-  'expense-management': 'Expenses',
   'purchase-bill-entry': 'Purchases',
   'party-ledger-management': 'Party ledger',
   'reports-and-profit-calculation': 'Reports',

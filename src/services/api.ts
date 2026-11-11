@@ -126,8 +126,9 @@ export interface ProductPayload {
   name: string;
   brandId: string;
   unitId: string;
+  purchaseRate: number;
   sellingPrice: number;
-  mrp: number;
+  mrp?: number | null;
   active?: boolean;
 }
 
@@ -154,8 +155,9 @@ export interface ApiProduct {
   name: string;
   brandId?: string;
   unitId: string;
+  purchaseRate: string | number;
   sellingPrice: string | number;
-  mrp: string | number;
+  mrp: string | number | null;
   sku?: string;
   currentStock: string | number;
   brand?: string | ApiBrand;
@@ -177,6 +179,9 @@ export interface CreateSalePayload {
   items: Array<{
     productId: string;
     quantity: number;
+    displayQuantity?: number;
+    displayUnitName?: string;
+    displayUnitSymbol?: string;
     discountAmount: number;
   }>;
 }
@@ -191,6 +196,9 @@ export interface ApiSale {
     id: string;
     productId: string;
     quantity: string | number;
+    displayQuantity?: string | number | null;
+    displayUnitName?: string | null;
+    displayUnitSymbol?: string | null;
     sellingPrice: string | number;
     discountAmount: string | number;
     totalAmount: string | number;
@@ -217,6 +225,8 @@ export interface ApiCouponRedemption {
   code: string;
   amount: string | number;
   paymentDate: string;
+  saleId?: string | null;
+  isSaleBased?: boolean;
   billNumber: string;
   customerName: string;
 }
