@@ -310,7 +310,7 @@ export interface StockAdjustmentPayload {
   productId: string;
   quantity: number;
   direction: 'IN' | 'OUT';
-  reason: string;
+  reason?: string;
   notes?: string;
 }
 

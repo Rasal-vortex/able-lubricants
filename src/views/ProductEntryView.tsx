@@ -214,15 +214,6 @@ export const ProductEntryView: React.FC = () => {
       showToast("Only Admin users can change stock quantity.", "error");
       return;
     }
-    if (
-      drawerMode === "edit" &&
-      quantityChanged &&
-      !stockAdjustmentReason.trim()
-    ) {
-      showToast("Enter a reason for changing the stock quantity.", "error");
-      return;
-    }
-
     setFormSaving(true);
     try {
       const payload = {
@@ -795,9 +786,8 @@ export const ProductEntryView: React.FC = () => {
               </label>
               {drawerMode === "edit" && isAdmin && quantityChanged && (
                 <label className="flex flex-col gap-1.5 text-[12px] font-medium text-on-surface">
-                  Stock adjustment reason
+                  Stock adjustment reason (optional)
                   <input
-                    required
                     data-product-form-field="reason"
                     onKeyDown={handleProductFormArrowNavigation}
                     value={stockAdjustmentReason}

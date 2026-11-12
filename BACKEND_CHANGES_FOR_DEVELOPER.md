@@ -1,42 +1,406 @@
-# Backend changes for the Able Lubes developer
+# Backend handoff for Able Lubes developer
 
-This handoff is based on the current local working tree at `C:\Users\DELL\Documents\GitHub\able-lubes-rasal-backend`. These changes are local and uncommitted. Port them into the backend developer's repository and review them before committing.
+## Source of truth
 
-## Changes by area
+- Repository: `Rasal-vortex/able-lubes-rasal-backend`
+- Branch: `main`
+- Latest pushed commit reviewed: `1ad6ca5` — **Add gram display quantities and backend updates**
+- The latest commit includes the prior coupon-history commit `a4daac1` and unit-snapshot migration repair `6c8ed7b` in its history.
+- These commits were pushed. The app was already deployed by the user. The gram display migration was applied to the Railway database during troubleshooting; verify deployed migration status before applying it again.
 
-### Gram entry for Kilogram products
+If the developer needs the exact code, sync from the repository's `main` branch. The patches below are included for review and porting when syncing isn't possible.
 
-- `prisma/schema.prisma`: adds optional `displayQuantity`, `displayUnitNameSnapshot`, and `displayUnitSymbolSnapshot` fields to `SaleItem`. The existing `quantity` remains the canonical kilogram amount used for stock and pricing.
-- `src/modules/sales/sale.schema.ts`: accepts gram display metadata on a sale line, requires the fields together, and restricts the display unit to `Gram` / `g`.
-- `src/modules/transactions/transaction.service.ts`: validates that the product is a kilogram unit and that `displayQuantity / 1000` equals the canonical `quantity`; saves the gram amount and unit snapshots while preserving kilogram values for inventory decrement and price/profit calculations.
-- `src/modules/sales/sale.serializer.ts`: returns the stored display quantity and unit in sale responses.
-- `src/modules/reports/report.model.ts` and `src/modules/reports/report.service.ts`: include the display fields in sales and Daily Sales responses. Profit calculation continues to use canonical kilograms.
-- New migration: `prisma/migrations/20261111180000_sale_display_quantity/migration.sql` adds the three nullable columns to `sale_items`.
+## Final behavior to preserve
 
-### Other backend changes in the current working tree
+### Coupon redemption and split sale payments
 
-- `src/modules/coupons/coupon.service.ts`: coupon redemption responses include `saleId` and `isSaleBased`.
-- `src/modules/payments/payment.service.ts`: coupon codes recorded as split-sale coupon payments must be unrecorded; reusing a recorded coupon code is rejected.
-- `src/modules/expenses/expense.schema.ts` and `src/modules/expenses/expense.service.ts`: expense description is optional and normalized to an empty string when absent.
-- `src/modules/products/product.schema.ts` and `src/modules/products/product.service.ts`: MRP may be omitted or null; when present, it must be greater than selling price.
-- `src/modules/reports/report.service.ts`: daily sales rows include discount and bill total; supplier ledger rows include the purchase ID.
-- `src/openapi.ts`: updates API descriptions for coupon payments and optional expense descriptions.
-- `package-lock.json`: contains optional platform metadata changes only; no runtime feature behavior is represented by this diff.
+Commit `a4daac1` added coupon redemption history and usage protections:
 
-## Database migration
+- Coupon records expose redeemed and remaining values.
+- `GET /coupons/redemptions` exposes coupon payment history.
+- Used coupons cannot be deleted or have their code changed; their value cannot be reduced below the amount already redeemed.
+- Daily Sales includes the coupon code associated with a payment.
+- API documentation describes these features.
 
-```sqlALTER TABLE "sale_items"
-  ADD COLUMN "display_quantity" DECIMAL(12,3),
-  ADD COLUMN "display_unit_name_snapshot" TEXT,
-  ADD COLUMN "display_unit_symbol_snapshot" TEXT;```
+The newer rule in `1ad6ca5` supersedes the older coupon-payment validation from `a4daac1` for Billing split-mode claims:
 
-Apply the migration to the intended database using the project's normal Prisma deployment workflow. The user's Railway database was migrated during troubleshooting; verify migration status in the developer's environment before applying it again.
+- A split-mode coupon claim uses a code that is not present in Coupon records and has not been used in another coupon payment.
+- Reject a recorded coupon code or previously used code.
+- Record the submitted code with its bill payment and return `saleId` plus `isSaleBased` in redemption history so a bill-linked claim is classified as Sale-based.
+- Do not require a Regular coupon record or subtract the claim from a Regular coupon's remaining value for split payments.
+- Preserve Regular coupon management and redemption protections for coupons managed through the Coupon section.
+- No database migration was added for this classification behavior.
 
-## Full tracked-file diff
+### Gram entry for kilogram products
 
-The following is the current diff for the tracked files listed above. The migration is shown separately because it is a new untracked file.
+Commit `1ad6ca5` adds display quantity snapshots for kilogram product sales:
 
-````diffdiff --git a/package-lock.json b/package-lock.json
+- The sale request stores canonical `quantity` in kilograms for stock/pricing and optional display quantity in whole grams for the amount entered by staff.
+- Backend validation requires the display fields together and confirms `displayQuantity / 1000` equals the saved kilogram quantity for a Kilogram (`kg`) product.
+- Inventory decrement, sale total, and profit calculation continue to use kilograms.
+- Sale serializers and Daily Sales / sales report output show the gram amount and `g` unit that staff entered.
+- Migration `20261111180000_sale_display_quantity` adds nullable display columns to `sale_items`.
+
+### Other changes in `1ad6ca5`
+
+- Expense descriptions are optional and normalize to an empty string when omitted.
+- MRP is optional; when present, it must exceed selling price.
+- Daily Sales responses include bill total and discount values; supplier ledger rows include purchase IDs.
+- OpenAPI summaries were updated for the split coupon rule and optional expense descriptions.
+- `package-lock.json` has optional platform metadata churn only; it does not alter runtime behavior.
+
+## Migration repair in `6c8ed7b`
+
+Commit `6c8ed7b` corrects the migration order for unit snapshot fields. It is a separate migration repair, already present in `main`. Preserve the corrected SQL and migration ordering when syncing.
+
+## Verification notes
+
+- The user confirmed a gram-entered sale reduced kilogram stock correctly.
+- The user confirmed the backend and frontend are already deployed.
+- The one-time behavior check requested for split coupons is: an unrecorded code succeeds once; a code already present in Coupon records or already used in a coupon payment is rejected.
+- No schema change is needed for the split-coupon classification itself. The gram display fields do require the migration above.
+
+## Commit patches for review
+
+### `a4daac1` — validate coupon redemptions and expose usage history
+
+````diff
+commit a4daac1cccd6ecba4253327fb84deff86256c9f8
+Author:     NecttosRasal <rasalnecttos@gmail.com>
+AuthorDate: Mon Nov 9 21:49:33 2026 +0530
+Commit:     NecttosRasal <rasalnecttos@gmail.com>
+CommitDate: Mon Nov 9 21:49:33 2026 +0530
+
+    validate coupon redemptions and expose usage history
+
+diff --git a/src/modules/coupons/coupon.controller.ts b/src/modules/coupons/coupon.controller.ts
+index 9030385..d675932 100644
+--- a/src/modules/coupons/coupon.controller.ts
++++ b/src/modules/coupons/coupon.controller.ts
+@@ -3,6 +3,8 @@ import * as service from "./coupon.service.js";
+
+ export const list = async (req: Request, res: Response) =>
+   res.json({ success: true, ...(await service.listCoupons(req.query)) });
++export const redemptions = async (_req: Request, res: Response) =>
++  res.json({ success: true, data: await service.listCouponRedemptions() });
+ export const get = async (req: Request, res: Response) =>
+   res.json({
+     success: true,
+diff --git a/src/modules/coupons/coupon.route.ts b/src/modules/coupons/coupon.route.ts
+index 7fb467d..04fe4a3 100644
+--- a/src/modules/coupons/coupon.route.ts
++++ b/src/modules/coupons/coupon.route.ts
+@@ -12,6 +12,7 @@ import { validate } from "../../shared/validate.js";
+ const router = Router();
+ router.use(authenticate);
+ router.get("/", validate("query", couponListSchema), c.list);
++router.get("/redemptions", c.redemptions);
+ router.get("/:id", validate("params", couponIdSchema), c.get);
+ router.post("/", validate("body", createCouponSchema), c.create);
+ router.patch(
+diff --git a/src/modules/coupons/coupon.service.ts b/src/modules/coupons/coupon.service.ts
+index f3a8dec..51efea4 100644
+--- a/src/modules/coupons/coupon.service.ts
++++ b/src/modules/coupons/coupon.service.ts
+@@ -1,12 +1,57 @@
++import { Prisma } from "../../../generated/prisma/client.js";
+ import { prisma } from "../../config/prisma.js";
+ import { ApiError } from "../../shared/errors.js";
+ import { pageMeta } from "../../shared/pagination.js";
+
+-const serialize = (coupon: any) => ({
+-  ...coupon,
+-  price: coupon.price.toString(),
++const couponNotePrefix = "Coupon code: ";
++const redemptionWhere = {
++  method: "COUPON" as const,
++  notes: { startsWith: couponNotePrefix },
++};
++
++const serializeRedemption = (payment: any) => ({
++  id: payment.id,
++  code: payment.notes.slice(couponNotePrefix.length),
++  amount: payment.amount.toString(),
++  paymentDate: payment.paymentDate,
++  billNumber: payment.sale?.invoiceNumber ?? "—",
++  customerName: payment.customer?.name ?? payment.sale?.customer?.name ?? "Walk-in customer",
+ });
+
++const serializeCoupon = (coupon: any, payments: any[]) => {
++  const redemptions = payments
++    .filter((payment) => payment.notes === `${couponNotePrefix}${coupon.code}`)
++    .map(serializeRedemption);
++  const redeemedAmount = redemptions.reduce(
++    (total, redemption) => total.add(new Prisma.Decimal(redemption.amount)),
++    new Prisma.Decimal(0),
++  );
++  return {
++    ...coupon,
++    price: coupon.price.toString(),
++    redeemedAmount: redeemedAmount.toFixed(2),
++    remainingAmount: coupon.isSaleBased
++      ? null
++      : Prisma.Decimal.max(new Prisma.Decimal(0), coupon.price.sub(redeemedAmount)).toFixed(2),
++    redemptions,
++  };
++};
++
++async function getCouponPaymentRows() {
++  return prisma.customerPayment.findMany({
++    where: redemptionWhere,
++    select: {
++      id: true,
++      amount: true,
++      paymentDate: true,
++      notes: true,
++      customer: { select: { name: true } },
++      sale: { select: { invoiceNumber: true, customer: { select: { name: true } } } },
++    },
++    orderBy: { paymentDate: "desc" },
++  });
++}
++
+ export async function listCoupons(q: any) {
+   const where =
+     q.type === "sales-based"
+@@ -14,7 +59,7 @@ export async function listCoupons(q: any) {
+       : q.type === "non-sale-based"
+         ? { isSaleBased: false }
+         : {};
+-  const [rows, total] = await Promise.all([
++  const [rows, total, payments] = await Promise.all([
+     prisma.coupon.findMany({
+       where,
+       include: { sale: { select: { id: true, invoiceNumber: true } } },
+@@ -23,27 +68,33 @@ export async function listCoupons(q: any) {
+       take: q.limit,
+     }),
+     prisma.coupon.count({ where }),
++    getCouponPaymentRows(),
+   ]);
+   return {
+-    data: rows.map(serialize),
++    data: rows.map((coupon) => serializeCoupon(coupon, payments)),
+     meta: pageMeta(q.page, q.limit, total),
+   };
+ }
+
++export async function listCouponRedemptions() {
++  return (await getCouponPaymentRows()).map(serializeRedemption);
++}
++
+ export async function getCoupon(id: string) {
+   const coupon = await prisma.coupon.findUnique({
+     where: { id },
+     include: { sale: { select: { id: true, invoiceNumber: true } } },
+   });
+   if (!coupon) throw new ApiError(404, "Coupon not found");
+-  return serialize(coupon);
++  return serializeCoupon(coupon, await getCouponPaymentRows());
+ }
+
+ export async function createCoupon(input: any) {
+-  return serialize(
++  return serializeCoupon(
+     await prisma.coupon.create({
+       data: { code: input.code, price: input.price, isSaleBased: false },
+     }),
++    [],
+   );
+ }
+
+@@ -52,7 +103,17 @@ export async function updateCoupon(id: string, input: any) {
+   if (!coupon) throw new ApiError(404, "Coupon not found");
+   if (coupon.isSaleBased)
+     throw new ApiError(409, "Sale-based coupons must be changed through the sale");
+-  return serialize(await prisma.coupon.update({ where: { id }, data: input }));
++  const redeemed = await prisma.customerPayment.aggregate({
++    where: { ...redemptionWhere, notes: `${couponNotePrefix}${coupon.code}` },
++    _sum: { amount: true },
++  });
++  const redeemedAmount = redeemed._sum.amount ?? new Prisma.Decimal(0);
++  if (redeemedAmount.gt(0) && input.code && input.code !== coupon.code)
++    throw new ApiError(409, "A coupon code cannot be changed after it has been used");
++  if (input.price !== undefined && new Prisma.Decimal(input.price).lt(redeemedAmount))
++    throw new ApiError(409, "Coupon value cannot be lower than the amount already redeemed");
++  const updated = await prisma.coupon.update({ where: { id }, data: input });
++  return serializeCoupon(updated, await getCouponPaymentRows());
+ }
+
+ export async function deleteCoupon(id: string) {
+@@ -60,5 +121,10 @@ export async function deleteCoupon(id: string) {
+   if (!coupon) throw new ApiError(404, "Coupon not found");
+   if (coupon.isSaleBased)
+     throw new ApiError(409, "Sale-based coupons cannot be deleted");
++  const redeemed = await prisma.customerPayment.count({
++    where: { ...redemptionWhere, notes: `${couponNotePrefix}${coupon.code}` },
++  });
++  if (redeemed > 0)
++    throw new ApiError(409, "A coupon with redemption history cannot be deleted");
+   await prisma.coupon.delete({ where: { id } });
+ }
+diff --git a/src/modules/payments/payment.schema.ts b/src/modules/payments/payment.schema.ts
+index f292702..3d5390a 100644
+--- a/src/modules/payments/payment.schema.ts
++++ b/src/modules/payments/payment.schema.ts
+@@ -6,6 +6,12 @@ export const customerPaymentSchema = z.object({
+   paymentDate: z.coerce.date().optional(),
+   method: z.enum(["CASH", "UPI", "COUPON"]),
+   notes: z.string().trim().max(1000).optional(),
++}).superRefine((payment, ctx) => {
++  if (payment.method !== "COUPON") return;
++  const match = /^Coupon code: (.+)$/.exec(payment.notes ?? "");
++  if (!match || match[1].trim() !== match[1].trim().toUpperCase()) {
++    ctx.addIssue({ code: "custom", path: ["notes"], message: "A normalized coupon code is required for coupon payments" });
++  }
+ });
+ export const supplierPaymentSchema = z.object({
+   supplierId: z.uuid(),
+diff --git a/src/modules/payments/payment.service.ts b/src/modules/payments/payment.service.ts
+index a98982f..50a06ea 100644
+--- a/src/modules/payments/payment.service.ts
++++ b/src/modules/payments/payment.service.ts
+@@ -26,6 +26,26 @@ export async function recordCustomerPayment(input: any) {
+           400,
+           "Payment exceeds the invoice outstanding amount",
+         );
++      if (input.method === "COUPON") {
++        const couponCode = /^Coupon code: (.+)$/.exec(input.notes ?? "")?.[1];
++        if (!couponCode)
++          throw new ApiError(400, "A coupon code is required for coupon payments");
++        const coupon = await tx.coupon.findUnique({ where: { code: couponCode } });
++        if (!coupon || coupon.isSaleBased)
++          throw new ApiError(404, "A regular coupon with this code was not found");
++        const couponPayments = await tx.customerPayment.aggregate({
++          where: { method: "COUPON", notes: `Coupon code: ${couponCode}` },
++          _sum: { amount: true },
++        });
++        const remainingCouponValue = coupon.price.sub(
++          couponPayments._sum.amount ?? amount(0),
++        );
++        if (paymentAmount.gt(remainingCouponValue))
++          throw new ApiError(
++            400,
++            `Coupon ${couponCode} has only ${remainingCouponValue.toFixed(2)} remaining`,
++          );
++      }
+       const payment = await paymentModel.createCustomerPayment(
+         {
+           ...input,
+diff --git a/src/modules/reports/report.model.ts b/src/modules/reports/report.model.ts
+index ba33ca9..1f66d81 100644
+--- a/src/modules/reports/report.model.ts
++++ b/src/modules/reports/report.model.ts
+@@ -42,7 +42,7 @@ export const reportModel = {
+   dailyPayments: (from: Date, to: Date) => prisma.customerPayment.findMany({
+     where: { paymentDate: { gte: from, lt: to }, sale: { status: "POSTED" } },
+     select: {
+-      id: true, amount: true, method: true, paymentDate: true,
++      id: true, amount: true, method: true, paymentDate: true, notes: true,
+       sale: {
+         select: {
+           id: true, invoiceNumber: true, billDate: true, totalAmount: true,
+diff --git a/src/modules/reports/report.service.ts b/src/modules/reports/report.service.ts
+index 1122a9c..ea9a71e 100644
+--- a/src/modules/reports/report.service.ts
++++ b/src/modules/reports/report.service.ts
+@@ -116,7 +116,7 @@ export async function dailySales(date: string) {
+       })),
+       payments: [],
+     };
+-    bill.payments.push({ id: payment.id, method: payment.method, amount: payment.amount.toFixed(2), date: payment.paymentDate });
++    bill.payments.push({ id: payment.id, method: payment.method, amount: payment.amount.toFixed(2), date: payment.paymentDate, notes: payment.notes });
+     bySale.set(sale.id, bill);
+     collected = collected.add(payment.amount);
+     byMethod.set(payment.method, (byMethod.get(payment.method) ?? decimal(0)).add(payment.amount));
+diff --git a/src/openapi.ts b/src/openapi.ts
+index 535e1bd..273c08e 100644
+--- a/src/openapi.ts
++++ b/src/openapi.ts
+@@ -134,6 +134,13 @@ export const openApiDocument = {
+         responses: { "201": { description: "Created coupon" } },
+       },
+     },
++    "/coupons/redemptions": {
++      get: {
++        summary: "List recorded coupon payments with their bills and customers",
++        security: [{ bearerAuth: [] }],
++        responses: { "200": { description: "Coupon redemption history" } },
++      },
++    },
+     "/coupons/{id}": {
+       get: {
+         summary: "Get coupon",
+@@ -230,7 +237,7 @@ export const openApiDocument = {
+     },
+     "/customer-payments": {
+       post: {
+-        summary: "Record a Cash, UPI, or Coupon payment against one invoice; call once per payment mode",
++        summary: "Record a Cash, UPI, or Coupon payment against one invoice; coupon payments require a valid regular coupon code and consume its remaining value",
+         security: [{ bearerAuth: [] }],
+         responses: { "201": { description: "Recorded payment" } },
+       },
+````
+
+### `6c8ed7b` — correct unit snapshot migration order
+
+````diff
+commit 6c8ed7beba317b3542a9362476c76773797e42b7
+Author:     NecttosRasal <rasalnecttos@gmail.com>
+AuthorDate: Mon Nov 9 16:15:59 2026 +0530
+Commit:     NecttosRasal <rasalnecttos@gmail.com>
+CommitDate: Mon Nov 9 16:15:59 2026 +0530
+
+    fix(db): correct unit snapshot migration order
+
+diff --git a/prisma/migrations/20261107115048/migration.sql b/prisma/migrations/20261107115048/migration.sql
+index ea7043f..8dc052e 100644
+--- a/prisma/migrations/20261107115048/migration.sql
++++ b/prisma/migrations/20261107115048/migration.sql
+@@ -1,5 +1,2 @@
+--- AlterTable
+-ALTER TABLE "purchase_items" ALTER COLUMN "unit_symbol_snapshot" SET DATA TYPE TEXT;
+-
+--- AlterTable
+-ALTER TABLE "sale_items" ALTER COLUMN "unit_symbol_snapshot" SET DATA TYPE TEXT;
++-- The snapshot columns are created as TEXT by
++-- 20261107130000_client_feedback_backend.
+diff --git a/prisma/migrations/20261107130000_client_feedback_backend/migration.sql b/prisma/migrations/20261107130000_client_feedback_backend/migration.sql
+index 1bf044a..c3dbbdf 100644
+--- a/prisma/migrations/20261107130000_client_feedback_backend/migration.sql
++++ b/prisma/migrations/20261107130000_client_feedback_backend/migration.sql
+@@ -2,7 +2,7 @@ ALTER TYPE "PaymentMethod" ADD VALUE IF NOT EXISTS 'COUPON';
+
+ ALTER TABLE "sale_items"
+   ADD COLUMN "unit_name_snapshot" TEXT,
+-  ADD COLUMN "unit_symbol_snapshot" VARCHAR(5),
++  ADD COLUMN "unit_symbol_snapshot" TEXT,
+   ADD COLUMN "unit_allows_decimals_snapshot" BOOLEAN;
+
+ UPDATE "sale_items" AS item
+@@ -19,7 +19,7 @@ ALTER TABLE "sale_items"
+
+ ALTER TABLE "purchase_items"
+   ADD COLUMN "unit_name_snapshot" TEXT,
+-  ADD COLUMN "unit_symbol_snapshot" VARCHAR(5),
++  ADD COLUMN "unit_symbol_snapshot" TEXT,
+   ADD COLUMN "unit_allows_decimals_snapshot" BOOLEAN;
+
+ UPDATE "purchase_items" AS item
+````
+
+### `1ad6ca5` — gram display quantities and backend updates; replaces split coupon rule
+
+````diff
+commit 1ad6ca5c948ad9eaccce8c2392018c9ef73777e6
+Author:     Rasal-vortex <rasal.vth@gmail.com>
+AuthorDate: Wed Nov 11 17:26:50 2026 +0530
+Commit:     Rasal-vortex <rasal.vth@gmail.com>
+CommitDate: Wed Nov 11 17:26:50 2026 +0530
+
+    Add gram display quantities and backend updates
+
+diff --git a/package-lock.json b/package-lock.json
 index 6667f83..9d60ed0 100644
 --- a/package-lock.json
 +++ b/package-lock.json
@@ -180,6 +544,17 @@ index 6667f83..9d60ed0 100644
        "license": "MIT",
        "optional": true,
        "os": [
+diff --git a/prisma/migrations/20261111180000_sale_display_quantity/migration.sql b/prisma/migrations/20261111180000_sale_display_quantity/migration.sql
+new file mode 100644
+index 0000000..dabd2bc
+--- /dev/null
++++ b/prisma/migrations/20261111180000_sale_display_quantity/migration.sql
+@@ -0,0 +1,4 @@
++ALTER TABLE "sale_items"
++  ADD COLUMN "display_quantity" DECIMAL(12,3),
++  ADD COLUMN "display_unit_name_snapshot" TEXT,
++  ADD COLUMN "display_unit_symbol_snapshot" TEXT;
+\ No newline at end of file
 diff --git a/prisma/schema.prisma b/prisma/schema.prisma
 index 93d98d6..3320252 100644
 --- a/prisma/schema.prisma

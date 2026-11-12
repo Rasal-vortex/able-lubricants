@@ -177,7 +177,7 @@ interface AppContextType {
   updateUnit: (id: string, payload: { name: string; symbol: string | null; allowsDecimals: boolean }) => Promise<ApiUnit>;
   addProduct: (product: CreateProductPayload) => Promise<Product>;
   updateProduct: (id: string, updates: Partial<ProductPayload>) => Promise<void>;
-  adjustProductStock: (id: string, quantity: number, reason: string) => Promise<void>;
+  adjustProductStock: (id: string, quantity: number, reason?: string) => Promise<void>;
   deleteProduct: (id: string) => Promise<void>;
 
   // Sales
@@ -515,7 +515,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     showToast(`Product details updated successfully.`);
   };
 
-  const adjustProductStock = async (id: string, desiredQuantity: number, reason: string) => {
+  const adjustProductStock = async (id: string, desiredQuantity: number, reason = "") => {
     if (!authSession) throw new Error('Sign in to adjust product stock.');
     if (authSession.user.role !== 'ADMIN') throw new Error('Only Admin users can adjust product stock.');
     const product = products.find((entry) => entry.id === id);
@@ -524,8 +524,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!isUnitQuantityValid(desiredQuantity, product.unitAllowsDecimals ?? false)) {
       throw new Error(product.unitAllowsDecimals ? 'Quantity can have up to 3 decimal places.' : 'This unit only allows whole-number quantities.');
     }
-    if (!reason.trim()) throw new Error('Enter a reason for changing the stock quantity.');
-
     const current = await getProductRequest(authSession.token, id);
     const currentQuantity = Number(current.currentStock);
     if (!Number.isFinite(currentQuantity)) throw new Error('The API returned an invalid current stock quantity.');
@@ -539,7 +537,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       productId: id,
       quantity: Math.abs(delta),
       direction: delta > 0 ? 'IN' : 'OUT',
-      reason: reason.trim(),
+      ...(reason.trim() ? { reason: reason.trim() } : {}),
     };
 
     try {
