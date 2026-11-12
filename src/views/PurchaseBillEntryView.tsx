@@ -501,8 +501,8 @@ export const PurchaseBillEntryView: React.FC = () => {
               </button>
             </div>
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[900px] border-collapse text-left">
-                <thead><tr className="bg-[#f6f5f2] text-xs font-bold text-[#6d685f]">{["#", "Product", "Qty", "Unit", "Purchase rate (₹)", "Line total (₹)", "Action"].map((h) => <th key={h} className="border-y border-r border-[#e9e3d9] px-3 py-3 text-center last:border-r-0">{h}</th>)}</tr></thead>
+              <table className="w-full min-w-[1020px] border-collapse text-left">
+                <thead><tr className="bg-[#f6f5f2] text-xs font-bold text-[#6d685f]">{["#", "Product", "Qty", "Unit", "Selling price (₹)", "Purchase rate (₹)", "Line total (₹)", "Action"].map((h) => <th key={h} className="border-y border-r border-[#e9e3d9] px-3 py-3 text-center last:border-r-0">{h}</th>)}</tr></thead>
                 <tbody className="divide-y divide-[#efede8] text-sm text-[#272727]">
                   {items.map((item, index) => (
                     <tr key={item.id} className="transition hover:bg-[#fffdf8]">
@@ -520,6 +520,7 @@ export const PurchaseBillEntryView: React.FC = () => {
                         })()}
                       </td>
                       <td className="border-r border-[#efede8] px-3 py-3 text-center text-[#68645e]">{item.unit || "—"}</td>
+                      <td className="border-r border-[#efede8] px-3 py-3 text-center font-medium text-[#272727]" aria-label="Selling price (read only)">{item.productId ? formatCurrency(item.sellingPrice) : "—"}</td>
                       <td className="border-r border-[#efede8] px-3 py-3"><input type="text" inputMode="decimal" value={purchaseRateDrafts[item.id] ?? (item.purchaseRate ? String(item.purchaseRate) : "")} placeholder="0" onPaste={blockInvalidPricePaste} onChange={(event) => { const raw = event.target.value; if (!/^\d*\.?\d{0,2}$/.test(raw)) return; setPurchaseRateDrafts((previous) => ({ ...previous, [item.id]: raw })); updateItem(item.id, "purchaseRate", Number(raw) || 0); }} onBlur={() => setPurchaseRateDrafts((previous) => { const next = { ...previous }; delete next[item.id]; return next; })} className="h-11 w-36 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-[#272727] outline-none transition focus:border-[#c58a00] focus:bg-white focus:ring-2 focus:ring-[#f5e7c3]" /></td>
                       <td className="border-r border-[#efede8] px-3 py-3 text-center font-semibold text-[#272727]">{formatCurrency(item.quantity * item.purchaseRate)}</td>
                       <td className="px-3 py-3 text-center"><button type="button" aria-label="Remove product" onClick={() => items.length > 1 ? setItems((prev) => prev.filter((row) => row.id !== item.id)) : showToast("A purchase needs at least one product line.", "error")} className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-red-100 bg-red-50 material-symbols-outlined text-error transition hover:bg-red-100">delete</button></td>

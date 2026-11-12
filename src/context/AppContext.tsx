@@ -79,15 +79,7 @@ const loadAuthSession = (): AuthSession | null => {
 };
 
 const DEMO_RECORD_IDS: Record<string, Set<string>> = {
-  sales: new Set(['sale-1', 'sale-2', 'sale-3', 'sale-4', 'sale-5']),
-  credit_bills: new Set(['cr-1', 'cr-2']),
-  expenses: new Set(['exp-1', 'exp-2', 'exp-3', 'exp-4']),
   purchases: new Set(['pur-1', 'pur-2', 'pur-3']),
-  customer_ledger: new Set(['pl-cr-1', 'pl-cr-2', 'pl-payment-cr-2']),
-  supplier_ledger: new Set([
-    'sl-pur-1', 'sl-pur-2', 'sl-pur-3',
-    'sl-payment-pur-1', 'sl-payment-pur-2', 'sl-payment-pur-3',
-  ]),
 };
 
 const loadSavedData = <T extends { id: string }>(key: string): T[] => {
@@ -269,18 +261,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [products, setProducts] = useState<Product[]>([]);
   const [brands, setBrands] = useState<ApiBrand[]>([]);
   const [units, setUnits] = useState<ApiUnit[]>([]);
-  const [sales, setSales] = useState<SaleRecord[]>(() => loadSavedData('sales'));
-  const [creditBills, setCreditBills] = useState<CreditBill[]>(() => loadSavedData('credit_bills'));
-  const [expenses, setExpenses] = useState<Expense[]>(() => loadSavedData('expenses'));
+  const [sales, setSales] = useState<SaleRecord[]>([]);
+  const [creditBills, setCreditBills] = useState<CreditBill[]>([]);
+  const [expenses, setExpenses] = useState<Expense[]>([]);
   const [purchases, setPurchases] = useState<PurchaseBill[]>(() => loadSavedData('purchases'));
-  const [partyLedger, setPartyLedger] = useState<PartyLedgerEntry[]>(() => loadSavedData('customer_ledger'));
-  const [supplierLedger, setSupplierLedger] = useState<PartyLedgerEntry[]>(() => loadSavedData('supplier_ledger'));
+  const [partyLedger, setPartyLedger] = useState<PartyLedgerEntry[]>([]);
+  const [supplierLedger, setSupplierLedger] = useState<PartyLedgerEntry[]>([]);
   const [customers, setCustomers] = useState<Party[]>([]);
   const [suppliers, setSuppliers] = useState<Party[]>([]);
 
-  // Clear the old browser-seeded product cache; Products now comes from the API.
+  // Remove old browser-cached CRM records. Purchases remain the sole record-data cache.
   useEffect(() => {
-    localStorage.removeItem(DEMO_STORAGE_PREFIX + 'products');
+    ['sales', 'credit_bills', 'expenses', 'customer_ledger', 'supplier_ledger', 'products', 'customers', 'suppliers']
+      .forEach((key) => localStorage.removeItem(DEMO_STORAGE_PREFIX + key));
   }, []);
 
   useEffect(() => {
@@ -332,33 +325,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => { cancelled = true; };
   }, [authSession?.token]);
 
-  // Sync to localStorage
-  useEffect(() => {
-    localStorage.setItem(DEMO_STORAGE_PREFIX + 'sales', JSON.stringify(sales));
-  }, [sales]);
-
-  useEffect(() => {
-    localStorage.setItem(DEMO_STORAGE_PREFIX + 'credit_bills', JSON.stringify(creditBills));
-  }, [creditBills]);
-
-  useEffect(() => {
-    localStorage.setItem(DEMO_STORAGE_PREFIX + 'expenses', JSON.stringify(expenses));
-  }, [expenses]);
-
+  // Keep the purchase history cache and its separate unfinished-form draft.
   useEffect(() => {
     localStorage.setItem(DEMO_STORAGE_PREFIX + 'purchases', JSON.stringify(purchases));
   }, [purchases]);
-
-  useEffect(() => { localStorage.setItem(DEMO_STORAGE_PREFIX + 'customer_ledger', JSON.stringify(partyLedger)); }, [partyLedger]);
-  useEffect(() => { localStorage.setItem(DEMO_STORAGE_PREFIX + 'supplier_ledger', JSON.stringify(supplierLedger)); }, [supplierLedger]);
-  useEffect(() => {
-    // Discard old browser-seeded customer data; customer records now come from the API.
-    localStorage.removeItem(DEMO_STORAGE_PREFIX + 'customers');
-  }, []);
-
-  useEffect(() => {
-    localStorage.removeItem(DEMO_STORAGE_PREFIX + 'suppliers');
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
