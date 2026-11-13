@@ -49,11 +49,43 @@ export class ApiClientError extends Error {
 const API_BASE_URL = import.meta.env.API_BASE_URL.replace(/\/$/, '');
 
 export const AUTH_SESSION_KEY = 'able_lubes_auth_session_v1';
+export const AUTH_SESSION_REFRESHED_EVENT = 'able-lubes:auth-session-refreshed';
+export const AUTH_SESSION_EXPIRED_EVENT = 'able-lubes:auth-session-expired';
+
+let refreshInFlight: Promise<string | null> | null = null;
+
+async function refreshAccessToken(): Promise<string | null> {
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = (async () => {
+    const response = await fetch(`${API_BASE_URL}/auth/refresh`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    const body = (await response.json().catch(() => ({}))) as ApiEnvelope<{ token: string; user: AuthUser }>;
+    if (response.status === 401) {
+      localStorage.removeItem(AUTH_SESSION_KEY);
+      window.dispatchEvent(new Event(AUTH_SESSION_EXPIRED_EVENT));
+      return null;
+    }
+    if (!response.ok || !body.data?.token || !body.data.user) {
+      throw new ApiClientError(body.message || body.error || 'Could not refresh the sign-in session.', response.status);
+    }
+    const session = { token: body.data.token, user: body.data.user };
+    localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(session));
+    window.dispatchEvent(new CustomEvent(AUTH_SESSION_REFRESHED_EVENT, { detail: session }));
+    return session.token;
+  })().finally(() => {
+    refreshInFlight = null;
+  });
+  return refreshInFlight;
+}
 
 async function requestEnvelope<T>(
   path: string,
   options: RequestInit = {},
   token?: string,
+  allowRefresh = true,
 ): Promise<ApiEnvelope<T>> {
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), 10_000);
@@ -61,6 +93,7 @@ async function requestEnvelope<T>(
   try {
     const response = await fetch(`${API_BASE_URL}${path}`, {
       ...options,
+      credentials: options.credentials ?? 'include',
       signal: controller.signal,
       headers: {
         ...(options.body ? { 'Content-Type': 'application/json' } : {}),
@@ -71,6 +104,10 @@ async function requestEnvelope<T>(
 
     const body = (await response.json().catch(() => ({}))) as ApiEnvelope<T>;
     if (!response.ok) {
+      if (response.status === 401 && token && allowRefresh && !path.startsWith('/auth/')) {
+        const renewedToken = await refreshAccessToken();
+        if (renewedToken) return requestEnvelope<T>(path, options, renewedToken, false);
+      }
       throw new ApiClientError(
         body.message || body.error || `Request failed (${response.status})`,
         response.status,
@@ -179,6 +216,7 @@ export interface CreateSalePayload {
   items: Array<{
     productId: string;
     quantity: number;
+    unitSellingPrice?: number;
     displayQuantity?: number;
     displayUnitName?: string;
     displayUnitSymbol?: string;
@@ -446,7 +484,7 @@ export const cancelPurchaseRequest = (token: string, purchaseId: string) =>
 
 export const createSupplierPaymentRequest = (
   token: string,
-  payload: { supplierId: string; purchaseId: string; amount: number; method: PaymentMethod; notes?: string },
+  payload: { supplierId: string; purchaseId: string; amount: number; method: PaymentMethod; paymentDate?: string; notes?: string },
 ) => apiRequest('/supplier-payments', { method: 'POST', body: JSON.stringify(payload) }, token);
 
 
@@ -456,3 +494,6 @@ export function loginRequest(email: string, password: string) {
     body: JSON.stringify({ email, password }),
   });
 }
+
+export const logoutRequest = () =>
+  apiRequest<{ loggedOut: boolean }>('/auth/logout', { method: 'POST' });

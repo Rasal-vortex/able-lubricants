@@ -16,6 +16,8 @@ import {
   ApiUnit,
   ApiSupplier,
   AUTH_SESSION_KEY,
+  AUTH_SESSION_EXPIRED_EVENT,
+  AUTH_SESSION_REFRESHED_EVENT,
   AuthSession,
   CreateProductPayload,
   StockAdjustmentPayload,
@@ -39,6 +41,7 @@ import {
   getSuppliers,
   getUnits,
   loginRequest,
+  logoutRequest,
   ProductPayload,
   CreateSalePayload,
   CreatePurchasePayload,
@@ -235,6 +238,23 @@ const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [authSession, setAuthSession] = useState<AuthSession | null>(loadAuthSession);
+
+  useEffect(() => {
+    const handleSessionRefreshed = (event: Event) => {
+      const session = (event as CustomEvent<AuthSession>).detail;
+      if (session?.token && session.user?.id) setAuthSession(session);
+    };
+    const handleSessionExpired = () => {
+      setAuthSession(null);
+      setActiveScreen('dashboard');
+    };
+    window.addEventListener(AUTH_SESSION_REFRESHED_EVENT, handleSessionRefreshed);
+    window.addEventListener(AUTH_SESSION_EXPIRED_EVENT, handleSessionExpired);
+    return () => {
+      window.removeEventListener(AUTH_SESSION_REFRESHED_EVENT, handleSessionRefreshed);
+      window.removeEventListener(AUTH_SESSION_EXPIRED_EVENT, handleSessionExpired);
+    };
+  }, []);
   const [masterDataLoading, setMasterDataLoading] = useState(false);
   const [masterDataError, setMasterDataError] = useState<string | null>(null);
   const [customerLoading, setCustomerLoading] = useState(false);
@@ -411,6 +431,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const logout = () => {
+    void logoutRequest().catch(() => undefined);
     localStorage.removeItem(AUTH_SESSION_KEY);
     sessionStorage.removeItem(AUTH_SESSION_KEY);
     setAuthSession(null);
@@ -661,6 +682,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       items: requested.map((item) => ({
         productId: item.productId,
         quantity: item.quantity,
+        unitSellingPrice: item.sellingPrice,
         ...(item.displayQuantity !== undefined && item.displayUnitName
           ? {
               displayQuantity: item.displayQuantity,

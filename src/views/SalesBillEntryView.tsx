@@ -1,13 +1,13 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Package } from "lucide-react";
+import { ChevronDown, Package, Search } from "lucide-react";
 import { useApp } from "../context/AppContext";
 import { CartItem } from "../types";
 import { formatCurrency } from "../utils/currency";
 import { normalizeCouponCode } from "../utils/coupons";
+import { NumericTextInput } from "../components/ui/NumericTextInput";
 import {
   isUnitQuantityInputValid,
   isUnitQuantityValid,
-  quantityStep,
 } from "../utils/unitQuantity";
 
 const isKilogramProduct = (product?: { unit?: string; unitName?: string }) => {
@@ -43,6 +43,7 @@ export const SalesBillEntryView: React.FC = () => {
   const [quantityDrafts, setQuantityDrafts] = useState<Record<string, string>>(
     {},
   );
+  const [priceDrafts, setPriceDrafts] = useState<Record<string, string>>({});
 
   // Discounts & Coupons
   const [billDiscount, setBillDiscount] = useState(0);
@@ -60,7 +61,6 @@ export const SalesBillEntryView: React.FC = () => {
     coupon: "",
     credit: "",
   });
-  const [splitCouponCode, setSplitCouponCode] = useState("");
   const [creditPaidNow, setCreditPaidNow] = useState<string | null>(null);
   const [creditPaidMethod, setCreditPaidMethod] = useState<"CASH" | "UPI">(
     "CASH",
@@ -105,12 +105,9 @@ export const SalesBillEntryView: React.FC = () => {
       }
       if (e.key === "F4") {
         e.preventDefault();
-        const nextMode =
-          paymentMode === "Cash"
-            ? "Credit"
-            : paymentMode === "Credit"
-              ? "UPI"
-              : "Cash";
+        const nextMode = paymentMode === "Cash"
+          ? "UPI"
+          : paymentMode === "UPI" ? "Split" : "Cash";
         setPaymentMode(nextMode);
       }
     };
@@ -126,17 +123,15 @@ export const SalesBillEntryView: React.FC = () => {
   ]);
 
   // Quick scanner suggestion filtering
-  const matchingCatalog = fastSearchQuery.trim()
-    ? products
-        .filter((p) => p.status === "Active")
-        .filter(
-          (p) =>
-            p.name.toLowerCase().includes(fastSearchQuery.toLowerCase()) ||
-            p.sku.toLowerCase().includes(fastSearchQuery.toLowerCase()) ||
-            p.brand.toLowerCase().includes(fastSearchQuery.toLowerCase()),
-        )
-        .slice(0, 5)
-    : [];
+  const matchingCatalog = products
+    .filter((product) => product.status === "Active")
+    .filter((product) => {
+      const query = fastSearchQuery.trim().toLowerCase();
+      return !query || product.name.toLowerCase().includes(query) ||
+        product.sku.toLowerCase().includes(query) ||
+        product.brand.toLowerCase().includes(query);
+    })
+    .slice(0, 8);
 
   const handleAddItemToCart = (
     product: {
@@ -217,6 +212,14 @@ export const SalesBillEntryView: React.FC = () => {
       showToast("Cannot complete sale with an empty cart.", "error");
       return;
     }
+    const invalidPriceDraft = cartItems.some((item) => {
+      const draft = priceDrafts[item.id];
+      return draft !== undefined && !/^\d+(?:\.\d{1,2})?$/.test(draft);
+    });
+    if (invalidPriceDraft || cartItems.some((item) => !Number.isFinite(item.price) || item.price < 0)) {
+      showToast("Enter a valid non-negative price with up to two decimal places for each product.", "error");
+      return;
+    }
     const invalidQuantityDraft = cartItems.some((item) => {
       const draft = quantityDrafts[item.id];
       if (draft === undefined) return false;
@@ -293,18 +296,7 @@ export const SalesBillEntryView: React.FC = () => {
       );
       return;
     }
-    const normalizedSplitCouponCode = normalizeCouponCode(splitCouponCode);
     const splitCouponAmount = Number(splitAmounts.coupon || 0);
-    if (
-      paymentMode === "Split" &&
-      splitCouponAmount > 0 !== Boolean(normalizedSplitCouponCode)
-    ) {
-      showToast(
-        "Enter both the coupon code and coupon amount, or leave both blank.",
-        "error",
-      );
-      return;
-    }
     const paidNow =
       creditPaidNow === null ? finalTotal : Number(creditPaidNow || 0);
     if (
@@ -352,7 +344,6 @@ export const SalesBillEntryView: React.FC = () => {
                       {
                         method: "COUPON" as const,
                         amount: Number(splitAmounts.coupon),
-                        notes: `Coupon code: ${normalizedSplitCouponCode}`,
                       },
                     ]
                   : []),
@@ -412,7 +403,7 @@ export const SalesBillEntryView: React.FC = () => {
         setCartItems([]);
         setBillDiscount(0);
         setSplitAmounts({ cash: "", upi: "", coupon: "", credit: "" });
-        setSplitCouponCode("");
+        setPriceDrafts({});
         setCouponCode("");
         setCouponPrice("");
         setCouponEnabled(false);
@@ -496,158 +487,9 @@ export const SalesBillEntryView: React.FC = () => {
           </label>
         </section>
 
-        {/* Main POS workspace: add products and review the cart */}
-        {/* Fast Product Scanner Toolbar */}
-        <section className="bg-surface-container-lowest p-3 rounded-lg shadow-sm border border-outline-variant/20">
-          <div className="flex flex-col gap-space-xs">
-            <div className="flex items-center justify-between">
-              <label className="font-label-md text-label-md text-on-surface font-semibold flex items-center gap-1">
-                <span className="material-symbols-outlined text-[16px] text-primary">
-                  add_shopping_cart
-                </span>
-                <span>Add Products</span>
-              </label>
-              <span className="text-xs text-on-surface-variant">
-                Search by product name, SKU, or brand
-              </span>
-            </div>
-            <div className="relative">
-              <input
-                ref={fastInputRef}
-                autoComplete="off"
-                type="text"
-                className="w-full h-10 px-3 bg-surface-container-low rounded-md font-body-md text-body-md text-on-surface placeholder:text-outline focus:outline-none focus:bg-surface-container-lowest border border-outline-variant/30"
-                placeholder="Search product by name, SKU, or brand..."
-                value={fastSearchQuery}
-                role="combobox"
-                aria-autocomplete="list"
-                aria-expanded={showAutoSuggest && matchingCatalog.length > 0}
-                aria-controls={
-                  showAutoSuggest && matchingCatalog.length > 0
-                    ? "sales-product-results"
-                    : undefined
-                }
-                aria-activedescendant={
-                  activeSearchIndex >= 0
-                    ? `sales-product-option-${activeSearchIndex}`
-                    : undefined
-                }
-                onChange={(e) => {
-                  setFastSearchQuery(e.target.value);
-                  setShowAutoSuggest(e.target.value.trim().length > 0);
-                  setActiveSearchIndex(-1);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "ArrowDown" && matchingCatalog.length > 0) {
-                    e.preventDefault();
-                    setShowAutoSuggest(true);
-                    setActiveSearchIndex((current) =>
-                      current >= matchingCatalog.length - 1 ? 0 : current + 1,
-                    );
-                  } else if (
-                    e.key === "ArrowUp" &&
-                    matchingCatalog.length > 0
-                  ) {
-                    e.preventDefault();
-                    setShowAutoSuggest(true);
-                    setActiveSearchIndex((current) =>
-                      current <= 0 ? matchingCatalog.length - 1 : current - 1,
-                    );
-                  } else if (e.key === "Enter") {
-                    e.preventDefault();
-                    const selected =
-                      showAutoSuggest && activeSearchIndex >= 0
-                        ? matchingCatalog[activeSearchIndex]
-                        : undefined;
-                    if (selected) handleAddItemToCart(selected);
-                    else handleQuickAdd();
-                  } else if (e.key === "Escape") {
-                    setShowAutoSuggest(false);
-                    setActiveSearchIndex(-1);
-                  }
-                }}
-              />
-              <div className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1 text-outline">
-                <kbd className="font-data-mono-sm text-[10px] bg-surface-container px-1 py-0.5 rounded">
-                  Enter ↵
-                </kbd>
-              </div>
-            </div>
-
-            {/* Search results */}
-            {showAutoSuggest && matchingCatalog.length > 0 && (
-              <div
-                id="sales-product-results"
-                role="listbox"
-                aria-label="Product search results"
-                className="overflow-hidden rounded-lg border border-outline-variant/30 bg-surface-container-lowest"
-              >
-                {matchingCatalog.map((prod, index) => {
-                  const available = Math.max(
-                    0,
-                    prod.quantity - getCartQuantity(prod.id),
-                  );
-                  const unavailable = available <= 0;
-                  return (
-                    <div
-                      key={prod.id}
-                      id={`sales-product-option-${index}`}
-                      role="option"
-                      aria-selected={activeSearchIndex === index}
-                      aria-disabled={unavailable}
-                      onMouseEnter={() => {
-                        if (!unavailable) setActiveSearchIndex(index);
-                      }}
-                      onClick={() => {
-                        if (!unavailable) handleAddItemToCart(prod);
-                      }}
-                      className={`grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2 border-b border-outline-variant/20 border-l-4 px-3 py-2.5 last:border-b-0 sm:gap-4 ${unavailable ? "cursor-not-allowed border-l-red-500 bg-red-50 text-red-900 opacity-80" : activeSearchIndex === index ? "cursor-pointer border-l-[#a86600] bg-[#f4ddb0] shadow-[inset_0_0_0_1px_rgba(168,102,0,.14)]" : "cursor-pointer border-l-transparent hover:bg-surface-container-low"}`}
-                    >
-                      <div className="min-w-0">
-                        <div
-                          className={`truncate text-sm font-semibold ${unavailable ? "text-red-800" : "text-on-surface"}`}
-                        >
-                          {prod.name}
-                        </div>
-                        <div className="flex min-w-0 items-center gap-1 truncate text-xs text-on-surface-variant">
-                          {prod.brand && (
-                            <span
-                              className="inline-flex max-w-[140px] shrink-0 truncate rounded-full bg-[#fff0c7] px-2 py-0.5 font-medium text-[#795400]"
-                              title={prod.brand}
-                            >
-                              {prod.brand}
-                            </span>
-                          )}
-                          <span
-                            className="inline-flex shrink-0 items-center gap-1 rounded bg-surface-container-low px-1.5 py-0.5 font-semibold"
-                            aria-label={`Unit: ${prod.unitName || prod.unit || "not set"}`}
-                          >
-                            <Package size={12} aria-hidden="true" />
-                            {prod.unitName || prod.unit || "—"}
-                          </span>
-                        </div>
-                      </div>
-                      <span className="whitespace-nowrap text-sm font-semibold text-on-surface">
-                        {formatCurrency(prod.sellingPrice)}
-                      </span>
-                      <span
-                        className={`whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-semibold ${unavailable ? "bg-red-100 text-red-700" : "bg-tertiary-container/15 text-tertiary"}`}
-                      >
-                        {unavailable
-                          ? "Out of stock"
-                          : `In stock (${available}${prod.unit ? ` ${prod.unit}` : ""})`}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        </section>
-
         {/* Cart Line Items Table */}
-        <section className="bg-surface-container-lowest rounded-lg shadow-sm overflow-hidden border border-outline-variant/20">
-          <div className="px-space-md py-space-sm bg-surface-container-low flex items-center justify-between border-b border-outline-variant/20">
+        <section className="relative z-10 bg-surface-container-lowest rounded-lg shadow-sm border border-outline-variant/20">
+          <div className="px-space-md py-space-sm bg-surface-container-low flex flex-wrap items-center justify-between gap-3 border-b border-outline-variant/20 rounded-t-lg">
             <div className="flex items-center gap-space-sm">
               <span className="font-title-md text-title-md font-semibold text-on-surface">
                 Bill Items
@@ -656,19 +498,115 @@ export const SalesBillEntryView: React.FC = () => {
                 {cartItems.length} items
               </span>
             </div>
-            <button
-              type="button"
-              className="font-label-sm text-label-sm text-error hover:bg-error-container/40 px-2 py-1 rounded transition-colors flex items-center gap-1"
-              onClick={() => {
-                setCartItems([]);
-                showToast("Cart cleared", "info");
+            <div
+              className="relative flex w-full min-w-0 flex-1 items-center gap-2 sm:max-w-2xl"
+              onBlur={(event) => {
+                if (!event.currentTarget.contains(event.relatedTarget as Node | null))
+                  setShowAutoSuggest(false);
               }}
             >
-              <span className="material-symbols-outlined text-[14px]">
-                delete_sweep
-              </span>
-              <span>Clear cart</span>
-            </button>
+              <div className="relative min-w-0 flex-1">
+                <Search size={17} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-outline" aria-hidden="true" />
+                <input
+                  ref={fastInputRef}
+                  autoComplete="off"
+                  type="text"
+                  className="h-10 w-full rounded-lg border border-outline-variant/30 bg-white py-2 pl-9 pr-10 font-body-md text-body-md text-on-surface placeholder:text-outline outline-none focus:border-primary"
+                  placeholder="Select or search product, SKU, or brand…"
+                  value={fastSearchQuery}
+                  role="combobox"
+                  aria-label="Select or search products"
+                  aria-autocomplete="list"
+                  aria-expanded={showAutoSuggest}
+                  aria-controls={showAutoSuggest ? "sales-product-results" : undefined}
+                  aria-activedescendant={activeSearchIndex >= 0 ? `sales-product-option-${activeSearchIndex}` : undefined}
+                  onFocus={() => setShowAutoSuggest(true)}
+                  onChange={(event) => {
+                    setFastSearchQuery(event.target.value);
+                    setShowAutoSuggest(true);
+                    setActiveSearchIndex(-1);
+                  }}
+                  onKeyDown={(event) => {
+                    if ((event.key === "ArrowDown" || event.key === "ArrowUp") && matchingCatalog.length > 0) {
+                      event.preventDefault();
+                      setShowAutoSuggest(true);
+                      setActiveSearchIndex((current) => event.key === "ArrowDown"
+                        ? current >= matchingCatalog.length - 1 ? 0 : current + 1
+                        : current <= 0 ? matchingCatalog.length - 1 : current - 1);
+                    } else if (event.key === "Enter") {
+                      event.preventDefault();
+                      const selected = activeSearchIndex >= 0 ? matchingCatalog[activeSearchIndex] : undefined;
+                      if (selected) handleAddItemToCart(selected);
+                      else handleQuickAdd();
+                    } else if (event.key === "Escape") {
+                      setShowAutoSuggest(false);
+                      setActiveSearchIndex(-1);
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  aria-label={showAutoSuggest ? "Close product list" : "Open product list"}
+                  aria-expanded={showAutoSuggest}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => {
+                    setShowAutoSuggest((open) => !open);
+                    fastInputRef.current?.focus();
+                  }}
+                  className="absolute right-1.5 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-md text-on-surface-variant hover:bg-surface-container-low"
+                >
+                  <ChevronDown size={17} aria-hidden="true" />
+                </button>
+                {showAutoSuggest && (
+                  <div
+                    id="sales-product-results"
+                    role="listbox"
+                    aria-label="Product choices"
+                    className="absolute left-0 right-0 top-[calc(100%+6px)] z-50 max-h-80 overflow-y-auto rounded-lg border border-outline-variant/30 bg-surface-container-lowest shadow-xl"
+                  >
+                    {matchingCatalog.map((product, index) => {
+                      const available = Math.max(0, product.quantity - getCartQuantity(product.id));
+                      const unavailable = available <= 0;
+                      return (
+                        <div
+                          key={product.id}
+                          id={`sales-product-option-${index}`}
+                          role="option"
+                          aria-selected={activeSearchIndex === index}
+                          aria-disabled={unavailable}
+                          onMouseDown={(event) => event.preventDefault()}
+                          onMouseEnter={() => setActiveSearchIndex(index)}
+                          onClick={() => { if (!unavailable) handleAddItemToCart(product); }}
+                          className={`flex cursor-pointer items-center justify-between gap-3 border-b border-outline-variant/20 px-3 py-2.5 last:border-b-0 ${unavailable ? "bg-red-50/70 opacity-70" : activeSearchIndex === index ? "bg-[#f4ddb0]" : "hover:bg-surface-container-low"}`}
+                        >
+                          <span className="min-w-0 flex-1">
+                            <span className={`block truncate text-sm font-semibold ${unavailable ? "text-red-800" : "text-on-surface"}`}>{product.name}</span>
+                            <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-on-surface-variant">
+                              {product.brand && <span className="max-w-36 truncate rounded-full bg-[#fff0c7] px-2 py-0.5 font-medium text-[#795400]">{product.brand}</span>}
+                              <span className="inline-flex shrink-0 items-center gap-1 rounded bg-surface-container-low px-1.5 py-0.5 font-semibold"><Package size={12} aria-hidden="true" />{product.unitName || product.unit || "—"}</span>
+                            </span>
+                          </span>
+                          <span className="whitespace-nowrap text-sm font-semibold text-on-surface">{formatCurrency(product.sellingPrice)}</span>
+                          <span className={`whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-semibold ${unavailable ? "bg-red-100 text-red-700" : "bg-tertiary-container/15 text-tertiary"}`}>
+                            {unavailable ? "Out of stock" : `In stock (${available}${product.unit ? ` ${product.unit}` : ""})`}
+                          </span>
+                        </div>
+                      );
+                    })}
+                    {matchingCatalog.length === 0 && <p className="px-4 py-5 text-center text-sm text-on-surface-variant">No matching products found.</p>}
+                  </div>
+                )}
+              </div>
+              <button
+                type="button"
+                disabled={cartItems.length === 0}
+                className="inline-flex h-10 shrink-0 items-center gap-1 rounded-lg px-2 text-xs font-semibold text-error hover:bg-error-container/40 disabled:opacity-40 sm:px-3"
+                onClick={() => { setCartItems([]); showToast("Cart cleared", "info"); }}
+              >
+                <span className="material-symbols-outlined text-[14px]">delete_sweep</span>
+                <span>Clear cart</span>
+              </button>
+            </div>
           </div>
 
           <div className="w-full overflow-x-auto">
@@ -756,16 +694,12 @@ export const SalesBillEntryView: React.FC = () => {
                           >
                             -
                           </button>
-                          <input
-                            type="number"
-                            min={minimumInputQuantity}
-                            step={gramEntry ? 1 : quantityStep(allowsDecimals)}
-                            max={(product?.quantity ?? 0) * quantityScale}
+                          <NumericTextInput
+                            maxDecimals={gramEntry ? 0 : allowsDecimals ? 3 : 0}
                             aria-label={`Quantity in ${displayUnit}`}
                             className="w-16 text-center font-data-mono-md text-data-mono-md bg-transparent text-on-surface focus:outline-none"
                             value={inputQuantity}
-                            onChange={(e) => {
-                              const raw = e.target.value;
+                            onValueChange={(raw) => {
                               setQuantityDrafts((previous) => ({
                                 ...previous,
                                 [item.id]: raw,
@@ -892,19 +826,32 @@ export const SalesBillEntryView: React.FC = () => {
                       </td>
                       <td className="py-2 px-space-sm text-right">
                         <input
-                          type="number"
-                          step="1"
+                          type="text"
+                          inputMode="decimal"
+                          aria-label={`Selling price for ${item.name}`}
                           className="w-20 text-right font-data-mono-md text-data-mono-md bg-surface-container-low px-1.5 py-0.5 rounded text-on-surface focus:outline-none focus:bg-surface-container-lowest border border-outline-variant/30"
-                          value={item.price}
+                          value={priceDrafts[item.id] ?? String(item.price)}
                           onChange={(e) => {
                             const raw = e.target.value;
-                            if (!/^\d*$/.test(raw)) return;
-                            const val = Number(raw) || 0;
-                            setCartItems((prev) =>
-                              prev.map((it) =>
-                                it.id === item.id ? { ...it, price: val } : it,
-                              ),
-                            );
+                            if (!/^\d*(?:\.\d{0,2})?$/.test(raw)) return;
+                            setPriceDrafts((previous) => ({ ...previous, [item.id]: raw }));
+                            if (raw && raw !== ".") {
+                              const val = Number(raw);
+                              setCartItems((prev) => prev.map((it) => it.id === item.id ? { ...it, price: val } : it));
+                            }
+                          }}
+                          onBlur={() => {
+                            const raw = priceDrafts[item.id];
+                            if (raw === undefined) return;
+                            if (/^\d+(?:\.\d{1,2})?$/.test(raw)) {
+                              const val = Number(raw);
+                              setCartItems((prev) => prev.map((it) => it.id === item.id ? { ...it, price: val } : it));
+                            }
+                            setPriceDrafts((previous) => {
+                              const next = { ...previous };
+                              delete next[item.id];
+                              return next;
+                            });
                           }}
                         />
                       </td>
@@ -1131,17 +1078,13 @@ export const SalesBillEntryView: React.FC = () => {
             <label className="font-label-md text-on-surface block mb-1.5">
               Payment Method
             </label>
-            <div className="grid grid-cols-4 gap-1 bg-surface-container-low p-1 rounded-lg border border-outline-variant/20">
-              {(["Cash", "Credit", "UPI", "Split"] as const).map((mode) => (
+            <div className="grid grid-cols-3 gap-1 bg-surface-container-low p-1 rounded-lg border border-outline-variant/20">
+              {(["Cash", "UPI", "Split"] as const).map((mode) => (
                 <button
                   key={mode}
                   type="button"
                   onClick={() => {
                     setPaymentMode(mode);
-                    if (mode === "Credit") {
-                      setCreditPaidNow(null);
-                      setCreditPaidMethod("CASH");
-                    }
                   }}
                   className={`py-1.5 px-2 rounded font-label-md text-label-md font-semibold flex items-center justify-center gap-1 transition-all ${
                     paymentMode === mode
@@ -1152,11 +1095,9 @@ export const SalesBillEntryView: React.FC = () => {
                   <span className="material-symbols-outlined text-[16px]">
                     {mode === "Cash"
                       ? "payments"
-                      : mode === "Credit"
-                        ? "account_balance"
-                        : mode === "UPI"
-                          ? "qr_code_scanner"
-                          : "payments"}
+                      : mode === "UPI"
+                        ? "qr_code_scanner"
+                        : "payments"}
                   </span>
                   <span>{mode}</span>
                 </button>
@@ -1171,45 +1112,24 @@ export const SalesBillEntryView: React.FC = () => {
                   key={mode}
                   className="text-xs font-semibold text-on-surface-variant"
                 >
-                  {mode.toUpperCase()} amount (₹)
-                  <input
-                    type="number"
-                    min="0"
-                    step="1"
+                  {mode === "coupon" ? "Coupon amount (₹)" : `${mode.toUpperCase()} amount (₹)`}
+                  <NumericTextInput
+                    maxDecimals={0}
                     value={splitAmounts[mode]}
-                    onChange={(event) => {
-                      if (/^\d*$/.test(event.target.value))
-                        setSplitAmounts((current) => ({
-                          ...current,
-                          [mode]: event.target.value,
-                        }));
-                    }}
-                    className="mt-1 h-9 w-full rounded border border-outline-variant/30 bg-white px-2 text-right text-on-surface"
+                    onValueChange={(value) => setSplitAmounts((current) => ({ ...current, [mode]: value }))}
+                    className="mt-1 h-11 w-full rounded border border-outline-variant/30 bg-white px-2 text-right text-lg font-semibold text-on-surface"
                   />
                 </label>
               ))}
-              <label className="col-span-2 text-xs font-semibold text-on-surface-variant">
-                Coupon code
-                <input
-                  type="text"
-                  value={splitCouponCode}
-                  onChange={(event) =>
-                    setSplitCouponCode(normalizeCouponCode(event.target.value))
-                  }
-                  maxLength={80}
-                  placeholder="Enter coupon code"
-                  className="mt-1 h-9 w-full rounded border border-outline-variant/30 bg-white px-2 text-on-surface"
-                />
-              </label>
-              {Number(splitAmounts.credit || 0) > 0 && (
+              {Number(splitAmounts.credit || 0) > 0 &&
+                (customerType !== "registered" || !customerName) && (
                 <p className="col-span-2 text-xs text-on-surface-variant">
                   Select a registered customer above. The Credit amount will be
                   added to their balance.
                 </p>
               )}
-              <p className="col-span-2 text-xs text-on-surface-variant">
-                Entered: {formatCurrency(splitTenderTotal)} /{" "}
-                {formatCurrency(finalTotal)}
+              <p className="col-span-2 text-sm text-on-surface-variant">
+                Entered: <span className="text-base font-semibold text-on-surface">{formatCurrency(splitTenderTotal)} / {formatCurrency(finalTotal)}</span>
               </p>
             </div>
           )}

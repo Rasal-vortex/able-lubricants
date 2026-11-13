@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from 'react';
 import { LoaderCircle } from 'lucide-react';
-import { motion } from 'motion/react';
 import { useApp } from '../context/AppContext';
 import { CreditBill, PurchaseBill } from '../types';
 import { formatCurrency } from '../utils/currency';
@@ -19,8 +18,6 @@ export const CreditBillManagementView: React.FC = () => {
     suppliers,
     supplierLedger,
     recordSupplierPayment,
-    creditBillPartyTarget,
-    setCreditBillPartyTarget,
   } = useApp();
 
   const [creditView, setCreditView] = useState<'customers' | 'suppliers'>('customers');
@@ -54,18 +51,6 @@ export const CreditBillManagementView: React.FC = () => {
   const [supplierPayDate, setSupplierPayDate] = useState(localToday);
   const [supplierPayMethod, setSupplierPayMethod] = useState<'Cash' | 'UPI' | 'Bank transfer' | 'Cheque'>('Cash');
   const [savingSupplierPayment, setSavingSupplierPayment] = useState(false);
-
-  useEffect(() => {
-    if (!creditBillPartyTarget) return;
-    setCreditView(creditBillPartyTarget.type);
-    setStatusFilter('All');
-    setSearchTerm('');
-    setFromDate('');
-    setToDate('');
-    if (creditBillPartyTarget.type === 'customers') setCustomerFilter(creditBillPartyTarget.name);
-    else setSupplierFilter(creditBillPartyTarget.name);
-    setCreditBillPartyTarget(null);
-  }, [creditBillPartyTarget, setCreditBillPartyTarget]);
 
   // Party balances lookup
   const priorDue = partyLedger.filter(row => row.partyName === selectedParty && row.transactionType === 'INVOICES').reduce((sum, row) => sum + row.outstandingBalance, 0);
@@ -265,18 +250,6 @@ export const CreditBillManagementView: React.FC = () => {
 
   return (
     <div className="flex flex-col w-full gap-space-md">
-      <div role="tablist" aria-label="Credit type" className="inline-flex w-fit max-w-full items-center rounded-full border border-[#e9e3d9] bg-white p-1 shadow-[0_3px_12px_rgba(37,27,12,.08)]">
-        {([
-          ['customers', 'Customer credits', creditBills.length],
-          ['suppliers', 'Supplier credits', purchases.filter((purchase) => purchase.status !== 'CANCELLED' && supplierPurchaseDue(purchase) > 0).length],
-        ] as const).map(([key, label, count]) => (
-          <button key={key} type="button" role="tab" aria-selected={creditView === key} onClick={() => { setCreditView(key); setStatusFilter('All'); }} className={`relative inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-full px-4 text-sm font-semibold transition-colors ${creditView === key ? 'text-[#493819]' : 'text-[#6b665c] hover:text-[#272727]'}`}>
-            {creditView === key && <motion.span layoutId="credit-view-indicator" className="absolute inset-0 rounded-full bg-[#fff1c9] shadow-sm" transition={{ duration: 0.24, ease: 'easeOut' }} aria-hidden="true" />}
-            <span className="relative z-10">{label}</span><span className="relative z-10 rounded-full bg-black/5 px-2 py-0.5 text-xs">{count}</span>
-          </button>
-        ))}
-      </div>
-
       {/* Filter & Search Controls Bar */}
       <div className="w-full bg-surface-container-lowest rounded-xl p-space-md mb-space-md shadow-sm border border-outline-variant/20">
         <div className="grid grid-cols-1 gap-3 items-center xl:grid-cols-[minmax(160px,.9fr)_minmax(180px,1fr)_minmax(240px,1.2fr)_minmax(135px,.7fr)_auto]">

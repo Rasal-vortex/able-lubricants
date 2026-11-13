@@ -316,10 +316,6 @@ export const PurchaseBillEntryView: React.FC = () => {
       showToast("Add a supplier before recording a purchase.", "error");
       return;
     }
-    if (amountPaid.trim() === "") {
-      showToast("Enter the amount paid now. Enter 0 only if this purchase is fully unpaid.", "error");
-      return;
-    }
     const invalidQuantityDraft = items.some((item) => {
       const draft = quantityDrafts[item.id];
       const allowsDecimals = products.find((product) => product.id === item.productId)?.unitAllowsDecimals ?? false;
@@ -539,7 +535,7 @@ export const PurchaseBillEntryView: React.FC = () => {
               <h2 className="mb-4 flex items-center gap-2 text-lg font-bold text-[#272727]"><span className="flex h-9 w-9 items-center justify-center text-[#9c6a00]"><span className="material-symbols-outlined">payments</span></span>Payment</h2>
               <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                 <label className="flex flex-col gap-1.5 text-sm font-semibold text-[#77736d]">Amount paid now
-                  <input type="text" inputMode="decimal" value={amountPaid} placeholder="Enter amount (0 if unpaid)" required aria-required="true" onPaste={blockInvalidPricePaste} onChange={(event) => updateDecimalPrice(event.target.value, setAmountPaid)} className="h-11 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-[#272727] outline-none transition focus:border-[#c58a00] focus:bg-white focus:ring-2 focus:ring-[#f5e7c3]" />
+                  <input type="text" inputMode="decimal" value={amountPaid} placeholder="Leave blank if unpaid" onPaste={blockInvalidPricePaste} onChange={(event) => updateDecimalPrice(event.target.value, setAmountPaid)} className="h-11 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-[#272727] outline-none transition focus:border-[#c58a00] focus:bg-white focus:ring-2 focus:ring-[#f5e7c3]" />
                 </label>
                 <label className="flex flex-col gap-1.5 text-sm font-semibold text-[#77736d]">Payment method
                   <select value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value as PaymentMethod)} className="h-11 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-[#272727] outline-none transition focus:border-[#c58a00] focus:bg-white focus:ring-2 focus:ring-[#f5e7c3]"><option value="CASH">Cash</option><option value="UPI">UPI</option><option value="BANK_TRANSFER">Bank transfer</option><option value="CHEQUE">Cheque</option></select>
@@ -555,7 +551,7 @@ export const PurchaseBillEntryView: React.FC = () => {
               <div className="flex justify-between py-1 text-sm text-[#514a3d]"><span>Invoice total</span><strong className="text-[#272727]">{formatCurrency(totalAmount)}</strong></div>
               <div className="flex justify-between py-1 text-sm text-[#514a3d]"><span>Amount paid</span><strong className="text-[#272727]">{formatCurrency(paid)}</strong></div>
               <div className="mt-2 flex justify-between border-t border-[#eadfc4] py-3 text-base font-bold"><span className="text-[#9c6a00]">Balance due</span><strong className="text-[#9c6a00]">{formatCurrency(Math.max(0, totalAmount - paid))}</strong></div>
-              <button type="submit" disabled={saving || amountPaid.trim() === ""} className="mt-auto flex h-12 w-full items-center justify-center gap-2 rounded-lg bg-[#ffe078] px-5 font-bold text-[#332711] shadow-sm transition hover:bg-[#ffd64d] focus:outline-none focus:ring-2 focus:ring-[#e8c64e] disabled:cursor-not-allowed disabled:opacity-60"><span className="material-symbols-outlined">save</span>{saving ? "Saving purchase…" : "Save purchase"}</button>
+              <button type="submit" disabled={saving} className="mt-auto flex h-12 w-full items-center justify-center gap-2 rounded-lg bg-[#ffe078] px-5 font-bold text-[#332711] shadow-sm transition hover:bg-[#ffd64d] focus:outline-none focus:ring-2 focus:ring-[#e8c64e] disabled:cursor-not-allowed disabled:opacity-60"><span className="material-symbols-outlined">save</span>{saving ? "Saving purchase…" : "Save purchase"}</button>
             </section>
           </div>
         </form>
