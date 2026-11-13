@@ -70,8 +70,8 @@ export const PartyLedgerManagementView: React.FC = () => {
   const selectedSupplier = suppliers.find((supplier) => supplier.id === selectedSupplierId);
 
   useEffect(() => {
-    if (selectedSupplierId && suppliers.some((supplier) => supplier.id === selectedSupplierId)) return;
-    setSelectedSupplierId(suppliers[0]?.id || '');
+    if (!selectedSupplierId || suppliers.some((supplier) => supplier.id === selectedSupplierId)) return;
+    setSelectedSupplierId('');
   }, [selectedSupplierId, suppliers]);
 
   useEffect(() => {
@@ -175,10 +175,9 @@ export const PartyLedgerManagementView: React.FC = () => {
         <section className="overflow-hidden rounded-2xl border border-[#e9e3d9] bg-white shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-4 border-b border-[#efede8] bg-gradient-to-r from-[#fff8e7] via-[#fffdf8] to-white px-5 py-5">
             <div className="flex min-w-0 items-center gap-3">
-              <div className="min-w-0"><h2 className="truncate text-lg font-bold text-[#272727]">{ledger?.supplier.name || selectedSupplier?.name || 'Supplier ledger'}</h2><p className="mt-0.5 text-sm text-[#77736d]">{ledger?.supplier.phone || selectedSupplier?.phone || 'Choose a supplier to view purchases, payments, and balance.'}</p></div>
+              <div className="min-w-0"><h2 className="truncate text-lg font-bold text-[#272727]">{ledger?.supplier.name || selectedSupplier?.name || 'Supplier ledger'}</h2><p className="mt-0.5 text-sm text-[#77736d]">{ledger?.supplier.phone || selectedSupplier?.phone || ''}</p></div>
             </div>
             <div className="flex w-full flex-wrap items-end gap-2 sm:w-auto">
-              <button type="button" onClick={() => { resetSupplierForm(); setSupplierModalOpen(true); }} className="inline-flex h-10 items-center gap-1.5 rounded-lg bg-[#ffe4a0] px-3 text-sm font-semibold text-[#493819] shadow-sm transition hover:bg-[#ffdc82]"><Plus size={16} />Add supplier</button>
               <label className="flex min-w-[230px] flex-1 flex-col gap-1.5 text-xs font-semibold text-[#77736d] sm:flex-none">
                 Select supplier
                 <select value={selectedSupplierId} disabled={supplierLoading || suppliers.length === 0} onChange={(event) => setSelectedSupplierId(event.target.value)} className="h-11 w-full rounded-lg border border-[#e5d3a7] bg-white px-3 text-sm font-semibold text-[#272727] shadow-sm outline-none focus:border-[#c58a00] sm:min-w-[250px]">
@@ -186,6 +185,7 @@ export const PartyLedgerManagementView: React.FC = () => {
                   {suppliers.map((supplier) => <option key={supplier.id} value={supplier.id}>{supplier.name}</option>)}
                 </select>
               </label>
+              <button type="button" onClick={() => { resetSupplierForm(); setSupplierModalOpen(true); }} className="inline-flex h-10 items-center gap-1.5 rounded-lg bg-[#ffe4a0] px-3 text-sm font-semibold text-[#493819] shadow-sm transition hover:bg-[#ffdc82]"><Plus size={16} />Add supplier</button>
               {selectedSupplier && <>
                 <button type="button" onClick={() => editSupplier(selectedSupplier)} className="inline-flex h-11 items-center gap-2 rounded-lg border border-[#eadfc8] bg-white px-3 text-sm font-semibold text-[#765000] shadow-sm hover:bg-[#fffaf0]"><Pencil size={15} />Edit</button>
                 <button type="button" onClick={() => void removeSupplier(selectedSupplier)} className="h-11 rounded-lg border border-red-200 bg-white px-3 text-sm font-semibold text-red-700 shadow-sm hover:bg-red-50">Deactivate</button>
@@ -194,7 +194,7 @@ export const PartyLedgerManagementView: React.FC = () => {
             </div>
           </div>
 
-          {!selectedSupplier && !supplierLoading && <div className="flex flex-col items-center justify-center px-5 py-14 text-center"><Building2 size={28} className="mb-3 text-[#c58a00]" /><p className="font-semibold text-[#272727]">Select a supplier</p><p className="mt-1 text-sm text-[#77736d]">Their purchases, payments, and outstanding balance will appear here.</p></div>}
+          {!selectedSupplier && !supplierLoading && <div className="flex items-center justify-center px-5 py-14 text-center text-sm text-[#77736d]">Select a supplier to see their outstanding</div>}
           {selectedSupplier && ledgerLoading && <div className="flex items-center justify-center gap-2 p-14 text-sm text-[#77736d]"><LoaderCircle size={18} className="animate-spin" />Loading supplier ledger…</div>}
           {selectedSupplier && !ledgerLoading && ledger && (
             <>

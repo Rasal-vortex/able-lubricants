@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { ChevronDown, Package, Search } from "lucide-react";
+import { Check, ChevronDown, LoaderCircle, Package, Plus, Search, UserRoundPlus, X } from "lucide-react";
 import { useApp } from "../context/AppContext";
 import { CartItem } from "../types";
 import { formatCurrency } from "../utils/currency";
@@ -17,7 +17,7 @@ const isKilogramProduct = (product?: { unit?: string; unitName?: string }) => {
 };
 
 export const SalesBillEntryView: React.FC = () => {
-  const { products, customers, addSale, showToast, setActiveReceiptToPrint } =
+  const { products, customers, addCustomer, addSale, showToast, setActiveReceiptToPrint } =
     useApp();
 
   const [billNumber, setBillNumber] = useState(
@@ -30,6 +30,11 @@ export const SalesBillEntryView: React.FC = () => {
   const [customerType, setCustomerType] = useState<"walkin" | "registered">(
     "walkin",
   );
+  const [customerModalOpen, setCustomerModalOpen] = useState(false);
+  const [newCustomerName, setNewCustomerName] = useState("");
+  const [newCustomerPhone, setNewCustomerPhone] = useState("");
+  const [newCustomerAddress, setNewCustomerAddress] = useState("");
+  const [savingCustomer, setSavingCustomer] = useState(false);
 
   // Scanner & Fast Entry
   const [fastSearchQuery, setFastSearchQuery] = useState("");
@@ -198,6 +203,59 @@ export const SalesBillEntryView: React.FC = () => {
       handleAddItemToCart(availableProduct);
     } else {
       showToast("No matching product is currently in stock.", "error");
+    }
+  };
+
+  const handleAddCustomer = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const cleanName = newCustomerName.trim();
+    if (!cleanName || savingCustomer) return;
+    setSavingCustomer(true);
+    try {
+      await addCustomer({
+        name: cleanName,
+        phone: newCustomerPhone.replace(/\D/g, ""),
+        address: newCustomerAddress.trim(),
+      });
+      setCustomerName(cleanName);
+      setCustomerType("registered");
+      setCustomerModalOpen(false);
+      setNewCustomerName("");
+      setNewCustomerPhone("");
+      setNewCustomerAddress("");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Unable to add the customer.", "error");
+    } finally {
+      setSavingCustomer(false);
+    }
+  };
+
+  const handleCustomerModalKeyDown = (
+    event: React.KeyboardEvent<HTMLFormElement>,
+  ) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      const controls = Array.from(
+        event.currentTarget.querySelectorAll<HTMLElement>(
+          '[data-customer-nav="true"]:not([disabled])',
+        ),
+      );
+      const currentIndex = controls.indexOf(target);
+      if (currentIndex < 0) return;
+      event.preventDefault();
+      const nextIndex = Math.max(
+        0,
+        Math.min(controls.length - 1, currentIndex + (event.key === "ArrowDown" ? 1 : -1)),
+      );
+      controls[nextIndex]?.focus();
+      return;
+    }
+
+    if (event.key === "Enter" && target instanceof HTMLInputElement) {
+      event.preventDefault();
+      if (!savingCustomer) event.currentTarget.requestSubmit();
     }
   };
 
@@ -460,31 +518,41 @@ export const SalesBillEntryView: React.FC = () => {
               onChange={(e) => setBillDate(e.target.value)}
             />
           </label>
-          <label
-            className="flex flex-col gap-1 text-sm font-medium text-on-surface-variant"
-            htmlFor="customer-search"
-          >
-            {paymentMode === "Credit"
-              ? "Customer (required for credit)"
-              : "Customer (optional)"}
-            <select
-              id="customer-search"
-              className="h-10 rounded-md border border-outline-variant/30 bg-surface-container-low px-3 text-on-surface"
-              value={customerName}
-              onChange={(e) => {
-                setCustomerName(e.target.value);
-                setCustomerType(e.target.value ? "registered" : "walkin");
-              }}
-            >
-              <option value="">Walk-in / no customer</option>
-              {customers.map((customer) => (
-                <option key={customer.id} value={customer.name}>
-                  {customer.name}
-                  {customer.phone ? ` · ${customer.phone}` : ""}
-                </option>
-              ))}
-            </select>
-          </label>
+          <div className="flex min-w-0 flex-col gap-1 text-sm font-medium text-on-surface-variant">
+            <label htmlFor="customer-search">
+              {paymentMode === "Credit"
+                ? "Customer (required for credit)"
+                : "Customer (optional)"}
+            </label>
+            <div className="flex min-w-0 gap-2">
+              <select
+                id="customer-search"
+                className="h-10 min-w-0 flex-1 rounded-md border border-outline-variant/30 bg-surface-container-low px-3 text-on-surface"
+                value={customerName}
+                onChange={(e) => {
+                  setCustomerName(e.target.value);
+                  setCustomerType(e.target.value ? "registered" : "walkin");
+                }}
+              >
+                <option value="">Walk-in / no customer</option>
+                {customers.map((customer) => (
+                  <option key={customer.id} value={customer.name}>
+                    {customer.name}
+                    {customer.phone ? ` · ${customer.phone}` : ""}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={() => setCustomerModalOpen(true)}
+                className="inline-flex h-10 shrink-0 items-center justify-center gap-1.5 rounded-md border border-outline-variant/30 bg-primary-container px-3 text-sm font-semibold text-on-surface transition-colors hover:bg-primary"
+                aria-label="Add customer"
+              >
+                <Plus size={16} />
+                <span className="hidden md:inline">Add customer</span>
+              </button>
+            </div>
+          </div>
         </section>
 
         {/* Cart Line Items Table */}
@@ -1263,6 +1331,48 @@ export const SalesBillEntryView: React.FC = () => {
           </div>
         </section>
       </div>
+      {customerModalOpen && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4 animate-in fade-in duration-150"
+          onClick={() => { if (!savingCustomer) setCustomerModalOpen(false); }}
+        >
+          <form
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="billing-add-customer-title"
+            onSubmit={handleAddCustomer}
+            onKeyDown={handleCustomerModalKeyDown}
+            onClick={(event) => event.stopPropagation()}
+            className="w-full max-w-md overflow-hidden rounded-2xl border border-outline-variant/30 bg-surface-container-lowest shadow-2xl animate-in fade-in zoom-in-95 duration-200"
+          >
+            <div className="flex items-center justify-between border-b border-outline-variant/20 bg-surface-container-low px-5 py-4">
+              <div className="flex items-center gap-3">
+                <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary-container text-primary"><UserRoundPlus size={20} /></span>
+                <h2 id="billing-add-customer-title" className="text-lg font-semibold text-on-surface">Add customer</h2>
+              </div>
+              <button type="button" aria-label="Close" disabled={savingCustomer} onClick={() => setCustomerModalOpen(false)} className="rounded-lg p-2 text-on-surface-variant transition hover:bg-surface-container-high disabled:opacity-50"><X size={18} /></button>
+            </div>
+            <div className="grid gap-4 p-5">
+              <label className="flex flex-col gap-1.5 text-sm font-medium text-on-surface-variant">Customer name
+                <input data-customer-nav="true" required autoFocus value={newCustomerName} onChange={(event) => setNewCustomerName(event.target.value)} className="h-11 rounded-lg border border-outline-variant/30 bg-surface-container-low px-3 text-on-surface outline-none focus:border-primary focus:bg-white" placeholder="Business or person name" />
+              </label>
+              <label className="flex flex-col gap-1.5 text-sm font-medium text-on-surface-variant">Phone number <span className="font-normal">(optional)</span>
+                <input data-customer-nav="true" type="text" inputMode="numeric" pattern="[0-9]*" value={newCustomerPhone} onChange={(event) => setNewCustomerPhone(event.target.value.replace(/\D/g, ""))} onPaste={(event) => { event.preventDefault(); setNewCustomerPhone(event.clipboardData.getData("text").replace(/\D/g, "")); }} className="h-11 rounded-lg border border-outline-variant/30 bg-surface-container-low px-3 text-on-surface outline-none focus:border-primary focus:bg-white" placeholder="Digits only" />
+              </label>
+              <label className="flex flex-col gap-1.5 text-sm font-medium text-on-surface-variant">Address
+                <input data-customer-nav="true" required value={newCustomerAddress} onChange={(event) => setNewCustomerAddress(event.target.value)} className="h-11 rounded-lg border border-outline-variant/30 bg-surface-container-low px-3 text-on-surface outline-none focus:border-primary focus:bg-white" placeholder="Customer address" />
+              </label>
+            </div>
+            <div className="flex justify-end gap-2 border-t border-outline-variant/20 bg-surface-container-low px-5 py-4">
+              <button type="button" disabled={savingCustomer} onClick={() => setCustomerModalOpen(false)} className="h-10 rounded-lg border border-outline-variant/30 bg-white px-4 text-sm font-semibold text-on-surface-variant hover:bg-surface-container-low disabled:opacity-50">Cancel</button>
+              <button data-customer-nav="true" type="submit" disabled={savingCustomer} className="inline-flex h-10 items-center gap-2 rounded-lg bg-primary-container px-4 text-sm font-semibold text-on-surface shadow-sm transition-colors hover:bg-primary disabled:opacity-60">
+                {savingCustomer ? <LoaderCircle size={16} className="animate-spin" /> : <Check size={16} />}
+                {savingCustomer ? "Saving…" : "Save customer"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 };
