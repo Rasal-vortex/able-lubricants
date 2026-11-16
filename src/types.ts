@@ -46,6 +46,7 @@ export interface SaleLineItem {
   displayQuantity?: number;
   displayUnitName?: string;
   displayUnitSymbol?: string;
+  lineTotal?: number;
   sellingPrice: number;
   purchaseRate: number;
   tax: number;
@@ -91,6 +92,9 @@ export interface SaleRecord {
 
 export interface CreditBill {
   id: string;
+  saleId?: string | null;
+  customerId?: string;
+  paidAmount?: number;
   billDate: string;
   billNumber: string;
   partyName: string;

@@ -11,6 +11,7 @@ import {
   updateCouponRequest,
 } from "../services/api";
 import { formatCurrency } from "../utils/currency";
+import LoaderOne from "../components/ui/loader-one";
 import {
   CouponFieldErrors,
   getCouponFieldErrors,
@@ -240,11 +241,9 @@ export const CouponsView: React.FC = () => {
         )}
 
         {loading ? (
-          <div
-            role="status"
-            className="px-4 py-12 text-center text-sm text-on-surface-variant"
-          >
-            Loading coupons…
+          <div className="flex flex-col items-center justify-center gap-3 px-4 py-12 text-center text-sm text-on-surface-variant">
+            <LoaderOne />
+            <span>Loading coupons…</span>
           </div>
         ) : loadError ? null : !hasVisibleCoupons ? (
           <div className="px-4 py-12 text-center">

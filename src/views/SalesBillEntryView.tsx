@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Check, ChevronDown, LoaderCircle, Package, Plus, Search, UserRoundPlus, X } from "lucide-react";
+import { createPortal } from "react-dom";
+import { CalendarDays, Check, LoaderCircle, Plus, UserRoundPlus, X } from "lucide-react";
 import { useApp } from "../context/AppContext";
 import { CartItem } from "../types";
 import { formatCurrency } from "../utils/currency";
@@ -17,7 +18,7 @@ const isKilogramProduct = (product?: { unit?: string; unitName?: string }) => {
 };
 
 export const SalesBillEntryView: React.FC = () => {
-  const { products, customers, addCustomer, addSale, showToast, setActiveReceiptToPrint } =
+  const { products, customers, addCustomer, addSale, showToast } =
     useApp();
 
   const [billNumber, setBillNumber] = useState(
@@ -37,11 +38,13 @@ export const SalesBillEntryView: React.FC = () => {
   const [savingCustomer, setSavingCustomer] = useState(false);
 
   // Scanner & Fast Entry
-  const [fastSearchQuery, setFastSearchQuery] = useState("");
-  const [showAutoSuggest, setShowAutoSuggest] = useState(false);
-  const [activeSearchIndex, setActiveSearchIndex] = useState(-1);
   const [stockWarning, setStockWarning] = useState("");
-  const fastInputRef = useRef<HTMLInputElement>(null);
+  const [activeProductRowId, setActiveProductRowId] = useState<string | null>(null);
+  const [productSearchQuery, setProductSearchQuery] = useState("");
+  const [activeProductOptionIndex, setActiveProductOptionIndex] = useState(-1);
+  const [productDropdownPosition, setProductDropdownPosition] = useState<{ top: number; left: number; width: number; maxHeight: number } | null>(null);
+  const firstProductSelectRef = useRef<HTMLInputElement>(null);
+  const activeProductInputRef = useRef<HTMLInputElement | null>(null);
 
   // Cart Items
   const [cartItems, setCartItems] = useState<CartItem[]>([]);
@@ -66,10 +69,6 @@ export const SalesBillEntryView: React.FC = () => {
     coupon: "",
     credit: "",
   });
-  const [creditPaidNow, setCreditPaidNow] = useState<string | null>(null);
-  const [creditPaidMethod, setCreditPaidMethod] = useState<"CASH" | "UPI">(
-    "CASH",
-  );
   const [upiRef, setUpiRef] = useState("");
   const [creditDueDate, setCreditDueDate] = useState(() => {
     const due = new Date();
@@ -95,7 +94,26 @@ export const SalesBillEntryView: React.FC = () => {
     Number(splitAmounts.upi || 0) +
     Number(splitAmounts.coupon || 0) +
     Number(splitAmounts.credit || 0);
-  const totalUnits = cartItems.reduce((acc, item) => acc + item.quantity, 0);
+  const quantityTotals = cartItems.reduce((totals, item) => {
+    if (!item.productId) return totals;
+    const product = products.find((entry) => entry.id === item.productId);
+    if (!product) return totals;
+    const unitText = `${product.unitName || ""} ${product.unit || ""}`.trim().toLowerCase();
+    const isKilogram = isKilogramProduct(product);
+    const isLitre = /litre|liter|\bl\b/.test(unitText);
+    const unitLabel = isKilogram
+      ? "kg"
+      : isLitre
+        ? "L"
+        : product.unit.match(/\(([^)]+)\)/)?.[1] || product.unitName || product.unit || "unit";
+    const key = product.unitId || unitLabel.toLowerCase();
+    const existing = totals.get(key);
+    totals.set(key, { label: unitLabel, quantity: (existing?.quantity || 0) + item.quantity });
+    return totals;
+  }, new Map<string, { label: string; quantity: number }>());
+  const totalQuantitySummary = Array.from(quantityTotals.values())
+    .map(({ label, quantity }) => `${new Intl.NumberFormat("en-IN", { maximumFractionDigits: 3 }).format(quantity)} ${label}`)
+    .join(" · ");
   // Keyboard shortcut listeners
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -105,14 +123,15 @@ export const SalesBillEntryView: React.FC = () => {
       }
       if (e.key === "F2") {
         e.preventDefault();
-        fastInputRef.current?.focus();
-        fastInputRef.current?.select();
+        firstProductSelectRef.current?.focus();
       }
       if (e.key === "F4") {
         e.preventDefault();
         const nextMode = paymentMode === "Cash"
-          ? "UPI"
-          : paymentMode === "UPI" ? "Split" : "Cash";
+          ? "Credit"
+          : paymentMode === "Credit"
+            ? "UPI"
+            : paymentMode === "UPI" ? "Split" : "Cash";
         setPaymentMode(nextMode);
       }
     };
@@ -127,83 +146,150 @@ export const SalesBillEntryView: React.FC = () => {
     savingSale,
   ]);
 
-  // Quick scanner suggestion filtering
-  const matchingCatalog = products
-    .filter((product) => product.status === "Active")
-    .filter((product) => {
-      const query = fastSearchQuery.trim().toLowerCase();
-      return !query || product.name.toLowerCase().includes(query) ||
-        product.sku.toLowerCase().includes(query) ||
-        product.brand.toLowerCase().includes(query);
-    })
-    .slice(0, 8);
+  const addBlankCartItem = () => setCartItems((previous) => [...previous, {
+    id: `cart-${Date.now()}-${Math.random()}`,
+    name: "",
+    sku: "",
+    tax: 0,
+    quantity: 1,
+    price: 0,
+  }]);
 
-  const handleAddItemToCart = (
-    product: {
-      id: string;
-      name: string;
-      sku: string;
-      unit: string;
-      sellingPrice: number;
-      quantity: number;
-      unitAllowsDecimals?: boolean;
-    },
-    qty = 1,
-  ) => {
-    const allowsDecimals = product.unitAllowsDecimals ?? false;
-    if (qty <= 0 || !isUnitQuantityValid(qty, allowsDecimals)) {
-      showToast(
-        allowsDecimals
-          ? "Enter a positive quantity with up to 3 decimal places."
-          : "This unit only allows whole-number quantities.",
-        "error",
-      );
-      return;
-    }
-    const existingIndex = cartItems.findIndex(
-      (it) => it.productId === product.id,
-    );
-    const alreadyInCart =
-      existingIndex >= 0 ? cartItems[existingIndex].quantity : 0;
-    if (alreadyInCart + qty > product.quantity) {
-      const message = `Only ${product.quantity} ${product.unit || "units"} of ${product.name} available. ${alreadyInCart} already in this sale.`;
+  const handleSelectCartProduct = (rowId: string, productId: string) => {
+    const row = cartItems.find((item) => item.id === rowId);
+    if (!productId) return;
+    const product = products.find((entry) => entry.id === productId && entry.status === "Active");
+    if (!product) return;
+    const existingRow = cartItems.find((item) => item.id !== rowId && item.productId === product.id);
+    const otherQuantity = cartItems
+      .filter((item) => item.id !== rowId && item.productId === product.id)
+      .reduce((sum, item) => sum + item.quantity, 0);
+    const requestedQuantity = row?.productId && row.productId !== product.id ? 1 : row?.quantity ?? 1;
+    const stockQuantity = Math.round(product.quantity * 1000) / 1000;
+    const requestedTotal = Math.round((otherQuantity + requestedQuantity) * 1000) / 1000;
+    if (requestedTotal > stockQuantity) {
+      const message = `Only ${product.quantity} ${product.unit || "units"} of ${product.name} are available.`;
       setStockWarning(message);
       showToast(message, "error");
       return;
     }
+    const selectedItem: CartItem = {
+      id: row?.id || `cart-${Date.now()}-${Math.random()}`,
+      productId: product.id,
+      name: product.name,
+      sku: product.sku,
+      tax: 0,
+      quantity: requestedQuantity,
+      price: product.sellingPrice,
+    };
+    setCartItems((previous) => {
+      if (existingRow) {
+        return previous.filter((item) => item.id !== rowId).map((item) => item.id === existingRow.id
+          ? { ...item, quantity: item.quantity + requestedQuantity }
+          : item);
+      }
+      return row
+        ? previous.map((item) => item.id === rowId ? selectedItem : item)
+        : [...previous, selectedItem];
+    });
+    setQuantityDrafts((previous) => { const next = { ...previous }; delete next[rowId]; return next; });
+    setPriceDrafts((previous) => { const next = { ...previous }; delete next[rowId]; return next; });
     setStockWarning("");
-    if (existingIndex >= 0) {
-      setCartItems((prev) =>
-        prev.map((it, idx) =>
-          idx === existingIndex ? { ...it, quantity: it.quantity + qty } : it,
-        ),
-      );
-    } else {
-      const newItem: CartItem = {
-        id: "cart-" + Date.now() + Math.random(),
-        name: product.name,
-        sku: product.sku,
-        productId: product.id,
-        tax: 0,
-        quantity: qty,
-        price: product.sellingPrice,
-      };
-      setCartItems((prev) => [...prev, newItem]);
-    }
-    setFastSearchQuery("");
-    setShowAutoSuggest(false);
-    setActiveSearchIndex(-1);
+    setActiveProductRowId(null);
+    setProductSearchQuery("");
+    setActiveProductOptionIndex(-1);
+    setProductDropdownPosition(null);
   };
 
-  const handleQuickAdd = () => {
-    const availableProduct = matchingCatalog.find(
-      (product) => product.quantity - getCartQuantity(product.id) > 0,
+  const updateProductDropdownPosition = (input: HTMLInputElement) => {
+    const rect = input.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - rect.bottom - 12;
+    const spaceAbove = rect.top - 12;
+    const openAbove = spaceBelow < 180 && spaceAbove > spaceBelow;
+    const maxHeight = Math.max(120, Math.min(280, openAbove ? spaceAbove : spaceBelow));
+    setProductDropdownPosition({
+      top: openAbove ? Math.max(8, rect.top - maxHeight - 4) : rect.bottom + 4,
+      left: Math.max(8, Math.min(rect.left, window.innerWidth - rect.width - 8)),
+      width: Math.min(rect.width, window.innerWidth - 16),
+      maxHeight,
+    });
+  };
+
+  useEffect(() => {
+    if (activeProductRowId === null) return;
+    const reposition = () => {
+      if (activeProductInputRef.current) updateProductDropdownPosition(activeProductInputRef.current);
+    };
+    window.addEventListener("resize", reposition);
+    window.addEventListener("scroll", reposition, true);
+    return () => {
+      window.removeEventListener("resize", reposition);
+      window.removeEventListener("scroll", reposition, true);
+    };
+  }, [activeProductRowId]);
+
+  const renderProductSelector = (rowId: string, selectedProductId?: string) => {
+    const selectedProduct = products.find((product) => product.id === selectedProductId);
+    const isOpen = activeProductRowId === rowId;
+    const matchingProducts = products.filter((product) => {
+      if (product.status !== "Active") return false;
+      const query = productSearchQuery.trim().toLowerCase();
+      return !query || product.name.toLowerCase().includes(query) || product.sku.toLowerCase().includes(query) || product.brand.toLowerCase().includes(query);
+    });
+    return (
+      <div className="relative min-w-[230px]" onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          setActiveProductRowId(null);
+          setProductSearchQuery("");
+        }
+      }}>
+        <input
+          ref={(element) => {
+            if (rowId === (cartItems[0]?.id || "")) firstProductSelectRef.current = element;
+            if (isOpen) activeProductInputRef.current = element;
+          }}
+          type="text"
+          role="combobox"
+          aria-label={`Select or search product for item ${rowId ? cartItems.findIndex((item) => item.id === rowId) + 1 : 1}`}
+          aria-autocomplete="list"
+          aria-expanded={isOpen}
+          autoComplete="off"
+          value={isOpen ? productSearchQuery : selectedProduct?.name || ""}
+          placeholder="Select or search product"
+          onFocus={(event) => { activeProductInputRef.current = event.currentTarget; setActiveProductRowId(rowId); setProductSearchQuery(""); setActiveProductOptionIndex(-1); updateProductDropdownPosition(event.currentTarget); }}
+          onChange={(event) => { setActiveProductRowId(rowId); setProductSearchQuery(event.target.value); setActiveProductOptionIndex(-1); }}
+          onKeyDown={(event) => {
+            if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+              event.preventDefault();
+              setActiveProductOptionIndex((current) => event.key === "ArrowDown"
+                ? current >= matchingProducts.length - 1 ? 0 : current + 1
+                : current <= 0 ? matchingProducts.length - 1 : current - 1);
+            } else if (event.key === "Enter") {
+              event.preventDefault();
+              const choice = matchingProducts[activeProductOptionIndex >= 0 ? activeProductOptionIndex : 0];
+              if (choice) handleSelectCartProduct(rowId, choice.id);
+            } else if (event.key === "Escape") {
+              setActiveProductRowId(null);
+              setProductSearchQuery("");
+            }
+          }}
+          className="h-10 w-full rounded-lg border border-[#dedbd6] bg-[#faf9f7] px-3 pr-8 text-sm font-medium text-[#272727] outline-none placeholder:font-normal placeholder:text-[#89847b] focus:border-[#c58a00] focus:bg-white"
+        />
+        <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[#68645e]" aria-hidden="true">▾</span>
+        {isOpen && productDropdownPosition && createPortal(<div role="listbox" className="fixed z-[9999] overflow-y-auto rounded-lg border border-[#e5ded1] bg-white py-1 shadow-xl" style={{ top: productDropdownPosition.top, left: productDropdownPosition.left, width: productDropdownPosition.width, maxHeight: productDropdownPosition.maxHeight }}>
+          {matchingProducts.map((product, index) => {
+            const otherQuantity = cartItems.filter((item) => item.id !== rowId && item.productId === product.id).reduce((sum, item) => sum + item.quantity, 0);
+            const available = Math.max(0, Math.round((product.quantity - otherQuantity) * 1000) / 1000);
+            const disabled = available <= 0 && selectedProductId !== product.id;
+            return <button key={product.id} type="button" role="option" aria-selected={activeProductOptionIndex === index} disabled={disabled} onMouseDown={(event) => event.preventDefault()} onMouseEnter={() => setActiveProductOptionIndex(index)} onClick={() => handleSelectCartProduct(rowId, product.id)} className={`flex w-full items-center justify-between gap-3 border-b border-[#f0ede7] px-3 py-2 text-left last:border-b-0 ${disabled ? "cursor-not-allowed opacity-50" : activeProductOptionIndex === index ? "bg-[#fff1c9]" : "hover:bg-[#faf8f4]"}`}>
+              <span className="min-w-0"><span className="block truncate text-sm font-semibold text-[#272727]">{product.name}</span><span className="block truncate text-xs text-[#77736d]">{[product.brand, product.sku, product.unitName || product.unit].filter(Boolean).join(" · ")}</span></span>
+              <span className="shrink-0 text-right"><span className="block text-sm font-semibold text-[#272727]">{formatCurrency(product.sellingPrice)}</span><span className="block text-[11px] text-[#77736d]">{disabled ? "Out of stock" : `${available} available`}</span></span>
+            </button>;
+          })}
+          {!matchingProducts.length && <p className="px-3 py-4 text-center text-sm text-[#77736d]">No products found.</p>}
+        </div>, document.body)}
+      </div>
     );
-    if (availableProduct) {
-      handleAddItemToCart(availableProduct);
-    } else {
-      showToast("No matching product is currently in stock.", "error");
-    }
   };
 
   const handleAddCustomer = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -259,15 +345,14 @@ export const SalesBillEntryView: React.FC = () => {
     }
   };
 
-  const getCartQuantity = (productId: string) =>
-    cartItems
-      .filter((item) => item.productId === productId)
-      .reduce((total, item) => total + item.quantity, 0);
-
   const handleCompleteSale = async () => {
     if (savingSale) return;
     if (cartItems.length === 0) {
       showToast("Cannot complete sale with an empty cart.", "error");
+      return;
+    }
+    if (cartItems.some((item) => !item.productId)) {
+      showToast("Select a product for each invoice item.", "error");
       return;
     }
     const invalidPriceDraft = cartItems.some((item) => {
@@ -355,18 +440,6 @@ export const SalesBillEntryView: React.FC = () => {
       return;
     }
     const splitCouponAmount = Number(splitAmounts.coupon || 0);
-    const paidNow =
-      creditPaidNow === null ? finalTotal : Number(creditPaidNow || 0);
-    if (
-      paymentMode === "Credit" &&
-      (!Number.isFinite(paidNow) || paidNow < 0 || paidNow > finalTotal)
-    ) {
-      showToast(
-        "Amount paid now must be between zero and the bill total.",
-        "error",
-      );
-      return;
-    }
     const itemNames = cartItems
       .map((item) => {
         const product = products.find((entry) => entry.id === item.productId);
@@ -407,9 +480,6 @@ export const SalesBillEntryView: React.FC = () => {
                   : []),
               ].filter((tender) => tender.amount > 0),
             }
-          : {}),
-        ...(paymentMode === "Credit" && paidNow > 0
-          ? { paymentTenders: [{ method: creditPaidMethod, amount: paidNow }] }
           : {}),
         upiRef:
           paymentMode === "UPI" && upiRef.trim() ? upiRef.trim() : undefined,
@@ -472,223 +542,50 @@ export const SalesBillEntryView: React.FC = () => {
     }
   };
 
-  const handlePrintCurrentReceipt = () => {
-    setActiveReceiptToPrint({
-      title: "Retail Bill",
-      refNumber: billNumber,
-      date:
-        billDate +
-        " " +
-        new Date().toLocaleTimeString([], {
-          hour: "2-digit",
-          minute: "2-digit",
-        }),
-      party: customerName,
-      items: cartItems.map((c) => ({
-        ...(isKilogramProduct(products.find((product) => product.id === c.productId))
-          ? { qty: Math.round(c.quantity * 1000), unit: "g" }
-          : { qty: c.quantity, unit: products.find((product) => product.id === c.productId)?.unit || "" }),
-        name: c.name,
-        price: c.price,
-        total: c.quantity * c.price,
-      })),
-      subtotal: grossSubtotal,
-      billDiscount,
-      couponCode: normalizeCouponCode(couponCode) || undefined,
-      couponDiscount,
-      total: finalTotal,
-      mode: paymentMode,
-    });
-  };
-
   return (
-    <div className="grid w-full grid-cols-1 items-start gap-3 lg:grid-cols-12">
-      <div className="flex flex-col gap-3 lg:col-span-8">
-        <section className="grid grid-cols-1 gap-3 rounded-lg border border-outline-variant/20 bg-surface-container-lowest p-3 shadow-sm sm:grid-cols-2">
-          <label
-            className="flex flex-col gap-1 text-sm font-medium text-on-surface-variant"
-            htmlFor="bill-date"
-          >
-            Bill date
-            <input
-              id="bill-date"
-              type="date"
-              className="h-10 rounded-md border border-outline-variant/30 bg-surface-container-low px-3 font-mono text-on-surface"
-              value={billDate}
-              onChange={(e) => setBillDate(e.target.value)}
-            />
-          </label>
-          <div className="flex min-w-0 flex-col gap-1 text-sm font-medium text-on-surface-variant">
-            <label htmlFor="customer-search">
-              {paymentMode === "Credit"
-                ? "Customer (required for credit)"
-                : "Customer (optional)"}
-            </label>
+    <div className="flex w-full flex-col gap-3">
+      <section className="rounded-2xl border border-[#e9e3d9] bg-white p-4 shadow-sm">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-[1.3fr_1fr]">
+          <div className="min-w-0">
+            <label htmlFor="customer-search" className="mb-1 block text-sm font-semibold text-[#272727]">Customer</label>
             <div className="flex min-w-0 gap-2">
-              <select
-                id="customer-search"
-                className="h-10 min-w-0 flex-1 rounded-md border border-outline-variant/30 bg-surface-container-low px-3 text-on-surface"
-                value={customerName}
-                onChange={(e) => {
-                  setCustomerName(e.target.value);
-                  setCustomerType(e.target.value ? "registered" : "walkin");
-                }}
-              >
+              <select id="customer-search" className="h-11 min-w-0 flex-1 rounded-lg border border-[#dedbd6] bg-[#faf9f7] px-3 text-sm text-[#272727] outline-none focus:border-[#c58a00]" value={customerName} onChange={(event) => { setCustomerName(event.target.value); setCustomerType(event.target.value ? "registered" : "walkin"); }}>
                 <option value="">Walk-in / no customer</option>
-                {customers.map((customer) => (
-                  <option key={customer.id} value={customer.name}>
-                    {customer.name}
-                    {customer.phone ? ` · ${customer.phone}` : ""}
-                  </option>
-                ))}
+                {customers.map((customer) => <option key={customer.id} value={customer.name}>{customer.name}{customer.phone ? ` · ${customer.phone}` : ""}</option>)}
               </select>
-              <button
-                type="button"
-                onClick={() => setCustomerModalOpen(true)}
-                className="inline-flex h-10 shrink-0 items-center justify-center gap-1.5 rounded-md border border-outline-variant/30 bg-primary-container px-3 text-sm font-semibold text-on-surface transition-colors hover:bg-primary"
-                aria-label="Add customer"
-              >
-                <Plus size={16} />
-                <span className="hidden md:inline">Add customer</span>
-              </button>
+              <button type="button" onClick={() => setCustomerModalOpen(true)} className="inline-flex h-11 shrink-0 items-center gap-1.5 rounded-lg border border-[#e9d6a6] bg-[#fff1c9] px-3 text-sm font-semibold text-[#493819] transition hover:bg-[#ffe4a0]" aria-label="Add customer"><Plus size={16} /><span>Add customer</span></button>
             </div>
           </div>
-        </section>
+          <label htmlFor="bill-date" className="flex flex-col gap-1 text-sm font-semibold text-[#272727]">Date
+            <span className="flex h-11 items-center gap-2 rounded-lg border border-[#dedbd6] bg-[#faf9f7] px-3 text-sm font-semibold text-[#272727]">
+              <CalendarDays size={18} className="shrink-0 text-[#493819]" aria-hidden="true" />
+              <input id="bill-date" type="date" value={billDate} onChange={(event) => setBillDate(event.target.value)} className="min-w-0 flex-1 bg-transparent outline-none" />
+            </span>
+          </label>
+        </div>
+      </section>
 
-        {/* Cart Line Items Table */}
-        <section className="relative z-10 bg-surface-container-lowest rounded-lg shadow-sm border border-outline-variant/20">
-          <div className="px-space-md py-space-sm bg-surface-container-low flex flex-wrap items-center justify-between gap-3 border-b border-outline-variant/20 rounded-t-lg">
-            <div className="flex items-center gap-space-sm">
-              <span className="font-title-md text-title-md font-semibold text-on-surface">
-                Bill Items
-              </span>
-              <span className="font-data-mono-sm text-data-mono-sm bg-surface-container-high text-primary px-2 py-0.5 rounded-full font-semibold">
-                {cartItems.length} items
-              </span>
+        {/* Invoice item rows */}
+        <section className="relative z-10 overflow-visible rounded-2xl border border-[#e9e3d9] bg-white shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#eee8df] px-4 py-3">
+            <div className="flex items-center gap-3">
+              <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#fff1c9] text-[#b27800]"><span className="material-symbols-outlined text-[22px]">inventory_2</span></span>
+              <h2 className="text-lg font-bold text-[#171717]">Invoice items</h2>
+              <span className="rounded-full bg-[#fff7e7] px-3 py-1 font-mono text-xs font-semibold text-[#9a6700]">{cartItems.filter((item) => item.productId).length} items</span>
             </div>
-            <div
-              className="relative flex w-full min-w-0 flex-1 items-center gap-2 sm:max-w-2xl"
-              onBlur={(event) => {
-                if (!event.currentTarget.contains(event.relatedTarget as Node | null))
-                  setShowAutoSuggest(false);
-              }}
-            >
-              <div className="relative min-w-0 flex-1">
-                <Search size={17} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-outline" aria-hidden="true" />
-                <input
-                  ref={fastInputRef}
-                  autoComplete="off"
-                  type="text"
-                  className="h-10 w-full rounded-lg border border-outline-variant/30 bg-white py-2 pl-9 pr-10 font-body-md text-body-md text-on-surface placeholder:text-outline outline-none focus:border-primary"
-                  placeholder="Select or search product, SKU, or brand…"
-                  value={fastSearchQuery}
-                  role="combobox"
-                  aria-label="Select or search products"
-                  aria-autocomplete="list"
-                  aria-expanded={showAutoSuggest}
-                  aria-controls={showAutoSuggest ? "sales-product-results" : undefined}
-                  aria-activedescendant={activeSearchIndex >= 0 ? `sales-product-option-${activeSearchIndex}` : undefined}
-                  onFocus={() => setShowAutoSuggest(true)}
-                  onChange={(event) => {
-                    setFastSearchQuery(event.target.value);
-                    setShowAutoSuggest(true);
-                    setActiveSearchIndex(-1);
-                  }}
-                  onKeyDown={(event) => {
-                    if ((event.key === "ArrowDown" || event.key === "ArrowUp") && matchingCatalog.length > 0) {
-                      event.preventDefault();
-                      setShowAutoSuggest(true);
-                      setActiveSearchIndex((current) => event.key === "ArrowDown"
-                        ? current >= matchingCatalog.length - 1 ? 0 : current + 1
-                        : current <= 0 ? matchingCatalog.length - 1 : current - 1);
-                    } else if (event.key === "Enter") {
-                      event.preventDefault();
-                      const selected = activeSearchIndex >= 0 ? matchingCatalog[activeSearchIndex] : undefined;
-                      if (selected) handleAddItemToCart(selected);
-                      else handleQuickAdd();
-                    } else if (event.key === "Escape") {
-                      setShowAutoSuggest(false);
-                      setActiveSearchIndex(-1);
-                    }
-                  }}
-                />
-                <button
-                  type="button"
-                  aria-label={showAutoSuggest ? "Close product list" : "Open product list"}
-                  aria-expanded={showAutoSuggest}
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => {
-                    setShowAutoSuggest((open) => !open);
-                    fastInputRef.current?.focus();
-                  }}
-                  className="absolute right-1.5 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-md text-on-surface-variant hover:bg-surface-container-low"
-                >
-                  <ChevronDown size={17} aria-hidden="true" />
-                </button>
-                {showAutoSuggest && (
-                  <div
-                    id="sales-product-results"
-                    role="listbox"
-                    aria-label="Product choices"
-                    className="absolute left-0 right-0 top-[calc(100%+6px)] z-50 max-h-80 overflow-y-auto rounded-lg border border-outline-variant/30 bg-surface-container-lowest shadow-xl"
-                  >
-                    {matchingCatalog.map((product, index) => {
-                      const available = Math.max(0, product.quantity - getCartQuantity(product.id));
-                      const unavailable = available <= 0;
-                      return (
-                        <div
-                          key={product.id}
-                          id={`sales-product-option-${index}`}
-                          role="option"
-                          aria-selected={activeSearchIndex === index}
-                          aria-disabled={unavailable}
-                          onMouseDown={(event) => event.preventDefault()}
-                          onMouseEnter={() => setActiveSearchIndex(index)}
-                          onClick={() => { if (!unavailable) handleAddItemToCart(product); }}
-                          className={`flex cursor-pointer items-center justify-between gap-3 border-b border-outline-variant/20 px-3 py-2.5 last:border-b-0 ${unavailable ? "bg-red-50/70 opacity-70" : activeSearchIndex === index ? "bg-[#f4ddb0]" : "hover:bg-surface-container-low"}`}
-                        >
-                          <span className="min-w-0 flex-1">
-                            <span className={`block truncate text-sm font-semibold ${unavailable ? "text-red-800" : "text-on-surface"}`}>{product.name}</span>
-                            <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-on-surface-variant">
-                              {product.brand && <span className="max-w-36 truncate rounded-full bg-[#fff0c7] px-2 py-0.5 font-medium text-[#795400]">{product.brand}</span>}
-                              <span className="inline-flex shrink-0 items-center gap-1 rounded bg-surface-container-low px-1.5 py-0.5 font-semibold"><Package size={12} aria-hidden="true" />{product.unitName || product.unit || "—"}</span>
-                            </span>
-                          </span>
-                          <span className="whitespace-nowrap text-sm font-semibold text-on-surface">{formatCurrency(product.sellingPrice)}</span>
-                          <span className={`whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-semibold ${unavailable ? "bg-red-100 text-red-700" : "bg-tertiary-container/15 text-tertiary"}`}>
-                            {unavailable ? "Out of stock" : `In stock (${available}${product.unit ? ` ${product.unit}` : ""})`}
-                          </span>
-                        </div>
-                      );
-                    })}
-                    {matchingCatalog.length === 0 && <p className="px-4 py-5 text-center text-sm text-on-surface-variant">No matching products found.</p>}
-                  </div>
-                )}
-              </div>
-              <button
-                type="button"
-                disabled={cartItems.length === 0}
-                className="inline-flex h-10 shrink-0 items-center gap-1 rounded-lg px-2 text-xs font-semibold text-error hover:bg-error-container/40 disabled:opacity-40 sm:px-3"
-                onClick={() => { setCartItems([]); showToast("Cart cleared", "info"); }}
-              >
-                <span className="material-symbols-outlined text-[14px]">delete_sweep</span>
-                <span>Clear cart</span>
-              </button>
-            </div>
+            <button type="button" disabled={cartItems.length === 0} className="inline-flex h-9 items-center gap-1 rounded-lg px-3 text-sm font-semibold text-[#a12626] transition hover:bg-red-50 disabled:opacity-40" onClick={() => { setCartItems([]); showToast("Cart cleared", "info"); }}>
+              <span className="material-symbols-outlined text-[17px]">delete_sweep</span>Clear cart
+            </button>
           </div>
-
           <div className="w-full overflow-x-auto">
-            <table className="w-full text-left">
+            <table className="w-full min-w-[980px] text-left">
               <thead>
                 <tr className="bg-surface-container-low text-on-surface-variant font-label-sm text-label-sm uppercase tracking-wider">
                   <th className="py-2 px-space-md w-10 text-center">#</th>
-                  <th className="py-2 px-space-md min-w-[180px]">
-                    Product Name
-                  </th>
+                  <th className="py-2 px-space-md min-w-[230px]">Product</th>
                   <th className="py-2 px-space-sm">Brand</th>
-                  <th className="py-2 px-space-sm w-32 text-center">
-                    Quantity / unit
-                  </th>
+                  <th className="py-2 px-space-sm w-36 text-center">Qty</th>
+                  <th className="py-2 px-space-sm w-24 text-center">Unit</th>
                   <th className="py-2 px-space-sm w-28 text-right">Price</th>
                   <th className="py-2 px-space-md w-28 text-right">Total</th>
                   <th className="py-2 px-space-sm w-12 text-center">Action</th>
@@ -718,16 +615,7 @@ export const SalesBillEntryView: React.FC = () => {
                         {String(index + 1).padStart(2, "0")}
                       </td>
                       <td className="py-2 px-space-md">
-                        <div className="flex flex-col">
-                          <span className="font-title-md text-body-md font-semibold text-on-surface">
-                            {item.name}
-                          </span>
-                          {product?.unit && (
-                            <span className="text-xs text-on-surface-variant">
-                              {product.unit}
-                            </span>
-                          )}
-                        </div>
+                        {renderProductSelector(item.id, item.productId)}
                       </td>
                       <td className="py-2 px-space-sm">
                         <span className="rounded bg-surface-container-high px-2 py-1 text-xs text-on-surface-variant">
@@ -735,10 +623,11 @@ export const SalesBillEntryView: React.FC = () => {
                         </span>
                       </td>
                       <td className="py-2 px-space-sm">
-                        <div className="flex items-center justify-center gap-1 bg-surface-container-low rounded p-0.5 border border-outline-variant/30">
+                        <div className="flex items-center justify-center gap-1 rounded-lg border border-[#dedbd6] bg-[#faf9f7] p-1">
                           <button
                             type="button"
-                            className="w-6 h-6 flex items-center justify-center rounded bg-surface-container-lowest text-on-surface hover:bg-surface-container-high transition-colors font-bold text-xs"
+                            disabled={!product}
+                            className="flex h-7 w-7 items-center justify-center rounded bg-white text-on-surface transition-colors hover:bg-surface-container-high disabled:opacity-40"
                             onClick={() => {
                               setQuantityDrafts((previous) => {
                                 const next = { ...previous };
@@ -763,6 +652,7 @@ export const SalesBillEntryView: React.FC = () => {
                             -
                           </button>
                           <NumericTextInput
+                            disabled={!product}
                             maxDecimals={gramEntry ? 0 : allowsDecimals ? 3 : 0}
                             aria-label={`Quantity in ${displayUnit}`}
                             className="w-16 text-center font-data-mono-md text-data-mono-md bg-transparent text-on-surface focus:outline-none"
@@ -843,7 +733,6 @@ export const SalesBillEntryView: React.FC = () => {
                               }
                             }}
                           />
-                          <span className="pr-1 text-[10px] font-semibold text-on-surface-variant">{displayUnit}</span>
                           <button
                             type="button"
                             aria-label={`Increase ${item.name} quantity`}
@@ -852,7 +741,8 @@ export const SalesBillEntryView: React.FC = () => {
                                 ? "Maximum available stock reached"
                                 : "Increase quantity"
                             }
-                            className="w-6 h-6 flex items-center justify-center rounded bg-surface-container-lowest text-on-surface hover:bg-surface-container-high transition-colors font-bold text-xs"
+                            disabled={!product}
+                            className="flex h-7 w-7 items-center justify-center rounded bg-white text-on-surface transition-colors hover:bg-surface-container-high disabled:opacity-40"
                             onClick={() => {
                               setQuantityDrafts((previous) => {
                                 const next = { ...previous };
@@ -892,10 +782,12 @@ export const SalesBillEntryView: React.FC = () => {
                           </button>
                         </div>
                       </td>
+                      <td className="px-2 py-2 text-center text-xs font-medium text-[#68645e]">{product ? displayUnit : "—"}</td>
                       <td className="py-2 px-space-sm text-right">
                         <input
                           type="text"
                           inputMode="decimal"
+                          disabled={!product}
                           aria-label={`Selling price for ${item.name}`}
                           className="w-20 text-right font-data-mono-md text-data-mono-md bg-surface-container-low px-1.5 py-0.5 rounded text-on-surface focus:outline-none focus:bg-surface-container-lowest border border-outline-variant/30"
                           value={priceDrafts[item.id] ?? String(item.price)}
@@ -946,13 +838,11 @@ export const SalesBillEntryView: React.FC = () => {
                 })}
                 {cartItems.length === 0 && (
                   <tr>
-                    <td
-                      colSpan={7}
-                      className="text-center py-8 text-on-surface-variant font-body-sm"
-                    >
-                      No products added yet. Search above and choose a product
-                      to start the sale.
+                    <td className="px-3 py-2 text-center text-sm text-[#77736d]">1</td>
+                    <td className="px-3 py-2">
+                      {renderProductSelector("")}
                     </td>
+                    <td className="px-3 py-2 text-center text-[#77736d]">—</td><td className="px-3 py-2 text-center text-[#77736d]">—</td><td className="px-3 py-2 text-center text-[#77736d]">—</td><td className="px-3 py-2 text-right text-[#77736d]">—</td><td className="px-3 py-2 text-right font-semibold">₹0</td><td className="px-3 py-2 text-center text-[#77736d]">—</td>
                   </tr>
                 )}
               </tbody>
@@ -962,25 +852,24 @@ export const SalesBillEntryView: React.FC = () => {
           {stockWarning && (
             <p
               role="alert"
-              className="mx-space-md mt-2 rounded-md bg-error-container/40 px-3 py-2 text-sm text-error"
+              className="mx-4 mt-2 rounded-md bg-error-container/40 px-3 py-2 text-sm text-error"
             >
               {stockWarning}
             </p>
           )}
 
-          <div className="bg-surface-container-low px-space-md py-2 text-right text-sm text-on-surface-variant border-t border-outline-variant/20">
-            Total quantity:{" "}
-            <strong className="text-on-surface">{totalUnits}</strong>
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[#eee8df] px-4 py-3">
+            <button type="button" onClick={addBlankCartItem} className="inline-flex h-10 items-center gap-2 rounded-lg border border-[#e9d6a6] bg-white px-4 text-sm font-semibold text-[#493819] transition hover:bg-[#fff7e7]"><Plus size={17} aria-hidden="true" />Add another item</button>
+            <p className="text-sm text-[#68645e]">Total quantity: <strong className="text-[#272727]">{totalQuantitySummary || "0"}</strong></p>
           </div>
         </section>
-      </div>
 
       {/* Bill summary and checkout stay at the top of the right column. */}
-      <div className="flex flex-col gap-3 lg:col-span-4">
-        <section className="bg-surface-container-lowest p-3 rounded-lg shadow-sm flex flex-col gap-3 border border-outline-variant/20">
-          <div>
+      <div className="contents">
+        <section className="grid grid-cols-1 gap-4 rounded-2xl border border-[#e9e3d9] bg-white p-4 shadow-sm lg:grid-cols-2">
+          <div className="order-2 lg:order-2">
             <span className="font-title-md text-title-md font-semibold text-on-surface block mb-2">
-              Sale total and payment
+              Summary
             </span>
             <div className="bg-surface-container-low p-space-sm rounded-lg flex flex-col gap-space-xs font-body-md text-body-md border border-outline-variant/20">
               <div className="flex items-center justify-between py-1 text-on-surface-variant">
@@ -1141,13 +1030,14 @@ export const SalesBillEntryView: React.FC = () => {
             </div>
           </div>
 
+          <div className="order-1 flex flex-col gap-3 lg:order-1">
           {/* Select how the customer pays */}
           <div>
             <label className="font-label-md text-on-surface block mb-1.5">
               Payment Method
             </label>
-            <div className="grid grid-cols-3 gap-1 bg-surface-container-low p-1 rounded-lg border border-outline-variant/20">
-              {(["Cash", "UPI", "Split"] as const).map((mode) => (
+            <div className="grid grid-cols-2 gap-1 bg-surface-container-low p-1 rounded-lg border border-outline-variant/20 sm:grid-cols-4">
+              {(["Cash", "Credit", "UPI", "Split"] as const).map((mode) => (
                 <button
                   key={mode}
                   type="button"
@@ -1163,9 +1053,11 @@ export const SalesBillEntryView: React.FC = () => {
                   <span className="material-symbols-outlined text-[16px]">
                     {mode === "Cash"
                       ? "payments"
-                      : mode === "UPI"
-                        ? "qr_code_scanner"
-                        : "payments"}
+                      : mode === "Credit"
+                        ? "account_balance_wallet"
+                        : mode === "UPI"
+                          ? "qr_code_scanner"
+                          : "payments"}
                   </span>
                   <span>{mode}</span>
                 </button>
@@ -1204,84 +1096,17 @@ export const SalesBillEntryView: React.FC = () => {
 
           {/* Payment Details Subpanel */}
           {paymentMode === "Credit" && (
-            <div className="flex flex-col gap-space-xs bg-surface-container-low p-space-sm rounded-lg border border-outline-variant/20">
+            <div className="rounded-lg border border-outline-variant/20 bg-surface-container-low px-3 py-2">
               {!customerName ? (
-                <p
-                  role="status"
-                  className="rounded-md bg-surface-container-highest px-3 py-2 text-sm text-on-surface-variant"
-                >
-                  Choose a registered customer in the Customer field above to
-                  complete a credit sale.
+                <p role="status" className="text-sm text-on-surface-variant">
+                  Select a registered customer to create this credit sale.
                 </p>
               ) : (
                 <p className="text-sm text-on-surface-variant">
-                  Credit sale for{" "}
-                  <strong className="text-on-surface">{customerName}</strong>.
+                  {formatCurrency(finalTotal)} will be added to{" "}
+                  <strong className="text-on-surface">{customerName}</strong>’s credit balance.
                 </p>
               )}
-              <div className="mt-2 grid grid-cols-2 gap-2">
-                <label className="flex flex-col gap-1 text-xs font-semibold text-on-surface-variant">
-                  Paid now (₹)
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    pattern="[0-9]*"
-                    value={
-                      creditPaidNow === null
-                        ? String(finalTotal)
-                        : creditPaidNow
-                    }
-                    onChange={(e) =>
-                      setCreditPaidNow(e.target.value.replace(/\D/g, ""))
-                    }
-                    className="h-9 rounded border border-outline-variant/30 bg-surface-container-lowest px-2 text-right text-sm text-on-surface"
-                  />
-                </label>
-                <label className="flex flex-col gap-1 text-xs font-semibold text-on-surface-variant">
-                  Payment method
-                  <select
-                    value={creditPaidMethod}
-                    onChange={(e) =>
-                      setCreditPaidMethod(e.target.value as "CASH" | "UPI")
-                    }
-                    className="h-9 rounded border border-outline-variant/30 bg-surface-container-lowest px-2 text-sm text-on-surface"
-                  >
-                    <option value="CASH">Cash</option>
-                    <option value="UPI">UPI</option>
-                  </select>
-                </label>
-              </div>
-              <p className="text-xs text-on-surface-variant">
-                {formatCurrency(
-                  Math.max(
-                    0,
-                    finalTotal -
-                      (creditPaidNow === null
-                        ? finalTotal
-                        : Number(creditPaidNow || 0)),
-                  ),
-                )}{" "}
-                will be added to the customer’s credit balance.
-              </p>
-              <div className="flex flex-col mt-1">
-                <label className="font-label-sm text-label-sm text-on-surface-variant mb-1">
-                  Payment due date
-                </label>
-                <input
-                  type="date"
-                  className="h-8 px-2 bg-surface-container-lowest rounded font-data-mono-sm text-data-mono-sm text-on-surface focus:outline-none border border-outline-variant/30"
-                  value={creditDueDate}
-                  onChange={(e) => setCreditDueDate(e.target.value)}
-                />
-              </div>
-              <div className="p-2 bg-surface-container-highest rounded text-on-surface-variant font-label-sm text-label-sm flex items-center gap-1 mt-1">
-                <span className="material-symbols-outlined text-[16px] text-primary">
-                  info
-                </span>
-                <span>
-                  The unpaid balance will be added to this customer’s account.
-                </span>
-              </div>
             </div>
           )}
 
@@ -1301,13 +1126,14 @@ export const SalesBillEntryView: React.FC = () => {
               </div>
             </div>
           )}
+          </div>
 
           {/* Action Buttons */}
-          <div className="flex flex-col gap-space-xs pt-1">
+          <div className="order-3 pt-1 lg:col-start-2 lg:row-start-2">
             <button
               type="button"
-              disabled={savingSale || cartItems.length === 0}
-              className="w-full min-h-11 bg-primary-container text-on-primary rounded-lg font-title-md text-title-md font-semibold hover:bg-primary transition-colors flex items-center justify-center gap-space-sm shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={savingSale || !cartItems.length || cartItems.some((item) => !item.productId)}
+              className="flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#ffc21a] text-base font-bold text-[#171717] shadow-sm transition hover:bg-[#ffb900] disabled:cursor-not-allowed disabled:opacity-50"
               onClick={handleCompleteSale}
             >
               <span className="material-symbols-outlined text-[20px]">
@@ -1315,19 +1141,6 @@ export const SalesBillEntryView: React.FC = () => {
               </span>
               <span>{savingSale ? "Saving sale…" : "Complete sale"}</span>
             </button>
-
-            <div className="grid grid-cols-1 gap-space-xs">
-              <button
-                type="button"
-                className="h-8 px-space-sm bg-surface-container text-on-surface rounded font-label-md text-label-md font-medium hover:bg-surface-container-high transition-colors flex items-center justify-center gap-1"
-                onClick={handlePrintCurrentReceipt}
-              >
-                <span className="material-symbols-outlined text-[16px]">
-                  print
-                </span>
-                <span>Print Receipt</span>
-              </button>
-            </div>
           </div>
         </section>
       </div>

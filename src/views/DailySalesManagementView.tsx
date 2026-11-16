@@ -17,9 +17,12 @@ import { useApp } from '../context/AppContext';
 import { ExpenseManagementView } from './ExpenseManagementView';
 import { formatCurrency } from '../utils/currency';
 import { getDailySalesReport } from '../services/api';
+import LoaderOne from '../components/ui/loader-one';
+import { SaleRecord } from '../types';
 
 type RegisterTab = 'sales' | 'expenses';
 type PaymentMode = 'all' | 'Cash' | 'Credit' | 'UPI' | 'Coupon';
+const formatPaymentAmount = (amount: number) => new Intl.NumberFormat('en-IN', { maximumFractionDigits: 2 }).format(Number(amount) || 0);
 
 const localDate = (date: Date) => {
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
@@ -45,9 +48,15 @@ const reportDate = (date: string) => new Intl.DateTimeFormat('en-IN', {
 }).format(new Date(`${date}T12:00:00`));
 
 const csvCell = (value: string | number) => `"${String(value).replace(/"/g, '""')}"`;
+const escapeHtml = (value: string | number) => String(value)
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#39;');
 
 export const DailySalesManagementView: React.FC = () => {
-  const { sales, expenses, showToast, authSession } = useApp();
+  const { expenses, showToast, authSession } = useApp();
   const today = localDate(new Date());
   const [activeTab, setActiveTab] = useState<RegisterTab>('sales');
   const [quickDate, setQuickDate] = useState<'today' | 'yesterday' | 'custom'>('today');
@@ -56,14 +65,14 @@ export const DailySalesManagementView: React.FC = () => {
   const [modeFilter, setModeFilter] = useState<PaymentMode>('all');
   const [searchTerm, setSearchTerm] = useState('');
   const [page, setPage] = useState(1);
-  const [apiSales, setApiSales] = useState<typeof sales | null>(null);
+  const [apiSales, setApiSales] = useState<SaleRecord[] | null>(null);
   const [apiLoading, setApiLoading] = useState(false);
   const [openExpenseModal, setOpenExpenseModal] = useState<() => void>(() => () => {});
   const registerAddExpense = useCallback((openModal: () => void) => setOpenExpenseModal(() => openModal), []);
-  const pageSize = 5;
+  const pageSize = 10;
 
   useEffect(() => {
-    if (!authSession) { setApiSales(null); return; }
+    if (!authSession) { setApiSales([]); return; }
     const start = new Date(`${fromDate}T12:00:00`);
     const end = new Date(`${toDate}T12:00:00`);
     const dates: string[] = [];
@@ -73,7 +82,7 @@ export const DailySalesManagementView: React.FC = () => {
     setApiLoading(true);
     void Promise.all(dates.map((date) => getDailySalesReport(authSession.token, date))).then((reports) => {
       if (cancelled) return;
-      const rows: typeof sales = [];
+      const rows: SaleRecord[] = [];
       for (const report of reports) for (const invoice of report.invoices || []) {
         const products = invoice.products || [];
         const payments = invoice.payments || [];
@@ -96,7 +105,7 @@ export const DailySalesManagementView: React.FC = () => {
         const paymentBreakdown = payments.map((payment: any) => {
           const method = payment.method === 'COUPON' ? 'Coupon' : payment.method === 'UPI' ? 'UPI' : 'Cash';
           const code = method === 'Coupon' ? payment.notes?.match(/^Coupon code: (.+)$/)?.[1] : undefined;
-          return `${isCreditSettlement ? 'Credit settlement · ' : ''}${method}${code ? ` ${code}` : ''} ${Number(payment.amount).toFixed(2)}`;
+          return `${isCreditSettlement ? 'Credit settlement · ' : ''}${method}${code ? ` ${code}` : ''} ${formatPaymentAmount(Number(payment.amount))}`;
         }).join(' · ');
         const paymentDate = payments[0]?.date || invoice.billDate;
         const itemsList = products.map((product: any) =>
@@ -113,11 +122,35 @@ export const DailySalesManagementView: React.FC = () => {
           itemsCount: products.length,
           itemsList,
           paymentMode: paymentBreakdown as any,
+          paymentTenders: payments.map((payment: any) => ({
+            method: payment.method,
+            amount: Number(payment.amount) || 0,
+            ...(payment.notes ? { notes: payment.notes } : {}),
+          })),
           amount: totalCollected,
           billTotal: Number(invoice.totalAmount || 0),
           discountAmount,
           subtotal: totalCollected,
-          lineItems: [],
+          lineItems: products.map((product: any) => ({
+            productId: String(product.productId || product.id || ''),
+            name: String(product.productName || product.name || 'Product'),
+            sku: String(product.sku || ''),
+            unit: String(product.unitName || product.unitSymbol || product.unit || ''),
+            quantity: Number(product.quantity) || 0,
+            ...(product.displayQuantity !== undefined && product.displayQuantity !== null
+              ? {
+                  displayQuantity: Number(product.displayQuantity),
+                  displayUnitName: product.displayUnitName || undefined,
+                  displayUnitSymbol: product.displayUnitSymbol || undefined,
+                }
+              : {}),
+            sellingPrice: Number(product.sellingPrice || product.unitSellingPrice || product.price || 0),
+            lineTotal: product.totalAmount != null || product.lineTotal != null
+              ? Number(product.totalAmount ?? product.lineTotal)
+              : undefined,
+            purchaseRate: 0,
+            tax: 0,
+          })),
         });
       }
       setApiSales(rows);
@@ -126,7 +159,7 @@ export const DailySalesManagementView: React.FC = () => {
   }, [authSession, fromDate, toDate, showToast]);
 
   const inRange = (date: string) => date >= fromDate && date <= toDate;
-  const rangeSales = (apiSales ?? sales)
+  const rangeSales = (apiSales ?? [])
     .filter((sale) => inRange(saleDate(sale.date, sale.dateTime)))
     .sort((a, b) => new Date(b.dateTime).getTime() - new Date(a.dateTime).getTime());
   const rangeExpenses = expenses.filter((expense) => inRange(expense.date.slice(0, 10)));
@@ -175,6 +208,74 @@ export const DailySalesManagementView: React.FC = () => {
     };
     window.addEventListener('afterprint', restoreTitle);
     window.print();
+  };
+
+  const handlePrintSale = (sale: (typeof filteredSales)[number]) => {
+    const printWindow = window.open('', '_blank', 'width=900,height=700');
+    if (!printWindow) {
+      showToast('Allow pop-ups to print or save the sale receipt.', 'error');
+      return;
+    }
+
+    const lineItems = sale.lineItems || [];
+    const tenders = sale.paymentTenders || [];
+    const paidAmount = tenders.reduce((sum, tender) => sum + Number(tender.amount || 0), 0);
+    const billTotal = Number(sale.billTotal ?? sale.amount);
+    const productRows = lineItems.length
+      ? lineItems.map((item) => {
+          const quantity = item.displayQuantity !== undefined
+            ? `${item.displayQuantity} ${item.displayUnitName || item.displayUnitSymbol || ''}`.trim()
+            : `${item.quantity} ${item.unit || ''}`.trim();
+          const lineTotal = item.lineTotal ?? item.quantity * item.sellingPrice;
+          return `<tr><td>${escapeHtml(item.name)}</td><td>${escapeHtml(quantity)}</td><td class="number">${escapeHtml(formatCurrency(item.sellingPrice))}</td><td class="number">${escapeHtml(formatCurrency(lineTotal))}</td></tr>`;
+        }).join('')
+      : `<tr><td colspan="4">${escapeHtml(sale.itemsList || 'Item details unavailable')}</td></tr>`;
+    const paymentRows = tenders.length
+      ? tenders.map((tender) => `<tr><td>${escapeHtml(tender.method)}${tender.notes ? ` · ${escapeHtml(tender.notes)}` : ''}</td><td class="number">${escapeHtml(formatCurrency(tender.amount))}</td></tr>`).join('')
+      : `<tr><td>${escapeHtml(sale.paymentMode)}</td><td class="number">${escapeHtml(formatCurrency(sale.paymentMode === 'Credit' ? 0 : sale.amount))}</td></tr>`;
+    const isSettlement = sale.paymentMode.includes('Credit settlement');
+
+    printWindow.document.open();
+    printWindow.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Able Lubes - Sales Receipt</title>
+      <style>
+        @page { size: A4 portrait; margin: 0; }
+        * { box-sizing: border-box; }
+        body { margin: 0; padding: 14mm; color: #222; font: 10pt/1.45 Arial, Helvetica, sans-serif; }
+        header { display:flex; justify-content:space-between; align-items:flex-start; padding-bottom:8mm; border-bottom:1px solid #b9b9b9; }
+        .brand { color:#9a6800; font-size:18pt; font-weight:800; letter-spacing:.04em; }
+        .tagline { color:#666; font-size:9pt; }
+        h1 { margin:8mm 0 1mm; text-align:center; font-size:18pt; }
+        .subtitle { margin:0 0 7mm; color:#666; text-align:center; }
+        .meta { display:grid; grid-template-columns:1fr 1fr; gap:3mm 10mm; margin-bottom:8mm; padding:5mm; border:1px solid #ddd; background:#fafafa; }
+        .meta div { display:flex; justify-content:space-between; gap:6mm; }
+        .meta span:first-child { color:#666; }
+        h2 { margin:7mm 0 3mm; font-size:11pt; }
+        .customer { margin-bottom:7mm; font-size:13pt; font-weight:700; }
+        table { width:100%; border-collapse:collapse; }
+        th,td { padding:3mm; border-bottom:1px solid #ddd; text-align:left; vertical-align:top; }
+        thead th { background:#f3f3f3; color:#555; font-size:8pt; text-transform:uppercase; }
+        .number { text-align:right; white-space:nowrap; }
+        .totals { width:55%; margin:6mm 0 0 auto; }
+        .totals td { border:0; padding:1.5mm 2mm; }
+        .totals tr:last-child td { border-top:1px solid #999; font-size:12pt; font-weight:700; }
+        .payments { margin-top:2mm; }
+        footer { margin-top:14mm; padding-top:4mm; border-top:1px solid #ddd; color:#666; text-align:center; font-size:8pt; }
+        tr { break-inside:avoid; }
+      </style></head><body>
+      <header><div><div class="brand">ABLE LUBES</div><div class="tagline">Store workspace</div></div><strong>${escapeHtml(isSettlement ? 'PAYMENT RECEIPT' : 'SALES RECEIPT')}</strong></header>
+      <h1>${escapeHtml(isSettlement ? 'Payment Receipt' : 'Sales Receipt')}</h1><p class="subtitle">${escapeHtml(isSettlement ? 'Payment received against an outstanding bill' : 'Customer sale details')}</p>
+      <section class="meta"><div><span>Bill number</span><strong>${escapeHtml(sale.billNumber)}</strong></div><div><span>Date &amp; time</span><strong>${escapeHtml(formatSaleDateTime(sale.dateTime))}</strong></div><div><span>Customer</span><strong>${escapeHtml(sale.customerName)}</strong></div><div><span>Payment mode</span><strong>${escapeHtml(sale.paymentMode)}</strong></div></section>
+      <h2>Purchased items</h2><table><thead><tr><th>Product</th><th>Quantity</th><th class="number">Unit price</th><th class="number">Line total</th></tr></thead><tbody>${productRows}</tbody></table>
+      <table class="totals"><tbody><tr><td>${isSettlement ? 'Payment received' : 'Bill total'}</td><td class="number">${escapeHtml(formatCurrency(isSettlement ? sale.amount : billTotal))}</td></tr></tbody></table>
+      <h2>Payments</h2><table class="payments"><thead><tr><th>Method</th><th class="number">Amount</th></tr></thead><tbody>${paymentRows}</tbody></table>
+      ${!isSettlement && (sale.paymentMode === 'Credit' || sale.paymentMode === 'Split') ? `<p><strong>Balance due: ${escapeHtml(formatCurrency(Math.max(0, billTotal - paidAmount)))}</strong></p>` : ''}
+      <footer>Thank you. This is a computer-generated receipt.</footer></body></html>`);
+    printWindow.document.close();
+    printWindow.focus();
+    printWindow.setTimeout(() => {
+      printWindow.onafterprint = () => printWindow.close();
+      printWindow.print();
+    }, 250);
   };
 
   const handleExportDaySheet = () => {
@@ -278,10 +379,12 @@ export const DailySalesManagementView: React.FC = () => {
           <div className="overflow-x-auto">
             <table className="w-full min-w-[850px] border-collapse text-left">
               <thead><tr className="h-10 bg-[#f6f5f2] text-xs font-bold uppercase tracking-wide text-[#6d685f]">
-                <th className="px-4 py-2">Date &amp; time</th><th className="px-4 py-2">Bill number</th><th className="px-4 py-2">Product name</th><th className="px-4 py-2 text-right">Received today (₹)</th><th className="px-4 py-2 text-center">Mode of payment</th>
+                <th className="px-4 py-2">Date &amp; time</th><th className="px-4 py-2">Bill number</th><th className="px-4 py-2">Product name</th><th className="px-4 py-2 text-right">Received today (₹)</th><th className="px-4 py-2 text-center">Mode of payment</th><th className="px-4 py-2 text-center">Receipt</th>
               </tr></thead>
               <tbody className="divide-y divide-[#efede8] text-sm text-[#272727]">
-                {pageSales.map((item) => (
+                {apiLoading ? (
+                  <tr><td colSpan={6} className="px-4 py-14 text-center"><LoaderOne /></td></tr>
+                ) : pageSales.map((item) => (
                   <tr key={item.id} className="h-11 transition hover:bg-[#fffdf8]">
                     <td className="whitespace-nowrap px-4 py-2 text-xs text-[#68645e]">{formatSaleDateTime(item.dateTime)}</td>
                     <td className="whitespace-nowrap px-4 py-2 font-semibold text-[#a86600]">{item.billNumber}</td>
@@ -308,9 +411,14 @@ export const DailySalesManagementView: React.FC = () => {
                     <td className="px-4 py-2 text-center"><span className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-semibold ${item.paymentMode.includes('UPI') ? 'bg-[#eee9ff] text-[#5940a5]' : item.paymentMode.includes('Cash') ? 'bg-[#f0f0ed] text-[#45443f]' : 'bg-[#eaf0ff] text-[#34549b]'}`}>
                       <span className="material-symbols-outlined text-[14px]">{item.paymentMode.includes('UPI') ? 'contactless' : item.paymentMode.includes('Cash') ? 'payments' : 'credit_card'}</span>{item.paymentMode}
                     </span></td>
+                    <td className="px-4 py-2 text-center">
+                      <button type="button" onClick={() => handlePrintSale(item)} title="Print or save receipt as PDF" aria-label={`Print receipt for ${item.billNumber}`} className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#e8e4dd] bg-white px-2.5 text-xs font-semibold text-[#493819] transition hover:bg-[#fff7e7]">
+                        <Printer size={15} aria-hidden="true" /><span>Print / PDF</span>
+                      </button>
+                    </td>
                   </tr>
                 ))}
-                {filteredSales.length === 0 && <tr><td colSpan={5} className="px-4 py-12 text-center text-sm text-[#77736d]">No sales match this date range and filter.</td></tr>}
+                {!apiLoading && filteredSales.length === 0 && <tr><td colSpan={6} className="px-4 py-12 text-center text-sm text-[#77736d]">No sales match this date range and filter.</td></tr>}
               </tbody>
             </table>
           </div>

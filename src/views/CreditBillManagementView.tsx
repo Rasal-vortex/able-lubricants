@@ -3,16 +3,17 @@ import { LoaderCircle } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { CreditBill, PurchaseBill } from '../types';
 import { formatCurrency } from '../utils/currency';
+import LoaderOne from '../components/ui/loader-one';
 
 export const CreditBillManagementView: React.FC = () => {
   const {
     creditBills,
+    creditBillLoading,
+    creditBillError,
     addCreditBill,
     collectCreditPayment,
     showToast,
-    setActiveReceiptToPrint,
     customers,
-    partyLedger,
     addCustomer,
     purchases,
     suppliers,
@@ -53,7 +54,7 @@ export const CreditBillManagementView: React.FC = () => {
   const [savingSupplierPayment, setSavingSupplierPayment] = useState(false);
 
   // Party balances lookup
-  const priorDue = partyLedger.filter(row => row.partyName === selectedParty && row.transactionType === 'INVOICES').reduce((sum, row) => sum + row.outstandingBalance, 0);
+  const priorDue = creditBills.filter((bill) => bill.partyName === selectedParty && bill.netDue > 0).reduce((sum, bill) => sum + bill.netDue, 0);
   const currentAmt = parseFloat(newBillAmount) || 0;
   const expectedBalance = priorDue + currentAmt;
 
@@ -78,15 +79,7 @@ export const CreditBillManagementView: React.FC = () => {
     const matchesParty = customerFilter === 'ALL' || bill.partyName === customerFilter;
     return matchesParty && matchesSearch && matchesStatus && dateMatch;
   });
-  const grandTotalDue = filteredBills.reduce((total, bill) => {
-    // Sales-linked bills store this invoice's outstanding amount. Manually
-    // entered legacy bills include the prior balance in netDue, so subtract
-    // that snapshot to avoid counting earlier bills twice.
-    const currentBillDue = bill.billNumber.startsWith('CR-SB-')
-      ? bill.netDue
-      : Math.max(0, bill.netDue - bill.priorBalance);
-    return total + currentBillDue;
-  }, 0);
+  const grandTotalDue = filteredBills.reduce((total, bill) => total + bill.netDue, 0);
 
   const supplierPurchaseDue = (purchase: PurchaseBill) => Math.max(
     0,
@@ -127,10 +120,11 @@ export const CreditBillManagementView: React.FC = () => {
     setSavingCreditBill(true);
     try {
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-      addCreditBill({
+      const saved = await addCreditBill({
         billDate: newBillDate,
         billNumber: newBillNumber.trim(),
         partyName: selectedParty,
+        customerId: customers.find((customer) => customer.name === selectedParty)?.id,
         gstin: '',
         term: newCreditTerm,
         status: 'Unpaid',
@@ -140,6 +134,7 @@ export const CreditBillManagementView: React.FC = () => {
         dueDate: newDueDate,
         remarks: newRemarks,
       });
+      if (!saved) return;
       setDrawerOpen(false);
       setNewBillNumber(`CR-${Date.now().toString().slice(-7)}`);
     } finally {
@@ -203,49 +198,78 @@ export const CreditBillManagementView: React.FC = () => {
     }
   };
 
-  const handleExportLedger = () => {
-    const rows = creditView === 'customers' ? [
-      ['Bill Date', 'Bill Number', 'Customer', 'GSTIN', 'Term', 'Status', 'Prior Balance (INR)', 'Bill Amount (INR)', 'Net Due (INR)'],
-      ...filteredBills.map((b) => [
-        b.billDate,
-        b.billNumber,
-        `"${b.partyName.replace(/"/g, '""')}"`,
-        b.gstin,
-        b.term,
-        b.status,
-        formatCurrency(b.priorBalance),
-        formatCurrency(b.billAmount),
-        formatCurrency(b.netDue),
-      ]),
-    ] : [
-      ['Date', 'Purchase invoice', 'Supplier', 'Total (INR)', 'Paid (INR)', 'Outstanding (INR)'],
-      ...supplierPurchases.map((purchase) => [
-        purchase.invoiceDate,
-        purchase.invoiceNumber,
-        purchase.partyName,
-        formatCurrency(purchase.totalAmount),
-        formatCurrency(purchase.amountPaid || 0),
-        formatCurrency(supplierPurchaseDue(purchase)),
-      ]),
-    ];
-    const csv = rows.map((r) => r.join(',')).join('\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = `${creditView === 'customers' ? 'Customer' : 'Supplier'}_Credit_Export_${new Date().toISOString().slice(0, 10)}.csv`;
-    link.click();
-    showToast('Credit ledger exported successfully.');
-  };
-
   const handlePrintStatement = (bill: CreditBill) => {
-    setActiveReceiptToPrint({
-      title: 'Credit Billing Statement',
-      refNumber: bill.billNumber,
-      date: bill.billDate,
-      party: bill.partyName,
-      total: bill.netDue,
-      mode: `Credit (${bill.term}) - Due: ${bill.dueDate}`,
-    });
+    const balanceDue = bill.billNumber.startsWith('CR-SB-')
+      ? bill.netDue
+      : Math.max(0, bill.netDue - bill.priorBalance);
+    const escapeHtml = (value: string | number) => String(value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+    const printWindow = window.open('', '_blank', 'width=900,height=700');
+    if (!printWindow) {
+      showToast('Allow pop-ups to print the credit statement.', 'error');
+      return;
+    }
+
+    const amountPaid = Math.max(0, bill.billAmount - balanceDue);
+    printWindow.document.open();
+    printWindow.document.write(`<!doctype html>
+      <html><head><meta charset="utf-8"><title>Credit Bill ${escapeHtml(bill.billNumber)}</title>
+      <style>
+        @page { size: A4 portrait; margin: 16mm; }
+        * { box-sizing: border-box; }
+        body { margin: 0; color: #171717; font: 10pt/1.45 Arial, Helvetica, sans-serif; }
+        .brand { color: #9a6800; font-size: 17pt; font-weight: 800; letter-spacing: .04em; }
+        .workspace { margin-top: 2px; color: #555; font-size: 9pt; }
+        header { display: flex; justify-content: space-between; padding-bottom: 10mm; border-bottom: 1px solid #b8b8b8; }
+        h1 { margin: 0; font-size: 19pt; }
+        .title { margin: 10mm 0 7mm; text-align: center; }
+        .title p { margin: 2mm 0 0; color: #666; font-size: 9pt; }
+        .meta { display: grid; grid-template-columns: 1fr 1fr; gap: 4mm 12mm; margin-bottom: 9mm; padding: 5mm; border: 1px solid #ddd; background: #fafafa; }
+        .meta div, .terms { display: flex; justify-content: space-between; gap: 8mm; }
+        .meta span:first-child, h2 { color: #666; font-size: 8pt; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+        .meta span:last-child { font-weight: 600; text-align: right; }
+        .customer { margin-bottom: 10mm; }
+        h2 { margin: 0 0 2mm; }
+        .customer strong { font-size: 13pt; }
+        table { width: 100%; margin-bottom: 7mm; border-collapse: collapse; }
+        th, td { padding: 4mm 3mm; border-bottom: 1px solid #ddd; text-align: left; }
+        th:last-child, td:last-child { text-align: right; }
+        thead th { border-bottom-color: #999; color: #555; font-size: 8pt; text-transform: uppercase; }
+        tfoot th { border-top: 2px solid #777; border-bottom: 0; font-size: 12pt; }
+        .terms { padding: 4mm 0; border-bottom: 1px solid #ddd; }
+        .terms span { color: #666; }
+        footer { margin-top: 16mm; color: #666; font-size: 8pt; }
+        footer p { margin: 0 0 20mm; text-align: center; }
+        .signatures { display: flex; justify-content: space-between; gap: 20mm; }
+        .signatures span { width: 45%; padding-top: 3mm; border-top: 1px solid #777; text-align: center; }
+      </style></head><body>
+      <header><div><div class="brand">ABLE LUBES</div><div class="workspace">Store workspace</div></div></header>
+      <div class="title"><h1>Credit Bill Statement</h1><p>Customer account statement</p></div>
+      <section class="meta">
+        <div><span>Bill number</span><span>${escapeHtml(bill.billNumber)}</span></div>
+        <div><span>Bill date</span><span>${escapeHtml(bill.billDate)}</span></div>
+        <div><span>Status</span><span>${escapeHtml(bill.status)}</span></div>
+        <div><span>Due date</span><span>${escapeHtml(bill.dueDate || '—')}</span></div>
+      </section>
+      <section class="customer"><h2>Bill to</h2><strong>${escapeHtml(bill.partyName)}</strong></section>
+      <table><thead><tr><th>Description</th><th>Amount (₹)</th></tr></thead>
+        <tbody><tr><td>Bill amount</td><td>${escapeHtml(formatCurrency(bill.billAmount))}</td></tr>
+        <tr><td>Amount paid</td><td>${escapeHtml(formatCurrency(amountPaid))}</td></tr></tbody>
+        <tfoot><tr><th>Balance due</th><th>${escapeHtml(formatCurrency(balanceDue))}</th></tr></tfoot>
+      </table>
+      <div class="terms"><span>Credit terms</span><strong>${escapeHtml(bill.term || 'Due on agreed date')}</strong></div>
+      <footer><p>This is a computer-generated credit statement.</p><div class="signatures"><span>Customer signature</span><span>Authorized signature</span></div></footer>
+      </body></html>`);
+    printWindow.document.close();
+    printWindow.focus();
+    printWindow.setTimeout(() => {
+      printWindow.onafterprint = () => printWindow.close();
+      printWindow.print();
+    }, 250);
   };
 
   return (
@@ -317,14 +341,6 @@ export const CreditBillManagementView: React.FC = () => {
 
           {/* Row actions */}
           <div className="flex flex-wrap items-center justify-end gap-2">
-            <button
-              className="h-10 whitespace-nowrap px-3 rounded-lg bg-surface-container-lowest text-on-surface hover:bg-surface-container-low transition-colors font-label-md text-label-md flex items-center gap-1.5 shadow-sm border border-outline-variant/30"
-              type="button"
-              onClick={handleExportLedger}
-            >
-              <span className="material-symbols-outlined text-[16px] text-on-surface-variant">file_download</span>
-              <span>Export Ledger</span>
-            </button>
             {creditView === 'customers' && <button
               className="h-10 whitespace-nowrap px-3 rounded-lg bg-primary text-on-primary hover:bg-primary-container transition-colors font-label-md text-label-md flex items-center gap-1.5 shadow-sm"
               onClick={() => setDrawerOpen(true)}
@@ -337,6 +353,8 @@ export const CreditBillManagementView: React.FC = () => {
         </div>
       </div>
 
+      {creditView === 'customers' && creditBillError && <div role="alert" className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{creditBillError}</div>}
+
       {creditView === 'customers' ? (
       /* Customer Credit Bills Table */
       <div className="w-full bg-surface-container-lowest rounded-xl overflow-hidden shadow-sm flex flex-col border border-outline-variant/20">
@@ -345,7 +363,6 @@ export const CreditBillManagementView: React.FC = () => {
             <thead>
               <tr className="bg-surface-container-low h-9 text-on-surface-variant font-label-sm text-label-sm uppercase tracking-wider select-none">
                 <th className="px-space-md py-2">Bill Date</th>
-                <th className="px-space-md py-2">Bill Number</th>
                 <th className="px-space-md py-2">Party / Customer Name</th>
                 <th className="px-space-md py-2">Status</th>
                 <th className="px-space-md py-2 text-right">Existing/Prior Balance (₹)</th>
@@ -355,13 +372,12 @@ export const CreditBillManagementView: React.FC = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-surface-container text-body-md font-body-md text-on-surface">
-              {filteredBills.map((bill) => (
+              {creditBillLoading ? (
+                <tr><td colSpan={7} className="px-4 py-14"><LoaderOne /></td></tr>
+              ) : filteredBills.map((bill) => (
                 <tr key={bill.id} className="hover:bg-surface-container-low/50 transition-colors group">
                   <td className="px-space-md py-2.5 font-data-mono-sm text-data-mono-sm text-on-surface whitespace-nowrap">
                     {bill.billDate}
-                  </td>
-                  <td className="px-space-md py-2.5 font-data-mono-md text-data-mono-md font-semibold text-primary whitespace-nowrap">
-                    {bill.billNumber}
                   </td>
                   <td className="px-space-md py-2.5 font-title-md text-body-md font-medium text-on-surface">
                     <div className="flex flex-col">
@@ -433,6 +449,7 @@ export const CreditBillManagementView: React.FC = () => {
                   </td>
                 </tr>
               ))}
+              {!creditBillLoading && filteredBills.length === 0 && <tr><td colSpan={7} className="px-4 py-14 text-center text-sm text-on-surface-variant">No customer credit bills found.</td></tr>}
             </tbody>
           </table>
         </div>

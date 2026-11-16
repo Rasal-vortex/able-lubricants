@@ -2,6 +2,8 @@ import React, { useEffect, useState } from 'react';
 import { Building2, CreditCard, FileText, LoaderCircle, Package, Pencil, Plus, Wallet } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { createSupplierPaymentRequest, getSupplierLedgerReport } from '../services/api';
+import { NumericTextInput } from '../components/ui/NumericTextInput';
+import LoaderOne from '../components/ui/loader-one';
 import { formatCurrency } from '../utils/currency';
 
 type SupplierLedgerPurchase = {
@@ -62,12 +64,15 @@ export const PartyLedgerManagementView: React.FC = () => {
   const [supplierModalOpen, setSupplierModalOpen] = useState(false);
   const [savingSupplier, setSavingSupplier] = useState(false);
   const [paymentOpen, setPaymentOpen] = useState(false);
-  const [paymentAmount, setPaymentAmount] = useState('');
+  const [cashPaymentAmount, setCashPaymentAmount] = useState('');
+  const [upiPaymentAmount, setUpiPaymentAmount] = useState('');
   const [paymentDate, setPaymentDate] = useState(localToday);
-  const [paymentMethod, setPaymentMethod] = useState<'CASH' | 'UPI'>('CASH');
   const [savingPayment, setSavingPayment] = useState(false);
 
   const selectedSupplier = suppliers.find((supplier) => supplier.id === selectedSupplierId);
+  const newestFirstPurchases = [...(ledger?.purchases || [])].sort((left, right) =>
+    new Date(right.date).getTime() - new Date(left.date).getTime(),
+  );
 
   useEffect(() => {
     if (!selectedSupplierId || suppliers.some((supplier) => supplier.id === selectedSupplierId)) return;
@@ -140,7 +145,9 @@ export const PartyLedgerManagementView: React.FC = () => {
 
   const submitPayment = async () => {
     if (!authSession || !selectedSupplierId || !ledger || savingPayment) return;
-    const amount = Number(paymentAmount);
+    const cashAmount = Number(cashPaymentAmount) || 0;
+    const upiAmount = Number(upiPaymentAmount) || 0;
+    const amount = cashAmount + upiAmount;
     const outstanding = Number(ledger.totals.outstanding);
     const oldestDuePurchase = ledger.purchases.find((purchase) => Number(purchase.outstanding) > 0);
     if (!oldestDuePurchase || !Number.isFinite(amount) || amount <= 0 || amount > outstanding) {
@@ -149,16 +156,20 @@ export const PartyLedgerManagementView: React.FC = () => {
     }
     setSavingPayment(true);
     try {
+      const tenders = [
+        ...(cashAmount > 0 ? [{ method: 'CASH' as const, amount: cashAmount }] : []),
+        ...(upiAmount > 0 ? [{ method: 'UPI' as const, amount: upiAmount }] : []),
+      ];
       await createSupplierPaymentRequest(authSession.token, {
         supplierId: selectedSupplierId,
         purchaseId: oldestDuePurchase.id,
-        amount,
-        method: paymentMethod,
+        tenders,
         paymentDate,
       });
       await reloadLedger();
       setPaymentOpen(false);
-      setPaymentAmount('');
+      setCashPaymentAmount('');
+      setUpiPaymentAmount('');
       showToast('Payment recorded and applied to the oldest outstanding bills first.');
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Unable to record the supplier payment.', 'error');
@@ -190,12 +201,13 @@ export const PartyLedgerManagementView: React.FC = () => {
                 <button type="button" onClick={() => editSupplier(selectedSupplier)} className="inline-flex h-11 items-center gap-2 rounded-lg border border-[#eadfc8] bg-white px-3 text-sm font-semibold text-[#765000] shadow-sm hover:bg-[#fffaf0]"><Pencil size={15} />Edit</button>
                 <button type="button" onClick={() => void removeSupplier(selectedSupplier)} className="h-11 rounded-lg border border-red-200 bg-white px-3 text-sm font-semibold text-red-700 shadow-sm hover:bg-red-50">Deactivate</button>
               </>}
-              <button type="button" disabled={!ledger || Number(ledger.totals.outstanding) <= 0 || ledgerLoading} onClick={() => { setPaymentAmount(String(ledger?.totals.outstanding || '')); setPaymentDate(localToday()); setPaymentMethod('CASH'); setPaymentOpen(true); }} className="inline-flex h-11 items-center gap-2 rounded-lg bg-[#c58a00] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#a97000] disabled:cursor-not-allowed disabled:opacity-45"><Wallet size={16} />Record payment</button>
+              <button type="button" disabled={!ledger || Number(ledger.totals.outstanding) <= 0 || ledgerLoading} onClick={() => { setCashPaymentAmount(String(Number(ledger?.totals.outstanding || 0))); setUpiPaymentAmount(''); setPaymentDate(localToday()); setPaymentOpen(true); }} className="inline-flex h-11 items-center gap-2 rounded-lg bg-[#c58a00] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#a97000] disabled:cursor-not-allowed disabled:opacity-45"><Wallet size={16} />Record payment</button>
             </div>
           </div>
 
+          {supplierLoading && !selectedSupplier && <div className="flex flex-col items-center justify-center gap-3 px-5 py-14 text-center text-sm text-[#77736d]"><LoaderOne /><span>Loading suppliers…</span></div>}
           {!selectedSupplier && !supplierLoading && <div className="flex items-center justify-center px-5 py-14 text-center text-sm text-[#77736d]">Select a supplier to see their outstanding</div>}
-          {selectedSupplier && ledgerLoading && <div className="flex items-center justify-center gap-2 p-14 text-sm text-[#77736d]"><LoaderCircle size={18} className="animate-spin" />Loading supplier ledger…</div>}
+          {selectedSupplier && ledgerLoading && <div className="flex flex-col items-center justify-center gap-3 p-14 text-sm text-[#77736d]"><LoaderOne /><span>Loading supplier ledger…</span></div>}
           {selectedSupplier && !ledgerLoading && ledger && (
             <>
               <div className="grid gap-3 p-4 sm:grid-cols-3">
@@ -207,20 +219,19 @@ export const PartyLedgerManagementView: React.FC = () => {
               </div>
               <div className="flex items-center justify-between border-y border-[#efede8] px-5 py-3"><div className="flex items-center gap-2"><Package size={17} className="text-[#a86600]" /><h3 className="font-semibold text-[#272727]">Purchase history</h3></div><span className="rounded-full bg-[#f6f5f2] px-2.5 py-1 text-xs font-semibold text-[#77736d]">{ledger.purchases.length} bills</span></div>
               <div className="overflow-x-auto">
-                <table className="w-full min-w-[850px] border-collapse text-left">
-                  <thead><tr className="h-11 bg-[#f8f7f4] text-xs font-bold uppercase tracking-wide text-[#6d685f]">{['Purchase / date', 'Purchased items', 'Total (₹)', 'Paid (₹)', 'Outstanding (₹)', 'Payments'].map((heading) => <th key={heading} className="px-3 py-2">{heading}</th>)}</tr></thead>
+                <table className="w-full min-w-[720px] border-collapse text-left">
+                  <thead><tr className="h-11 bg-[#f8f7f4] text-xs font-bold uppercase tracking-wide text-[#6d685f]">{['Purchase / date', 'Total (₹)', 'Paid (₹)', 'Outstanding (₹)', 'Payments'].map((heading) => <th key={heading} className="px-3 py-2">{heading}</th>)}</tr></thead>
                   <tbody className="divide-y divide-[#efede8] text-sm text-[#272727]">
-                    {ledger.purchases.map((purchase) => (
+                    {newestFirstPurchases.map((purchase) => (
                       <tr key={purchase.id} className="align-top transition-colors hover:bg-[#fffdf8]">
                         <td className="px-3 py-3"><span className="block font-semibold text-[#a86600]">{purchase.supplierInvoiceNumber || purchase.purchaseNumber}</span><span className="mt-1 block text-xs text-[#77736d]">{String(purchase.date).slice(0, 10)}</span></td>
-                        <td className="max-w-[360px] px-3 py-3">{purchase.items.length ? purchase.items.map((item) => <div key={item.id} className="mb-1 last:mb-0"><span className="font-medium">{item.productName}</span><span className="block text-xs text-[#77736d]">{item.quantity} {item.unitName || ''} × {formatCurrency(Number(item.purchaseRate))} = {formatCurrency(Number(item.lineTotal))}</span></div>) : <span className="text-[#77736d]">No item details</span>}</td>
                         <td className="px-3 py-3 font-semibold">{formatCurrency(Number(purchase.total))}</td>
                         <td className="px-3 py-3">{formatCurrency(Number(purchase.paid))}</td>
                         <td className={`px-3 py-3 font-semibold ${Number(purchase.outstanding) > 0 ? 'text-[#a86600]' : 'text-[#77736d]'}`}>{formatCurrency(Number(purchase.outstanding))}</td>
                         <td className="min-w-[170px] px-3 py-3">{purchase.payments.length ? purchase.payments.map((payment) => <div key={payment.id} className="mb-1 last:mb-0 text-xs text-[#68645e]">{String(payment.date).slice(0, 10)} · {payment.method} · {formatCurrency(Number(payment.amount))}</div>) : <span className="text-[#77736d]">—</span>}</td>
                       </tr>
                     ))}
-                    {ledger.purchases.length === 0 && <tr><td colSpan={6} className="px-4 py-12 text-center text-sm text-[#77736d]">No purchase or payment records for this supplier.</td></tr>}
+                    {ledger.purchases.length === 0 && <tr><td colSpan={5} className="px-4 py-12 text-center text-sm text-[#77736d]">No purchase or payment records for this supplier.</td></tr>}
                   </tbody>
                 </table>
               </div>
@@ -264,10 +275,14 @@ export const PartyLedgerManagementView: React.FC = () => {
             <div className="mb-4 flex items-start justify-between"><div><h3 className="text-lg font-bold text-[#272727]">Record supplier payment</h3><p className="mt-1 text-sm text-[#77736d]">{selectedSupplier.name}</p></div><button type="button" disabled={savingPayment} onClick={() => setPaymentOpen(false)} className="rounded-lg px-2 py-1 text-[#77736d] hover:bg-[#f6f5f2]">✕</button></div>
             <div className="mb-4 rounded-lg bg-[#fbf7ed] p-3 text-sm"><span className="text-[#77736d]">Total outstanding </span><strong>{formatCurrency(Number(ledger.totals.outstanding))}</strong><p className="mt-1 text-xs text-[#77736d]">Payment is allocated to the oldest outstanding bills first.</p></div>
             <div className="grid gap-3">
-              <label className="flex flex-col gap-1 text-sm font-medium text-[#68645e]">Amount (₹)<input type="number" min="0.01" max={Number(ledger.totals.outstanding)} step="0.01" value={paymentAmount} onChange={(event) => setPaymentAmount(event.target.value)} className="h-11 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-[#272727] outline-none focus:border-[#c58a00]" /></label>
+              <div className="grid grid-cols-2 gap-3">
+                <label className="flex flex-col gap-1 text-sm font-medium text-[#68645e]">Cash amount (₹)<NumericTextInput min="0" max={Number(ledger.totals.outstanding)} value={cashPaymentAmount} onValueChange={setCashPaymentAmount} className="h-11 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-[#272727] outline-none focus:border-[#c58a00]" /></label>
+                <label className="flex flex-col gap-1 text-sm font-medium text-[#68645e]">UPI amount (₹)<NumericTextInput min="0" max={Number(ledger.totals.outstanding)} value={upiPaymentAmount} onValueChange={setUpiPaymentAmount} className="h-11 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-[#272727] outline-none focus:border-[#c58a00]" /></label>
+              </div>
+              <p className="text-xs text-[#77736d]">Enter either amount or both. Total payment: {formatCurrency((Number(cashPaymentAmount) || 0) + (Number(upiPaymentAmount) || 0))}</p>
               <div className="grid grid-cols-2 gap-3">
                 <label className="flex flex-col gap-1 text-sm font-medium text-[#68645e]">Payment date<input type="date" value={paymentDate} onChange={(event) => setPaymentDate(event.target.value)} className="h-11 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-[#272727] outline-none focus:border-[#c58a00]" /></label>
-                <label className="flex flex-col gap-1 text-sm font-medium text-[#68645e]">Method<select value={paymentMethod} onChange={(event) => setPaymentMethod(event.target.value as 'CASH' | 'UPI')} className="h-11 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-[#272727] outline-none focus:border-[#c58a00]"><option value="CASH">Cash</option><option value="UPI">UPI</option></select></label>
+                <div className="flex items-end text-xs text-[#77736d]">Allocated oldest outstanding first.</div>
               </div>
             </div>
             <div className="mt-5 flex justify-end gap-2 border-t border-[#efede8] pt-3"><button type="button" disabled={savingPayment} onClick={() => setPaymentOpen(false)} className="h-10 rounded-lg border border-[#e9e3d9] px-4 text-sm font-semibold text-[#555]">Cancel</button><button type="button" disabled={savingPayment} onClick={() => void submitPayment()} className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#ffe4a0] px-4 text-sm font-semibold text-[#493819] shadow-sm disabled:opacity-60">{savingPayment && <LoaderCircle size={15} className="animate-spin" />}{savingPayment ? 'Saving…' : 'Save payment'}</button></div>

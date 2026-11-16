@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import {
   NavScreen,
   Product,
@@ -15,6 +15,8 @@ import {
   ApiBrand,
   ApiUnit,
   ApiSupplier,
+  ApiCreditBill,
+  ApiExpense,
   AUTH_SESSION_KEY,
   AUTH_SESSION_EXPIRED_EVENT,
   AUTH_SESSION_REFRESHED_EVENT,
@@ -30,6 +32,13 @@ import {
   createStockAdjustmentRequest,
   createSaleRequest,
   createCustomerPaymentRequest,
+  getCustomerCreditBillsRequest,
+  createCustomerCreditBillRequest,
+  recordManualCreditBillPaymentRequest,
+  createExpenseRequest,
+  getExpensesRequest,
+  updateExpenseRequest,
+  getSupplierLedgerReport,
   createPurchaseRequest,
   createSupplierPaymentRequest,
   cancelPurchaseRequest,
@@ -44,7 +53,9 @@ import {
   logoutRequest,
   ProductPayload,
   CreateSalePayload,
+  CreateCreditBillPayload,
   CreatePurchasePayload,
+  ExpensePayload,
   PaymentMethod,
   CustomerPayload,
   updateCustomerRequest,
@@ -62,6 +73,24 @@ const toPaymentMethodLabel = (method: PaymentMethod) => ({
   BANK_TRANSFER: 'Bank transfer',
   CHEQUE: 'Cheque',
 })[method];
+
+const mapCreditBill = (bill: ApiCreditBill): CreditBill => ({
+  id: bill.id,
+  saleId: bill.saleId,
+  customerId: bill.customerId,
+  paidAmount: Number(bill.paidAmount),
+  billDate: bill.billDate,
+  billNumber: bill.billNumber,
+  partyName: bill.partyName,
+  gstin: '',
+  term: bill.term,
+  status: bill.status,
+  priorBalance: Number(bill.priorBalance),
+  billAmount: Number(bill.billAmount),
+  netDue: Number(bill.netDue),
+  dueDate: bill.dueDate,
+  remarks: bill.remarks || undefined,
+});
 
 const DEMO_STORAGE_PREFIX = 'able_lubes_demo_v1_';
 const isUuid = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
@@ -81,22 +110,15 @@ const loadAuthSession = (): AuthSession | null => {
   }
 };
 
-const DEMO_RECORD_IDS: Record<string, Set<string>> = {
-  purchases: new Set(['pur-1', 'pur-2', 'pur-3']),
-};
-
-const loadSavedData = <T extends { id: string }>(key: string): T[] => {
-  try {
-    const value = localStorage.getItem(DEMO_STORAGE_PREFIX + key);
-    if (!value) return [];
-    const records = JSON.parse(value) as T[];
-    if (!Array.isArray(records)) return [];
-    const demoIds = DEMO_RECORD_IDS[key] || new Set<string>();
-    return records.filter((record) => !demoIds.has(record.id));
-  } catch {
-    return [];
-  }
-};
+const mapExpense = (expense: ApiExpense): Expense => ({
+  id: expense.id,
+  date: String(expense.expenseDate).slice(0, 10),
+  description: expense.description || '',
+  amount: Number(expense.amount) || 0,
+  category: expense.category || '',
+  paymentMethod: expense.paymentMethod === 'UPI' ? 'UPI' : 'Cash',
+  notes: expense.notes || undefined,
+});
 
 const mapProduct = (product: ApiProduct): Product => ({
   id: product.id,
@@ -175,20 +197,19 @@ interface AppContextType {
   adjustProductStock: (id: string, quantity: number, reason?: string) => Promise<void>;
   deleteProduct: (id: string) => Promise<void>;
 
-  // Sales
-  sales: SaleRecord[];
   addSale: (sale: Omit<SaleRecord, 'id'>) => Promise<boolean>;
 
   // Credit Bills
   creditBills: CreditBill[];
-  addCreditBill: (bill: Omit<CreditBill, 'id'>) => void;
+  creditBillLoading: boolean;
+  creditBillError: string | null;
+  addCreditBill: (bill: Omit<CreditBill, 'id'> & { customerId?: string }) => Promise<boolean>;
   collectCreditPayment: (billNumber: string, amount: number, paymentMethod: string) => Promise<boolean>;
 
   // Expenses
   expenses: Expense[];
-  addExpense: (expense: Omit<Expense, 'id'>) => void;
-  updateExpense: (id: string, updates: Partial<Expense>) => void;
-  deleteExpense: (id: string) => void;
+  addExpense: (expense: Omit<Expense, 'id'>) => Promise<boolean>;
+  updateExpense: (id: string, updates: Partial<Expense>) => Promise<boolean>;
 
   // Purchase Bills
   purchases: PurchaseBill[];
@@ -196,7 +217,6 @@ interface AppContextType {
   cancelPurchaseBill: (id: string) => Promise<boolean>;
 
   // Party Ledger
-  partyLedger: PartyLedgerEntry[];
   customers: Party[];
   addCustomer: (customer: CustomerPayload) => Promise<void>;
   updateCustomer: (id: string, updates: Partial<CustomerPayload>) => Promise<void>;
@@ -206,13 +226,6 @@ interface AppContextType {
   updateSupplier: (id: string, updates: Partial<SupplierPayload>) => Promise<void>;
   deactivateSupplier: (id: string) => Promise<void>;
   supplierLedger: PartyLedgerEntry[];
-  recordPartyPayment: (
-    invoiceNumber: string,
-    partyName: string,
-    amount: number,
-    paymentDate: string,
-    paymentMode: string
-  ) => void;
   recordSupplierPayment: (invoiceNumber: string, partyName: string, amount: number, paymentDate: string, paymentMode: string, purchaseId: string, outstandingBalance: number, invoiceDate?: string) => Promise<boolean>;
 
   // Quick Action Modals
@@ -230,6 +243,14 @@ interface AppContextType {
     couponDiscount?: number;
     total: number;
     mode: string;
+    creditStatement?: {
+      status: string;
+      dueDate?: string;
+      creditTerm?: string;
+      billAmount: number;
+      amountPaid: number;
+      balanceDue: number;
+    };
   } | null;
   setActiveReceiptToPrint: (receipt: any) => void;
 }
@@ -277,23 +298,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [activeReceiptToPrint, setActiveReceiptToPrint] = useState<any>(null);
 
-  // Records without a backend list endpoint are kept locally, with no seeded sample records.
+  // Server records are held in memory only as view data; persistent business records come from the API.
   const [products, setProducts] = useState<Product[]>([]);
   const [brands, setBrands] = useState<ApiBrand[]>([]);
   const [units, setUnits] = useState<ApiUnit[]>([]);
-  const [sales, setSales] = useState<SaleRecord[]>([]);
   const [creditBills, setCreditBills] = useState<CreditBill[]>([]);
+  const [creditBillLoading, setCreditBillLoading] = useState(false);
+  const [creditBillError, setCreditBillError] = useState<string | null>(null);
   const [expenses, setExpenses] = useState<Expense[]>([]);
-  const [purchases, setPurchases] = useState<PurchaseBill[]>(() => loadSavedData('purchases'));
-  const [partyLedger, setPartyLedger] = useState<PartyLedgerEntry[]>([]);
+  const [purchases, setPurchases] = useState<PurchaseBill[]>([]);
   const [supplierLedger, setSupplierLedger] = useState<PartyLedgerEntry[]>([]);
   const [customers, setCustomers] = useState<Party[]>([]);
   const [suppliers, setSuppliers] = useState<Party[]>([]);
 
-  // Remove old browser-cached CRM records. Purchases remain the sole record-data cache.
+  // Remove legacy browser-cached CRM records. Saved business records load from the API.
   useEffect(() => {
-    ['sales', 'credit_bills', 'expenses', 'customer_ledger', 'supplier_ledger', 'products', 'customers', 'suppliers']
-      .forEach((key) => localStorage.removeItem(DEMO_STORAGE_PREFIX + key));
+    for (let index = localStorage.length - 1; index >= 0; index -= 1) {
+      const key = localStorage.key(index);
+      if (key?.startsWith(DEMO_STORAGE_PREFIX) || key === 'able_lubes_purchase_draft_v1' || key?.startsWith('able_lubes_purchase_draft_v1:')) {
+        localStorage.removeItem(key);
+      }
+    }
   }, []);
 
   useEffect(() => {
@@ -323,6 +348,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     let cancelled = false;
     const token = authSession?.token;
     if (!token) {
+      setCreditBills([]);
+      setCreditBillError(null);
+      setCreditBillLoading(false);
+      return;
+    }
+    setCreditBillLoading(true);
+    setCreditBillError(null);
+    getCustomerCreditBillsRequest(token)
+      .then((rows) => { if (!cancelled) setCreditBills(rows.map(mapCreditBill)); })
+      .catch((error) => {
+        if (!cancelled) setCreditBillError(error instanceof Error ? error.message : 'Customer credit bills could not be loaded.');
+      })
+      .finally(() => { if (!cancelled) setCreditBillLoading(false); });
+    return () => { cancelled = true; };
+  }, [authSession?.token]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const token = authSession?.token;
+    if (!token) {
       setBrands([]);
       setUnits([]);
       setCatalogError(null);
@@ -345,10 +390,80 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => { cancelled = true; };
   }, [authSession?.token]);
 
-  // Keep the purchase history cache and its separate unfinished-form draft.
   useEffect(() => {
-    localStorage.setItem(DEMO_STORAGE_PREFIX + 'purchases', JSON.stringify(purchases));
-  }, [purchases]);
+    let cancelled = false;
+    const token = authSession?.token;
+    if (!token || !suppliers.length) {
+      setPurchases([]);
+      setSupplierLedger([]);
+      return;
+    }
+    Promise.all(suppliers.map((supplier) => getSupplierLedgerReport(token, supplier.id)))
+      .then((ledgers: any[]) => {
+        if (cancelled) return;
+        const purchaseRows: PurchaseBill[] = [];
+        const ledgerRows: PartyLedgerEntry[] = [];
+        ledgers.forEach((ledger) => {
+          (ledger.purchases || []).forEach((purchase: any) => {
+            const invoiceNumber = purchase.supplierInvoiceNumber || purchase.purchaseNumber;
+            const amountPaid = Number(purchase.paid) || 0;
+            const totalAmount = Number(purchase.total) || 0;
+            purchaseRows.push({
+              id: purchase.id,
+              status: Number(purchase.outstanding) > 0 ? (amountPaid > 0 ? 'PARTIALLY_PAID' : 'UNPAID') : 'PAID',
+              invoiceNumber,
+              partyName: ledger.supplier?.name || '',
+              invoiceDate: String(purchase.date || '').slice(0, 10),
+              items: (purchase.items || []).map((item: any) => ({
+                id: item.id,
+                productId: item.productId || undefined,
+                name: item.productName || 'Product',
+                unit: item.unitName || '',
+                quantity: Number(item.quantity) || 0,
+                sellingPrice: 0,
+                purchaseRate: Number(item.purchaseRate) || 0,
+                totalAmount: Number(item.lineTotal) || 0,
+              })),
+              subtotal: totalAmount,
+              taxShipping: 0,
+              totalAmount,
+              amountPaid,
+              outstandingBalance: Number(purchase.outstanding) || 0,
+            });
+            (purchase.payments || []).forEach((payment: any) => ledgerRows.push({
+              id: payment.id,
+              partyName: ledger.supplier?.name || '',
+              invoiceNumber,
+              invoiceDate: String(purchase.date || '').slice(0, 10),
+              billAmount: 0,
+              paymentDate: String(payment.date || '').slice(0, 10),
+              amountPaid: Number(payment.amount) || 0,
+              outstandingBalance: Number(purchase.outstanding) || 0,
+              transactionType: 'PAYMENTS',
+              paymentMode: toPaymentMethodLabel(payment.method) || payment.method,
+              partyType: 'supplier',
+            }));
+          });
+        });
+        purchaseRows.sort((a, b) => b.invoiceDate.localeCompare(a.invoiceDate));
+        setPurchases(purchaseRows);
+        setSupplierLedger(ledgerRows);
+      })
+      .catch((error) => {
+        if (!cancelled) showToast(error instanceof Error ? error.message : 'Purchase records could not be loaded.', 'error');
+      });
+    return () => { cancelled = true; };
+  }, [authSession?.token, suppliers]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const token = authSession?.token;
+    if (!token) { setExpenses([]); return; }
+    getExpensesRequest(token)
+      .then((rows) => { if (!cancelled) setExpenses(rows.map(mapExpense)); })
+      .catch((error) => { if (!cancelled) showToast(error instanceof Error ? error.message : 'Expenses could not be loaded.', 'error'); });
+    return () => { cancelled = true; };
+  }, [authSession?.token]);
 
   useEffect(() => {
     let cancelled = false;
@@ -409,14 +524,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  const showToast = (message: string, type: 'success' | 'info' | 'warning' | 'error' = 'success') => {
+  const showToast = useCallback((message: string, type: 'success' | 'info' | 'warning' | 'error' = 'success') => {
     const id = Date.now().toString();
     setToast({ id, message, type });
-  };
+  }, []);
 
-  const hideToast = () => {
+  const hideToast = useCallback(() => {
     setToast(null);
-  };
+  }, []);
 
   const login = async (email: string, password: string, expectedRole: UserRole) => {
     const session = await loginRequest(email, password);
@@ -670,8 +785,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       showToast('Select a valid registered customer before completing this sale.', 'error');
       return false;
     }
+    const initialTenderAmount = saleData.paymentMode === 'Split'
+      ? (saleData.paymentTenders || []).reduce((total, tender) => total + tender.amount, 0)
+      : saleData.paymentMode === 'Credit' ? 0 : saleData.amount;
+    const creditAmount = Math.max(0, saleData.amount - initialTenderAmount);
+    if (creditAmount > 0 && !customer) {
+      showToast('Select a registered customer for credit balances.', 'error');
+      return false;
+    }
     const payload: CreateSalePayload = {
       ...(customer ? { customerId: customer.id } : {}),
+      ...(customer && creditAmount > 0 ? {
+        creditBill: {
+          billNumber: `CR-${saleData.billNumber}`,
+          dueDate: saleData.creditDueDate || new Date().toISOString().slice(0, 10),
+          term: 'Due on agreed date',
+          priorBalance: creditBills.filter((bill) => bill.customerId === customer.id || bill.partyName === customer.name).reduce((sum, bill) => sum + bill.netDue, 0),
+        },
+      } : {}),
       discountAmount: saleData.billDiscountAmount || 0,
       ...(saleData.couponCode && saleData.couponPrice !== undefined
         ? {
@@ -736,20 +867,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ...saleData,
       id: apiSale.id,
       amount: Number(apiSale.totalAmount),
+      paymentTenders: tenderPayments,
       costOfGoodsSold: requested.reduce((sum, item) => sum + item.quantity * item.purchaseRate, 0),
     };
-    setSales((prev) => [newSale, ...prev]);
     setProducts((prev) => prev.map((product) => {
       const qty = quantityByProduct[product.id];
       return qty ? { ...product, quantity: product.quantity - qty } : product;
     }));
 
-    // If sale was made via Credit, add to credit bills and party ledger
-    if (newSale.paymentMode === 'Credit' || (newSale.paymentMode === 'Split' && paymentRecordedAmount < newSale.amount)) {
+    // Keep the current view responsive; the backend credit-bill row is created with the sale.
+    if (creditAmount > 0 && customer) {
       const priorBalance = creditBills.filter((bill) => bill.partyName === newSale.customerName).reduce((sum, bill) => sum + bill.netDue, 0);
       const outstanding = Math.max(0, newSale.amount - paymentRecordedAmount);
       const newCreditBill: CreditBill = {
         id: 'cr-' + Date.now(),
+        saleId: apiSale.id,
+        customerId: customer.id,
         billDate: new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
         billNumber: 'CR-' + newSale.billNumber,
         partyName: newSale.customerName,
@@ -763,21 +896,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         remarks: `Generated from Sales Bill ${newSale.billNumber}`,
       };
       setCreditBills((prev) => [newCreditBill, ...prev]);
+      try {
+        const persistedBills = await getCustomerCreditBillsRequest(authSession.token);
+        setCreditBills(persistedBills.map(mapCreditBill));
+        setCreditBillError(null);
+      } catch (error) {
+        setCreditBillError(error instanceof Error ? error.message : 'Customer credit bills could not be refreshed.');
+      }
 
-      // Also append to party ledger
-      const newLedgerEntry: PartyLedgerEntry = {
-        id: 'pl-' + Date.now(),
-        partyName: newSale.customerName,
-        invoiceNumber: 'CR-' + newSale.billNumber,
-        invoiceDate: new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
-        billAmount: newSale.amount,
-        paymentDate: paymentRecordedAmount > 0 ? new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : '-',
-        amountPaid: paymentRecordedAmount,
-        outstandingBalance: outstanding,
-        transactionType: 'INVOICES',
-        partyType: 'customer',
-      };
-      setPartyLedger((prev) => [newLedgerEntry, ...prev]);
     }
 
     if (paymentWarning) {
@@ -792,29 +918,39 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // Credit Bill Actions
-  const addCreditBill = (billData: Omit<CreditBill, 'id'>) => {
-    const newBill: CreditBill = {
-      ...billData,
-      id: 'cr-' + Date.now(),
+  const addCreditBill = async (billData: Omit<CreditBill, 'id'> & { customerId?: string }): Promise<boolean> => {
+    if (!authSession) {
+      showToast('Sign in to save a customer credit bill.', 'error');
+      return false;
+    }
+    const customer = customers.find((entry) => entry.id === billData.customerId || entry.name === billData.partyName);
+    if (!customer) {
+      showToast('Select an active customer before saving this credit bill.', 'error');
+      return false;
+    }
+    const payload: CreateCreditBillPayload = {
+      customerId: customer.id,
+      billNumber: billData.billNumber,
+      billDate: billData.billDate,
+      dueDate: billData.dueDate,
+      term: billData.term,
+      billAmount: billData.billAmount,
+      priorBalance: billData.priorBalance,
+      remarks: billData.remarks,
     };
-    setCreditBills((prev) => [newBill, ...prev]);
+    try {
+      const created = await createCustomerCreditBillRequest(authSession.token, payload);
+      const newBill = mapCreditBill(created);
+      setCreditBills((prev) => [newBill, ...prev.filter((bill) => bill.id !== newBill.id)]);
+      setCreditBillError(null);
 
-    // Append to party ledger
-    const newLedgerEntry: PartyLedgerEntry = {
-      id: 'pl-' + Date.now(),
-      partyName: newBill.partyName,
-      invoiceNumber: newBill.billNumber,
-      invoiceDate: newBill.billDate,
-      billAmount: newBill.billAmount,
-      paymentDate: '-',
-      amountPaid: 0,
-      outstandingBalance: newBill.netDue,
-      transactionType: 'INVOICES',
-      partyType: 'customer',
-    };
-    setPartyLedger((prev) => [newLedgerEntry, ...prev]);
 
-    showToast(`Credit Bill ${newBill.billNumber} recorded for ${newBill.partyName}.`);
+      showToast(`Credit Bill ${newBill.billNumber} recorded for ${newBill.partyName}.`);
+      return true;
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'The credit bill could not be saved.', 'error');
+      return false;
+    }
   };
 
   const collectCreditPayment = async (billNumber: string, amount: number, paymentMethod: string): Promise<boolean> => {
@@ -823,86 +959,100 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       showToast(target ? 'Receipt must be positive and cannot exceed the outstanding balance.' : 'Credit bill was not found.', 'error');
       return false;
     }
-    const sale = sales.find((entry) => entry.billNumber === billNumber.replace(/^CR-/, ''));
-    const customer = customers.find((entry) => entry.name === target.partyName);
+    const customer = customers.find((entry) => entry.id === target.customerId || entry.name === target.partyName);
     const method = paymentMethod.toLowerCase().includes('coupon') ? 'COUPON' : paymentMethod.toLowerCase().includes('upi') ? 'UPI' : 'CASH';
-    if (!authSession || !sale) {
-      showToast('This credit bill is not linked to a saved API sale.', 'error');
+    if (!authSession) {
+      showToast('Sign in to record a credit payment.', 'error');
       return false;
     }
+    let updatedBill: CreditBill;
     try {
-      await createCustomerPaymentRequest(authSession.token, {
-        ...(customer ? { customerId: customer.id } : {}),
-        saleId: sale.id,
-        amount,
-        method,
-        paymentDate: new Date().toISOString(),
-      });
+      if (target.saleId) {
+        await createCustomerPaymentRequest(authSession.token, {
+          ...(customer ? { customerId: customer.id } : {}),
+          saleId: target.saleId,
+          amount,
+          method,
+          paymentDate: new Date().toISOString(),
+        });
+        updatedBill = {
+          ...target,
+          paidAmount: (target.paidAmount || 0) + amount,
+          netDue: Math.max(0, target.netDue - amount),
+          status: target.netDue <= amount ? 'Settled' : 'Partially Paid',
+        };
+        void getCustomerCreditBillsRequest(authSession.token)
+          .then((rows) => {
+            setCreditBills(rows.map(mapCreditBill));
+            setCreditBillError(null);
+          })
+          .catch((error) => setCreditBillError(error instanceof Error ? error.message : 'Customer credit bills could not be refreshed.'));
+      } else {
+        if (method === 'COUPON') {
+          showToast('Manual credit bill payments support Cash or UPI.', 'error');
+          return false;
+        }
+        const updated = await recordManualCreditBillPaymentRequest(authSession.token, target.id, {
+          amount,
+          method,
+          paymentDate: new Date().toISOString(),
+        });
+        updatedBill = mapCreditBill(updated);
+      }
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'The credit payment could not be saved.', 'error');
       return false;
     }
-    const newDue = target.netDue - amount;
-    setCreditBills((prev) => prev.map((bill) => bill.id === target.id ? {
-      ...bill,
-      netDue: newDue,
-      status: newDue === 0 ? 'Settled' : 'Partially Paid',
-    } : bill));
-
-    // Also update party ledger
-    const today = new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-    setPartyLedger((prev) =>
-      prev.map((pl) => {
-        if (pl.invoiceNumber === billNumber && pl.partyType === 'customer' && pl.transactionType === 'INVOICES') {
-          const newPaid = pl.amountPaid + amount;
-          return {
-            ...pl,
-            paymentDate: today,
-            amountPaid: newPaid,
-            outstandingBalance: newDue,
-            paymentMode: paymentMethod,
-          };
-        }
-        return pl;
-      })
-    );
-
-    setPartyLedger((prev) => [{
-      id: `payment-${Date.now()}`,
-      partyName: target.partyName,
-      invoiceNumber: billNumber,
-      invoiceDate: target.billDate,
-      billAmount: 0,
-      paymentDate: today,
-      amountPaid: amount,
-      outstandingBalance: newDue,
-      transactionType: 'PAYMENTS',
-      paymentMode: paymentMethod,
-      partyType: 'customer',
-    }, ...prev]);
+    const newDue = updatedBill.netDue;
+    setCreditBills((prev) => prev.map((bill) => bill.id === target.id ? updatedBill : bill));
 
     showToast(`Payment receipt of ${formatCurrency(amount)} recorded for bill ${billNumber} via ${paymentMethod}.`);
     return true;
   };
 
   // Expense Actions
-  const addExpense = (expenseData: Omit<Expense, 'id'>) => {
-    const newExpense: Expense = {
-      ...expenseData,
-      id: 'exp-' + Date.now(),
+  const addExpense = async (expenseData: Omit<Expense, 'id'>): Promise<boolean> => {
+    if (!authSession) { showToast('Sign in to save an expense.', 'error'); return false; }
+    const payload: ExpensePayload = {
+      description: expenseData.description.trim(),
+      category: expenseData.category || 'General',
+      amount: expenseData.amount,
+      expenseDate: expenseData.date,
+      paymentMethod: expenseData.paymentMethod?.toLowerCase() === 'upi' ? 'UPI' : 'CASH',
+      notes: expenseData.notes || undefined,
     };
-    setExpenses((prev) => [newExpense, ...prev]);
-    showToast(`Expense of ${formatCurrency(newExpense.amount)}${newExpense.description.trim() ? ` for "${newExpense.description.trim()}"` : ''} logged.`);
+    try {
+      const created = await createExpenseRequest(authSession.token, payload);
+      const saved = mapExpense(created);
+      setExpenses((prev) => [saved, ...prev.filter((entry) => entry.id !== saved.id)]);
+      showToast(`Expense of ${formatCurrency(saved.amount)}${saved.description ? ` for "${saved.description}"` : ''} logged.`);
+      return true;
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'The expense could not be saved.', 'error');
+      return false;
+    }
   };
 
-  const deleteExpense = (id: string) => {
-    setExpenses((prev) => prev.filter((e) => e.id !== id));
-    showToast(`Expense entry deleted.`, 'info');
-  };
-
-  const updateExpense = (id: string, updates: Partial<Expense>) => {
-    setExpenses((prev) => prev.map((expense) => expense.id === id ? { ...expense, ...updates } : expense));
-    showToast('Expense updated.');
+  const updateExpense = async (id: string, updates: Partial<Expense>): Promise<boolean> => {
+    if (!authSession) { showToast('Sign in to update an expense.', 'error'); return false; }
+    const payload: Partial<ExpensePayload> = {
+      ...(updates.description !== undefined ? { description: updates.description.trim() } : {}),
+      ...(updates.category !== undefined ? { category: updates.category } : {}),
+      ...(updates.amount !== undefined ? { amount: updates.amount } : {}),
+      ...(updates.date !== undefined ? { expenseDate: updates.date } : {}),
+      ...(updates.paymentMethod !== undefined ? { paymentMethod: updates.paymentMethod.toLowerCase() === 'upi' ? 'UPI' : 'CASH' } : {}),
+      ...(updates.notes !== undefined ? { notes: updates.notes || null } : {}),
+    };
+    try {
+      const updated = await updateExpenseRequest(authSession.token, id, payload);
+      const saved = mapExpense(updated);
+      setExpenses((prev) => prev.map((expense) => expense.id === id ? saved : expense));
+      showToast('Expense updated.');
+      return true;
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'The expense could not be updated.', 'error');
+      return false;
+    }
   };
 
   // Purchase Bill Actions
@@ -1070,70 +1220,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return true;
   };
 
-  // Party Ledger Actions
-  const recordPartyPayment = (
-    invoiceNumber: string,
-    partyName: string,
-    amount: number,
-    paymentDate: string,
-    paymentMode: string
-  ) => {
-    const target = partyLedger.find((entry) => entry.invoiceNumber === invoiceNumber && entry.partyType === 'customer' && entry.transactionType === 'INVOICES');
-    const bill = creditBills.find((entry) => entry.billNumber === invoiceNumber);
-    const due = bill?.netDue ?? target?.outstandingBalance ?? 0;
-    if (!target || amount <= 0 || amount > due) {
-      showToast(target ? 'Payment cannot exceed the outstanding balance.' : 'Customer invoice was not found.', 'error');
-      return;
-    }
-    const outstanding = due - amount;
-    setPartyLedger((prev) =>
-      prev.map((entry) => {
-        if (entry.invoiceNumber === invoiceNumber && entry.partyType === 'customer' && entry.transactionType === 'INVOICES') {
-          const newPaid = entry.amountPaid + amount;
-          return {
-            ...entry,
-            paymentDate,
-            amountPaid: newPaid,
-            outstandingBalance: outstanding,
-            paymentMode,
-          };
-        }
-        return entry;
-      })
-    );
-
-    setPartyLedger((prev) => [{
-      id: `payment-${Date.now()}`,
-      partyName,
-      invoiceNumber,
-      invoiceDate: target.invoiceDate,
-      billAmount: 0,
-      paymentDate,
-      amountPaid: amount,
-      outstandingBalance: outstanding,
-      transactionType: 'PAYMENTS',
-      paymentMode,
-      partyType: 'customer',
-    }, ...prev]);
-
-    // Also update credit bill if matching
-    setCreditBills((prev) =>
-      prev.map((cb) => {
-        if (cb.billNumber === invoiceNumber && cb.partyName === partyName) {
-          const newNetDue = Math.max(0, cb.netDue - amount);
-          return {
-            ...cb,
-            netDue: newNetDue,
-            status: newNetDue === 0 ? 'Settled' : 'Partially Paid',
-          };
-        }
-        return cb;
-      })
-    );
-
-    showToast(`Payment of ${formatCurrency(amount)} recorded for ${invoiceNumber}.`);
-  };
-
   const recordSupplierPayment = async (invoiceNumber: string, partyName: string, amount: number, paymentDate: string, paymentMode: string, purchaseId: string, outstandingBalance: number, invoiceDate?: string): Promise<boolean> => {
     const purchase = purchases.find((entry) => entry.id === purchaseId);
     const due = outstandingBalance;
@@ -1232,20 +1318,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateProduct,
         adjustProductStock,
         deleteProduct,
-        sales,
         addSale,
         creditBills,
+        creditBillLoading,
+        creditBillError,
         addCreditBill,
         collectCreditPayment,
         expenses,
         addExpense,
         updateExpense,
-        deleteExpense,
         purchases,
         addPurchaseBill,
         cancelPurchaseBill,
-        partyLedger,
-        recordPartyPayment,
         customers,
         addCustomer,
         updateCustomer,

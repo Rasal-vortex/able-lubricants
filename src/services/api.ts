@@ -26,6 +26,25 @@ export interface DashboardSummary {
   }>;
 }
 
+export interface ApiExpense {
+  id: string;
+  description: string;
+  category: string;
+  amount: string | number;
+  expenseDate: string;
+  paymentMethod?: string | null;
+  notes?: string | null;
+}
+
+export interface ExpensePayload {
+  description?: string;
+  category: string;
+  amount: number;
+  expenseDate?: string;
+  paymentMethod?: 'CASH' | 'UPI' | null;
+  notes?: string | null;
+}
+
 interface ApiEnvelope<T> {
   success?: boolean;
   data?: T;
@@ -210,6 +229,7 @@ export interface ApiProduct {
 
 export interface CreateSalePayload {
   customerId?: string;
+  creditBill?: { billNumber: string; dueDate: string; term: string; priorBalance: number };
   discountAmount?: number;
   couponCode?: string;
   couponPrice?: number;
@@ -242,6 +262,35 @@ export interface ApiSale {
     totalAmount: string | number;
   }>;
   createdAt?: string;
+}
+
+export interface ApiCreditBill {
+  id: string;
+  saleId?: string | null;
+  customerId: string;
+  partyName: string;
+  billNumber: string;
+  billDate: string;
+  dueDate: string;
+  term: string;
+  status: 'Overdue' | 'Partially Paid' | 'Unpaid' | 'Settled';
+  priorBalance: string | number;
+  billAmount: string | number;
+  paidAmount: string | number;
+  netDue: string | number;
+  remarks?: string | null;
+  payments: Array<{ id: string; amount: string | number; method: string; date: string }>;
+}
+
+export interface CreateCreditBillPayload {
+  customerId: string;
+  billNumber: string;
+  billDate: string;
+  dueDate: string;
+  term: string;
+  billAmount: number;
+  priorBalance: number;
+  remarks?: string;
 }
 
 export interface ApiCoupon {
@@ -338,6 +387,11 @@ export const getProfitReport = (token: string, from: string, to: string) => {
   return apiRequest<any>(`/reports/profit?${query.toString()}`, {}, token);
 };
 
+export const getSalesReport = (token: string, from: string, to: string) => {
+  const query = new URLSearchParams({ from, to });
+  return apiRequest<any>(`/reports/sales?${query.toString()}`, {}, token);
+};
+
 export const getSupplierOutstandingReport = (token: string) =>
   apiRequest<any[]>('/reports/suppliers/outstanding', {}, token);
 
@@ -391,6 +445,28 @@ export const getUnits = (token: string) => getAllPages<ApiUnit>('/units', token)
 export const getDashboardSummary = (token: string, month: string) =>
   apiRequest<DashboardSummary>(`/dashboard/summary?month=${encodeURIComponent(month)}`, {}, token);
 
+export async function getExpensesRequest(token: string, from?: string, to?: string): Promise<ApiExpense[]> {
+  const all: ApiExpense[] = [];
+  let page = 1;
+  let totalPages = 1;
+  do {
+    const query = new URLSearchParams({ page: String(page), limit: '100' });
+    if (from) query.set('from', from);
+    if (to) query.set('to', to);
+    const response = await requestEnvelope<ApiExpense[]>(`/expenses?${query.toString()}`, {}, token);
+    all.push(...(response.data || []));
+    totalPages = response.meta?.totalPages ?? page;
+    page += 1;
+  } while (page <= totalPages && page <= 100);
+  return all;
+}
+
+export const createExpenseRequest = (token: string, payload: ExpensePayload) =>
+  apiRequest<ApiExpense>('/expenses', { method: 'POST', body: JSON.stringify(payload) }, token);
+
+export const updateExpenseRequest = (token: string, id: string, payload: Partial<ExpensePayload>) =>
+  apiRequest<ApiExpense>(`/expenses/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(payload) }, token);
+
 export const createBrandRequest = (token: string, name: string) =>
   apiRequest<ApiBrand>('/brands', { method: 'POST', body: JSON.stringify({ name, active: true }) }, token);
 
@@ -427,6 +503,15 @@ export const createStockAdjustmentRequest = (token: string, payload: StockAdjust
 
 export const createSaleRequest = (token: string, payload: CreateSalePayload) =>
   apiRequest<ApiSale>('/sales', { method: 'POST', body: JSON.stringify(payload) }, token);
+
+export const getCustomerCreditBillsRequest = (token: string) =>
+  apiRequest<ApiCreditBill[]>('/credit-bills', {}, token);
+
+export const createCustomerCreditBillRequest = (token: string, payload: CreateCreditBillPayload) =>
+  apiRequest<ApiCreditBill>('/credit-bills', { method: 'POST', body: JSON.stringify(payload) }, token);
+
+export const recordManualCreditBillPaymentRequest = (token: string, id: string, payload: { amount: number; paymentDate?: string; method: 'CASH' | 'UPI' }) =>
+  apiRequest<ApiCreditBill>(`/credit-bills/${encodeURIComponent(id)}/payments`, { method: 'POST', body: JSON.stringify(payload) }, token);
 
 export const getCouponsRequest = async (
   token: string,
@@ -484,7 +569,15 @@ export const cancelPurchaseRequest = (token: string, purchaseId: string) =>
 
 export const createSupplierPaymentRequest = (
   token: string,
-  payload: { supplierId: string; purchaseId: string; amount: number; method: PaymentMethod; paymentDate?: string; notes?: string },
+  payload: {
+    supplierId: string;
+    purchaseId: string;
+    paymentDate?: string;
+    notes?: string;
+    amount?: number;
+    method?: PaymentMethod;
+    tenders?: Array<{ method: 'CASH' | 'UPI'; amount: number }>;
+  },
 ) => apiRequest('/supplier-payments', { method: 'POST', body: JSON.stringify(payload) }, token);
 
 

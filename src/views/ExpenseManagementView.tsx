@@ -1,7 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { LoaderCircle } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { Expense } from '../types';
 import { formatCurrency } from '../utils/currency';
+import { NumericTextInput } from '../components/ui/NumericTextInput';
 
 interface ExpenseManagementViewProps {
   embedded?: boolean;
@@ -11,7 +13,7 @@ interface ExpenseManagementViewProps {
 }
 
 export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ embedded = false, dateRange, sharedSearchTerm = '', onRegisterAddExpense }) => {
-  const { expenses, addExpense, updateExpense, deleteExpense, showToast, setActiveReceiptToPrint } = useApp();
+  const { expenses, addExpense, updateExpense, showToast } = useApp();
 
   const [searchTerm, setSearchTerm] = useState('');
   const [activePeriod, setActivePeriod] = useState<'month' | 'custom'>('month');
@@ -22,6 +24,8 @@ export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ em
 
   // Modal State
   const [modalOpen, setModalOpen] = useState(false);
+  const [savingExpense, setSavingExpense] = useState(false);
+  const savingExpenseRef = useRef(false);
   const [modalMode, setModalMode] = useState<'add' | 'edit'>('add');
   const [editingId, setEditingId] = useState<string | null>(null);
 
@@ -75,44 +79,41 @@ export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ em
     setModalOpen(true);
   };
 
-  const handleFormSubmit = (e: React.FormEvent) => {
+  const handleFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (savingExpenseRef.current) return;
     const amt = parseFloat(expenseAmount);
     if (isNaN(amt) || amt <= 0) {
       showToast('Please enter a positive expense amount.', 'error');
       return;
     }
 
-    if (modalMode === 'add') {
-      addExpense({
-        date: expenseDate,
-        description: expenseDesc.trim(),
-        amount: amt,
-        category: expenseCategory,
-        paymentMethod: expenseMethod,
-      });
-    } else if (editingId) {
-      updateExpense(editingId, {
-        date: expenseDate,
-        description: expenseDesc.trim(),
-        amount: amt,
-        category: expenseCategory,
-        paymentMethod: expenseMethod,
-      });
+    savingExpenseRef.current = true;
+    setSavingExpense(true);
+    try {
+      let saved = false;
+      if (modalMode === 'add') {
+        saved = await addExpense({
+          date: expenseDate,
+          description: expenseDesc.trim(),
+          amount: amt,
+          category: expenseCategory,
+          paymentMethod: expenseMethod,
+        });
+      } else if (editingId) {
+        saved = await updateExpense(editingId, {
+          date: expenseDate,
+          description: expenseDesc.trim(),
+          amount: amt,
+          category: expenseCategory,
+          paymentMethod: expenseMethod,
+        });
+      }
+      if (saved) setModalOpen(false);
+    } finally {
+      savingExpenseRef.current = false;
+      setSavingExpense(false);
     }
-
-    setModalOpen(false);
-  };
-
-  const handleViewReceipt = (expense: Expense) => {
-    setActiveReceiptToPrint({
-      title: 'Operational Expense Voucher',
-      refNumber: 'EXP-' + expense.id.slice(-6).toUpperCase(),
-      date: expense.date,
-      party: 'Disbursement: ' + (expense.description.trim() || expense.category || 'Expense'),
-      total: expense.amount,
-      mode: 'Cash / Ledger Outflow',
-    });
   };
 
   return (
@@ -201,7 +202,6 @@ export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ em
             </thead>
             <tbody className="font-body-md text-body-md text-on-surface">
               {filteredExpenses.map((exp, idx) => {
-                const isUtility = exp.category?.toLowerCase() === 'utilities';
                 return (
                   <tr
                     key={exp.id}
@@ -213,14 +213,7 @@ export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ em
                       {exp.date}
                     </td>
                     <td className="py-2.5 px-space-md font-medium text-on-surface">
-                      <div className="flex items-center gap-space-xs">
-                        <span
-                          className={`w-1.5 h-1.5 rounded-full ${
-                            isUtility ? 'bg-secondary' : 'bg-outline-variant'
-                          }`}
-                        ></span>
-                        <span className="flex flex-col"><span>{exp.description.trim() || exp.category || 'Expense'}</span><span className="text-[11px] font-normal text-on-surface-variant">{[exp.description.trim() ? exp.category : null, exp.paymentMethod, exp.notes].filter(Boolean).join(' · ')}</span></span>
-                      </div>
+                      <span className="flex flex-col"><span>{exp.description.trim() || exp.category || 'Expense'}</span><span className="text-[11px] font-normal text-on-surface-variant">{[exp.description.trim() ? exp.category : null, exp.paymentMethod, exp.notes].filter(Boolean).join(' · ')}</span></span>
                     </td>
                     <td className="py-2.5 px-space-md text-right font-data-mono-md text-data-mono-md text-on-surface whitespace-nowrap">
                       {formatCurrency(exp.amount)}
@@ -228,32 +221,12 @@ export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ em
                     <td className="py-2.5 px-space-md text-right whitespace-nowrap">
                       <div className="inline-flex items-center justify-end gap-1">
                         <button
-                          className="p-1 rounded text-outline hover:text-primary hover:bg-surface-container transition-colors"
-                          title="View Receipt"
-                          type="button"
-                          onClick={() => handleViewReceipt(exp)}
-                        >
-                          <span className="material-symbols-outlined text-[18px]">receipt_long</span>
-                        </button>
-                        <button
                           className="p-1 rounded text-outline hover:text-on-surface hover:bg-surface-container transition-colors"
                           title="Edit Expense"
                           type="button"
                           onClick={() => openEditModal(exp)}
                         >
                           <span className="material-symbols-outlined text-[18px]">edit</span>
-                        </button>
-                        <button
-                          className="p-1 rounded text-outline hover:text-error hover:bg-error-container/40 transition-colors"
-                          title="Delete Expense"
-                          type="button"
-                          onClick={() => {
-                            if (window.confirm(`Delete expense "${exp.description}"?`)) {
-                              deleteExpense(exp.id);
-                            }
-                          }}
-                        >
-                          <span className="material-symbols-outlined text-[18px]">delete</span>
                         </button>
                       </div>
                     </td>
@@ -288,7 +261,7 @@ export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ em
       {modalOpen && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center p-space-md bg-inverse-surface/40"
-          onClick={() => setModalOpen(false)}
+          onClick={() => { if (!savingExpense) setModalOpen(false); }}
         >
           <div
             className="bg-surface-container-lowest rounded-xl shadow-xl w-full max-w-lg overflow-hidden flex flex-col border border-outline-variant/30 animate-in fade-in zoom-in-95 duration-150"
@@ -304,6 +277,7 @@ export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ em
               </div>
               <button
                 className="p-1 rounded text-on-surface-variant hover:text-on-surface hover:bg-surface-container transition-colors"
+                disabled={savingExpense}
                 onClick={() => setModalOpen(false)}
                 type="button"
               >
@@ -334,15 +308,13 @@ export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ em
                   <span className="absolute left-3 top-1/2 -translate-y-1/2 font-data-mono-md text-data-mono-md text-outline">
                     ₹
                   </span>
-                  <input
-                    type="number"
-                    step="0.01"
+                  <NumericTextInput
                     min="0"
                     required
                     placeholder="0.00"
                     className="w-full h-9 pl-7 pr-space-sm bg-surface text-on-surface placeholder:text-outline font-data-mono-md text-data-mono-md rounded-lg focus:outline-none focus:bg-surface-container-lowest focus:ring-1 focus:ring-primary border border-outline-variant/30"
                     value={expenseAmount}
-                    onChange={(e) => setExpenseAmount(e.target.value)}
+                    onValueChange={setExpenseAmount}
                   />
                 </div>
               </div>
@@ -369,15 +341,18 @@ export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ em
                 <button
                   type="button"
                   className="px-space-md py-2 rounded-lg font-label-md text-label-md text-on-surface-variant bg-surface-container-low hover:bg-surface-container transition-colors"
+                  disabled={savingExpense}
                   onClick={() => setModalOpen(false)}
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-space-lg py-2 rounded-lg font-label-md text-label-md text-on-primary bg-primary hover:bg-primary-container shadow-sm transition-all"
+                  disabled={savingExpense}
+                  className="inline-flex min-w-36 items-center justify-center gap-2 px-space-lg py-2 rounded-lg font-label-md text-label-md text-on-primary bg-primary hover:bg-primary-container shadow-sm transition-all disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  Save Expense
+                  {savingExpense && <LoaderCircle size={16} className="animate-spin" aria-hidden="true" />}
+                  {savingExpense ? 'Saving…' : 'Save Expense'}
                 </button>
               </div>
             </form>

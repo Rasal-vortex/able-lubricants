@@ -310,6 +310,146 @@
   display: none;
 }
 
+@keyframes loader-one-bounce-pulse {
+  0%, 60%, 100% { transform: translateY(0) scale(1); opacity: .45; }
+  30% { transform: translateY(-7px) scale(1.15); opacity: 1; }
+}
+
+.loader-one-dot {
+  animation: loader-one-bounce-pulse .9s ease-in-out infinite;
+}
+
+.credit-bill-document {
+  color: #171717;
+  font-family: Arial, Helvetica, sans-serif;
+  line-height: 1.45;
+}
+.credit-bill-document-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding-bottom: 18px;
+  border-bottom: 1px solid #e5e2dc;
+}
+.credit-bill-brand {
+  margin: 0;
+  color: #9a6800;
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: .04em;
+}
+.credit-bill-workspace {
+  margin: 2px 0 0;
+  color: #6b7280;
+  font-size: 13px;
+}
+.credit-bill-document-title {
+  margin: 24px 0 18px;
+  text-align: center;
+}
+.credit-bill-document-title h1 {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 700;
+}
+.credit-bill-document-title p {
+  margin: 4px 0 0;
+  color: #6b7280;
+  font-size: 13px;
+}
+.credit-bill-document-meta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 32px;
+  margin: 0 0 24px;
+  padding: 16px;
+  border: 1px solid #e5e2dc;
+  border-radius: 8px;
+  background: #faf9f6;
+}
+.credit-bill-document-meta div,
+.credit-bill-terms {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+.credit-bill-document-meta dt,
+.credit-bill-customer h2 {
+  color: #6b7280;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.credit-bill-document-meta dd {
+  margin: 0;
+  font-weight: 600;
+  text-align: right;
+}
+.credit-bill-customer {
+  margin: 0 0 24px;
+}
+.credit-bill-customer h2 {
+  margin: 0 0 4px;
+}
+.credit-bill-customer p {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+}
+.credit-bill-amounts {
+  width: 100%;
+  margin-bottom: 18px;
+  border-collapse: collapse;
+}
+.credit-bill-amounts th,
+.credit-bill-amounts td {
+  padding: 12px;
+  border-bottom: 1px solid #e5e2dc;
+  text-align: left;
+}
+.credit-bill-amounts th:last-child,
+.credit-bill-amounts td:last-child {
+  text-align: right;
+}
+.credit-bill-amounts thead th {
+  color: #6b7280;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+.credit-bill-amounts tfoot th {
+  border-top: 2px solid #777;
+  border-bottom: 0;
+  font-size: 16px;
+}
+.credit-bill-terms {
+  padding: 12px 0;
+  border-bottom: 1px solid #e5e2dc;
+}
+.credit-bill-terms span,
+.credit-bill-document-footer {
+  color: #6b7280;
+}
+.credit-bill-document-footer {
+  margin-top: 40px;
+  font-size: 12px;
+}
+.credit-bill-document-footer > p {
+  margin: 0 0 48px;
+  text-align: center;
+}
+.credit-bill-signatures {
+  display: flex;
+  justify-content: space-between;
+  gap: 48px;
+}
+.credit-bill-signatures span {
+  width: 45%;
+  padding-top: 8px;
+  border-top: 1px solid #777;
+  text-align: center;
+}
+
 @media print {
   @page {
     size: A4 landscape;
@@ -457,6 +597,183 @@
   main {
     padding-top: 0 !important;
     background: white !important;
+  }
+
+  @page credit-bill-statement {
+    size: A4 portrait;
+    margin: 16mm;
+  }
+
+  body:has(.credit-bill-print-root) {
+    background: #fff !important;
+  }
+  body:has(.credit-bill-print-root) * {
+    visibility: hidden !important;
+  }
+  body:has(.credit-bill-print-root) .credit-bill-print-root,
+  body:has(.credit-bill-print-root) .credit-bill-print-root * {
+    visibility: visible !important;
+  }
+  body:has(.credit-bill-print-root) .credit-bill-print-root {
+    position: fixed !important;
+    inset: 0 !important;
+    display: block !important;
+    width: 100% !important;
+    height: 100% !important;
+    padding: 0 !important;
+    background: #fff !important;
+    backdrop-filter: none !important;
+  }
+  .credit-bill-print-paper {
+    page: credit-bill-statement;
+    box-sizing: border-box !important;
+    width: 100% !important;
+    max-width: none !important;
+    min-height: 100% !important;
+    overflow: visible !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    background: #fff !important;
+    animation: none !important;
+  }
+  .credit-bill-document {
+    color: #171717 !important;
+    background: #fff !important;
+    font-family: Arial, Helvetica, sans-serif !important;
+    font-size: 10pt !important;
+    line-height: 1.45 !important;
+  }
+  .credit-bill-document-header {
+    display: flex !important;
+    align-items: flex-start !important;
+    justify-content: space-between !important;
+    padding: 0 0 10mm !important;
+    border-bottom: 1px solid #b8b8b8 !important;
+  }
+  .credit-bill-brand {
+    margin: 0 !important;
+    color: #9a6800 !important;
+    font-size: 17pt !important;
+    font-weight: 800 !important;
+    letter-spacing: .04em !important;
+  }
+  .credit-bill-workspace {
+    margin: 2px 0 0 !important;
+    color: #555 !important;
+    font-size: 9pt !important;
+  }
+  .credit-bill-document-title {
+    margin: 10mm 0 7mm !important;
+    text-align: center !important;
+  }
+  .credit-bill-document-title h1 {
+    margin: 0 !important;
+    color: #171717 !important;
+    font-size: 19pt !important;
+    font-weight: 700 !important;
+  }
+  .credit-bill-document-title p {
+    margin: 2mm 0 0 !important;
+    color: #666 !important;
+    font-size: 9pt !important;
+  }
+  .credit-bill-document-meta {
+    display: grid !important;
+    grid-template-columns: 1fr 1fr !important;
+    gap: 4mm 12mm !important;
+    margin: 0 0 9mm !important;
+    padding: 5mm !important;
+    border: 1px solid #ddd !important;
+    background: #fafafa !important;
+  }
+  .credit-bill-document-meta div {
+    display: flex !important;
+    justify-content: space-between !important;
+    gap: 8mm !important;
+  }
+  .credit-bill-document-meta dt,
+  .credit-bill-customer h2 {
+    color: #666 !important;
+    font-size: 8pt !important;
+    font-weight: 700 !important;
+    text-transform: uppercase !important;
+    letter-spacing: .04em !important;
+  }
+  .credit-bill-document-meta dd {
+    margin: 0 !important;
+    color: #171717 !important;
+    font-weight: 600 !important;
+    text-align: right !important;
+  }
+  .credit-bill-customer {
+    margin: 0 0 10mm !important;
+  }
+  .credit-bill-customer h2 {
+    margin: 0 0 2mm !important;
+  }
+  .credit-bill-customer p {
+    margin: 0 !important;
+    font-size: 13pt !important;
+    font-weight: 700 !important;
+  }
+  .credit-bill-amounts {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    margin: 0 0 7mm !important;
+  }
+  .credit-bill-amounts th,
+  .credit-bill-amounts td {
+    padding: 4mm 3mm !important;
+    border-bottom: 1px solid #ddd !important;
+    color: #171717 !important;
+    text-align: left !important;
+  }
+  .credit-bill-amounts th:last-child,
+  .credit-bill-amounts td:last-child {
+    text-align: right !important;
+  }
+  .credit-bill-amounts thead th {
+    border-bottom: 1px solid #999 !important;
+    color: #555 !important;
+    font-size: 8pt !important;
+    text-transform: uppercase !important;
+  }
+  .credit-bill-amounts tfoot th {
+    border-top: 2px solid #777 !important;
+    border-bottom: 0 !important;
+    font-size: 12pt !important;
+  }
+  .credit-bill-terms {
+    display: flex !important;
+    justify-content: space-between !important;
+    padding: 4mm 0 !important;
+    border-bottom: 1px solid #ddd !important;
+  }
+  .credit-bill-terms span {
+    color: #666 !important;
+  }
+  .credit-bill-document-footer {
+    margin-top: 16mm !important;
+    color: #666 !important;
+    font-size: 8pt !important;
+  }
+  .credit-bill-document-footer > p {
+    margin: 0 0 20mm !important;
+    text-align: center !important;
+  }
+  .credit-bill-signatures {
+    display: flex !important;
+    justify-content: space-between !important;
+    gap: 20mm !important;
+  }
+  .credit-bill-signatures span {
+    width: 45% !important;
+    padding-top: 3mm !important;
+    border-top: 1px solid #777 !important;
+    text-align: center !important;
   }
 }
 @keyframes toast-outline-progress {

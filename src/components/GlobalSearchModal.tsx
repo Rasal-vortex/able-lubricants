@@ -1,26 +1,38 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '../context/AppContext';
 import { formatCurrency } from '../utils/currency';
+import { getSalesReport } from '../services/api';
 
 export const GlobalSearchModal: React.FC = () => {
   const {
     searchModalOpen,
     setSearchModalOpen,
     products,
-    sales,
     creditBills,
     setActiveScreen,
+    authSession,
+    showToast,
   } = useApp();
 
   const [query, setQuery] = useState('');
+  const [searchableSales, setSearchableSales] = useState<any[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (searchModalOpen) {
       setQuery('');
       setTimeout(() => inputRef.current?.focus(), 50);
+      if (authSession) {
+        const to = new Date();
+        const from = new Date(to);
+        from.setDate(from.getDate() - 365);
+        const dateKey = (value: Date) => new Date(value.getTime() - value.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+        void getSalesReport(authSession.token, `${dateKey(from)}T00:00:00`, `${dateKey(to)}T23:59:59`)
+          .then((result) => setSearchableSales(result.invoices || []))
+          .catch((error) => showToast(error instanceof Error ? error.message : 'Sales could not be searched.', 'error'));
+      }
     }
-  }, [searchModalOpen]);
+  }, [searchModalOpen, authSession, showToast]);
 
   if (!searchModalOpen) return null;
 
@@ -31,7 +43,7 @@ export const GlobalSearchModal: React.FC = () => {
     : [];
 
   const matchedSales = q
-    ? sales.filter((s) => s.billNumber.toLowerCase().includes(q) || s.customerName.toLowerCase().includes(q)).slice(0, 3)
+    ? searchableSales.filter((s) => String(s.invoiceNumber || '').toLowerCase().includes(q) || String(s.customer || '').toLowerCase().includes(q)).slice(0, 3)
     : [];
 
   const matchedCredits = q
@@ -135,13 +147,13 @@ export const GlobalSearchModal: React.FC = () => {
                       className="p-2 rounded hover:bg-surface-container-low cursor-pointer flex items-center justify-between"
                     >
                       <div className="flex flex-col">
-                        <span className="font-data-mono-md text-data-mono-md font-semibold text-primary">{s.billNumber}</span>
+                        <span className="font-data-mono-md text-data-mono-md font-semibold text-primary">{s.invoiceNumber}</span>
                         <span className="font-body-sm text-body-sm text-on-surface-variant">
-                          {s.customerName} • {s.paymentMode} • {s.dateTime}
+                          {s.customer} • {new Date(s.date).toLocaleDateString()}
                         </span>
                       </div>
                       <span className="font-data-mono-md text-data-mono-md font-semibold text-on-surface">
-                        {formatCurrency(s.amount)}
+                        {formatCurrency(Number(s.total) || 0)}
                       </span>
                     </div>
                   ))}

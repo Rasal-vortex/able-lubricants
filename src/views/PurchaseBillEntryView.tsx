@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useRef, useState } from "react";
 import { motion } from "motion/react";
 import { useApp } from "../context/AppContext";
 import { PurchaseLineItem } from "../types";
@@ -14,27 +14,6 @@ const localIso = () => {
     .slice(0, 10);
 };
 const makeNumber = () => `PUR-${Date.now().toString().slice(-7)}`;
-const PURCHASE_DRAFT_KEY = "able_lubes_purchase_draft_v1";
-
-interface PurchaseDraft {
-  partyName: string;
-  billNumber: string;
-  invoiceDate: string;
-  remarks: string;
-  amountPaid: string;
-  paymentMethod: PaymentMethod;
-  items: PurchaseLineItem[];
-  quantityDrafts: Record<string, string>;
-  purchaseRateDrafts: Record<string, string>;
-  newProductOpen: boolean;
-  newProductName: string;
-  newProductBrandId: string;
-  newProductUnitId: string;
-  newProductSellingPrice: string;
-  newProductMrp: string;
-  newProductPurchaseRate: string;
-}
-
 export const PurchaseBillEntryView: React.FC = () => {
   const {
     purchases,
@@ -47,7 +26,6 @@ export const PurchaseBillEntryView: React.FC = () => {
     addProduct,
     addPurchaseBill,
     showToast,
-    authSession,
   } = useApp();
   const [partyName, setPartyName] = useState(suppliers[0]?.name || "");
   const [billNumber, setBillNumber] = useState(makeNumber);
@@ -80,10 +58,7 @@ export const PurchaseBillEntryView: React.FC = () => {
   const [newProductSellingPrice, setNewProductSellingPrice] = useState("");
   const [newProductMrp, setNewProductMrp] = useState("");
   const [newProductPurchaseRate, setNewProductPurchaseRate] = useState("");
-  const [hydratedDraftKey, setHydratedDraftKey] = useState<string | null>(null);
-  const skipDraftSaveRef = useRef(false);
   const catalogFieldRefs = useRef<Array<HTMLInputElement | HTMLSelectElement | null>>([]);
-  const draftKey = authSession ? `${PURCHASE_DRAFT_KEY}:${authSession.user.id}` : null;
   const updateDecimalPrice = (value: string, setValue: React.Dispatch<React.SetStateAction<string>>) => {
     if (/^\d*\.?\d{0,2}$/.test(value)) setValue(value);
   };
@@ -126,47 +101,6 @@ export const PurchaseBillEntryView: React.FC = () => {
   const totalAmount = subtotal;
   const paid = Math.min(totalAmount, Math.max(0, Number(amountPaid) || 0));
 
-  useEffect(() => {
-    if (!draftKey) {
-      setHydratedDraftKey(null);
-      return;
-    }
-    try {
-      const stored = localStorage.getItem(draftKey);
-      if (stored) {
-        const draft = JSON.parse(stored) as Partial<PurchaseDraft>;
-        if (typeof draft.partyName === "string") setPartyName(draft.partyName);
-        if (typeof draft.billNumber === "string") setBillNumber(draft.billNumber);
-        if (typeof draft.invoiceDate === "string") setInvoiceDate(draft.invoiceDate);
-        if (typeof draft.remarks === "string") setRemarks(draft.remarks);
-        if (typeof draft.amountPaid === "string") setAmountPaid(draft.amountPaid);
-        if (["CASH", "UPI", "BANK_TRANSFER", "CHEQUE"].includes(draft.paymentMethod || "")) setPaymentMethod(draft.paymentMethod as PaymentMethod);
-        if (Array.isArray(draft.items) && draft.items.length) setItems(draft.items);
-        if (draft.quantityDrafts && typeof draft.quantityDrafts === "object") setQuantityDrafts(draft.quantityDrafts);
-        if (draft.purchaseRateDrafts && typeof draft.purchaseRateDrafts === "object") setPurchaseRateDrafts(draft.purchaseRateDrafts);
-        setNewProductOpen(Boolean(draft.newProductOpen));
-        if (typeof draft.newProductName === "string") setNewProductName(draft.newProductName);
-        if (typeof draft.newProductBrandId === "string") setNewProductBrandId(draft.newProductBrandId);
-        if (typeof draft.newProductUnitId === "string") setNewProductUnitId(draft.newProductUnitId);
-        if (typeof draft.newProductSellingPrice === "string") setNewProductSellingPrice(draft.newProductSellingPrice);
-        if (typeof draft.newProductMrp === "string") setNewProductMrp(draft.newProductMrp);
-        if (typeof draft.newProductPurchaseRate === "string") setNewProductPurchaseRate(draft.newProductPurchaseRate);
-      }
-    } catch {
-      try { localStorage.removeItem(draftKey); } catch { /* Storage may be unavailable. */ }
-    }
-    setHydratedDraftKey(draftKey);
-  }, [draftKey]);
-
-  useEffect(() => {
-    if (!draftKey || hydratedDraftKey !== draftKey) return;
-    if (skipDraftSaveRef.current) {
-      skipDraftSaveRef.current = false;
-      return;
-    }
-    const draft: PurchaseDraft = { partyName, billNumber, invoiceDate, remarks, amountPaid, paymentMethod, items, quantityDrafts, purchaseRateDrafts, newProductOpen, newProductName, newProductBrandId, newProductUnitId, newProductSellingPrice, newProductMrp, newProductPurchaseRate };
-    try { localStorage.setItem(draftKey, JSON.stringify(draft)); } catch { /* Keep the form usable if browser storage is unavailable. */ }
-  }, [draftKey, hydratedDraftKey, partyName, billNumber, invoiceDate, remarks, amountPaid, paymentMethod, items, quantityDrafts, purchaseRateDrafts, newProductOpen, newProductName, newProductBrandId, newProductUnitId, newProductSellingPrice, newProductMrp, newProductPurchaseRate]);
   const updateProduct = (id: string, productId: string) => {
     const product = products.find((p) => p.id === productId);
     setQuantityDrafts((previous) => { const next = { ...previous }; delete next[id]; return next; });
@@ -365,10 +299,6 @@ export const PurchaseBillEntryView: React.FC = () => {
         paymentMethod,
       );
       if (!saved) return;
-      if (draftKey) {
-        try { localStorage.removeItem(draftKey); } catch { /* Purchase is saved even if draft cleanup fails. */ }
-      }
-      skipDraftSaveRef.current = true;
       setBillNumber(makeNumber());
       setInvoiceDate(localIso());
       setRemarks("");
@@ -401,10 +331,7 @@ export const PurchaseBillEntryView: React.FC = () => {
         .includes(searchTerm),
   );
   const clearPurchaseData = () => {
-    if (!window.confirm("Clear the saved purchase draft and reset this purchase form? Other app data and your sign-in will stay unchanged.")) return;
-    if (draftKey) {
-      try { localStorage.removeItem(draftKey); } catch { /* Keep the form usable if storage is unavailable. */ }
-    }
+    if (!window.confirm("Reset the purchase form? Saved purchases will remain unchanged.")) return;
     setPartyName(suppliers[0]?.name || "");
     setBillNumber(makeNumber());
     setInvoiceDate(localIso());
