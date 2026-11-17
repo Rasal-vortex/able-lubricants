@@ -211,7 +211,7 @@ export const DailySalesManagementView: React.FC = () => {
   };
 
   const handlePrintSale = (sale: (typeof filteredSales)[number]) => {
-    const printWindow = window.open('', '_blank', 'width=900,height=700');
+    const printWindow = window.open('', '_blank', 'width=400,height=760');
     if (!printWindow) {
       showToast('Allow pop-ups to print or save the sale receipt.', 'error');
       return;
@@ -227,49 +227,46 @@ export const DailySalesManagementView: React.FC = () => {
             ? `${item.displayQuantity} ${item.displayUnitName || item.displayUnitSymbol || ''}`.trim()
             : `${item.quantity} ${item.unit || ''}`.trim();
           const lineTotal = item.lineTotal ?? item.quantity * item.sellingPrice;
-          return `<tr><td>${escapeHtml(item.name)}</td><td>${escapeHtml(quantity)}</td><td class="number">${escapeHtml(formatCurrency(item.sellingPrice))}</td><td class="number">${escapeHtml(formatCurrency(lineTotal))}</td></tr>`;
+          return `<tr><td class="item"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(quantity)}</small></td><td class="number">${escapeHtml(formatCurrency(lineTotal))}</td></tr>`;
         }).join('')
-      : `<tr><td colspan="4">${escapeHtml(sale.itemsList || 'Item details unavailable')}</td></tr>`;
-    const paymentRows = tenders.length
-      ? tenders.map((tender) => `<tr><td>${escapeHtml(tender.method)}${tender.notes ? ` · ${escapeHtml(tender.notes)}` : ''}</td><td class="number">${escapeHtml(formatCurrency(tender.amount))}</td></tr>`).join('')
-      : `<tr><td>${escapeHtml(sale.paymentMode)}</td><td class="number">${escapeHtml(formatCurrency(sale.paymentMode === 'Credit' ? 0 : sale.amount))}</td></tr>`;
+      : `<tr><td colspan="2">${escapeHtml(sale.itemsList || 'Item details unavailable')}</td></tr>`;
     const isSettlement = sale.paymentMode.includes('Credit settlement');
+    const hasNamedCustomer = Boolean(sale.customerName?.trim()) && !/walk[- ]in/i.test(sale.customerName);
+    const balanceDue = Math.max(0, billTotal - paidAmount);
+    const itemCount = Math.max(1, lineItems.length);
+    const wrappedItemLines = lineItems.reduce((lines, item) => lines + Math.max(0, Math.ceil(item.name.length / 30) - 1), 0);
+    const receiptHeightMm = Math.ceil(52 + itemCount * 10 + wrappedItemLines * 4 + (balanceDue > 0 && !isSettlement ? 7 : 0));
 
     printWindow.document.open();
     printWindow.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Able Lubes - Sales Receipt</title>
       <style>
-        @page { size: A4 portrait; margin: 0; }
+        @page { size: 80mm ${receiptHeightMm}mm; margin: 0; }
         * { box-sizing: border-box; }
-        body { margin: 0; padding: 14mm; color: #222; font: 10pt/1.45 Arial, Helvetica, sans-serif; }
-        header { display:flex; justify-content:space-between; align-items:flex-start; padding-bottom:8mm; border-bottom:1px solid #b9b9b9; }
-        .brand { color:#9a6800; font-size:18pt; font-weight:800; letter-spacing:.04em; }
-        .tagline { color:#666; font-size:9pt; }
-        h1 { margin:8mm 0 1mm; text-align:center; font-size:18pt; }
-        .subtitle { margin:0 0 7mm; color:#666; text-align:center; }
-        .meta { display:grid; grid-template-columns:1fr 1fr; gap:3mm 10mm; margin-bottom:8mm; padding:5mm; border:1px solid #ddd; background:#fafafa; }
-        .meta div { display:flex; justify-content:space-between; gap:6mm; }
-        .meta span:first-child { color:#666; }
-        h2 { margin:7mm 0 3mm; font-size:11pt; }
-        .customer { margin-bottom:7mm; font-size:13pt; font-weight:700; }
-        table { width:100%; border-collapse:collapse; }
-        th,td { padding:3mm; border-bottom:1px solid #ddd; text-align:left; vertical-align:top; }
-        thead th { background:#f3f3f3; color:#555; font-size:8pt; text-transform:uppercase; }
-        .number { text-align:right; white-space:nowrap; }
-        .totals { width:55%; margin:6mm 0 0 auto; }
-        .totals td { border:0; padding:1.5mm 2mm; }
-        .totals tr:last-child td { border-top:1px solid #999; font-size:12pt; font-weight:700; }
-        .payments { margin-top:2mm; }
-        footer { margin-top:14mm; padding-top:4mm; border-top:1px solid #ddd; color:#666; text-align:center; font-size:8pt; }
-        tr { break-inside:avoid; }
-      </style></head><body>
-      <header><div><div class="brand">ABLE LUBES</div><div class="tagline">Store workspace</div></div><strong>${escapeHtml(isSettlement ? 'PAYMENT RECEIPT' : 'SALES RECEIPT')}</strong></header>
-      <h1>${escapeHtml(isSettlement ? 'Payment Receipt' : 'Sales Receipt')}</h1><p class="subtitle">${escapeHtml(isSettlement ? 'Payment received against an outstanding bill' : 'Customer sale details')}</p>
-      <section class="meta"><div><span>Bill number</span><strong>${escapeHtml(sale.billNumber)}</strong></div><div><span>Date &amp; time</span><strong>${escapeHtml(formatSaleDateTime(sale.dateTime))}</strong></div><div><span>Customer</span><strong>${escapeHtml(sale.customerName)}</strong></div><div><span>Payment mode</span><strong>${escapeHtml(sale.paymentMode)}</strong></div></section>
-      <h2>Purchased items</h2><table><thead><tr><th>Product</th><th>Quantity</th><th class="number">Unit price</th><th class="number">Line total</th></tr></thead><tbody>${productRows}</tbody></table>
+        html,body { width:80mm; margin:0; padding:0; color:#111; background:#fff; font:10px/1.35 Arial,Helvetica,sans-serif; }
+        body { padding:3mm; }
+        .receipt { width:74mm; margin:0 auto; }
+        header { text-align:center; padding-bottom:2.5mm; border-bottom:1px dashed #555; }
+        .brand { font-size:16px; font-weight:800; letter-spacing:.04em; }
+        header p { margin:1mm 0 0; font-size:9px; }
+        .meta { padding:2.5mm 0; border-bottom:1px dashed #555; }
+        .line { display:flex; justify-content:space-between; gap:2mm; margin:1mm 0; }
+        .meta .line span:first-child { color:#444; }
+        table { width:100%; margin:2mm 0; border-collapse:collapse; }
+        th,td { padding:1.5mm 0; border-bottom:1px dotted #999; text-align:left; vertical-align:top; }
+        th:last-child,.number { text-align:right; white-space:nowrap; }
+        .item small { display:block; margin-top:.5mm; color:#444; font-size:9px; }
+        .totals { margin-top:2mm; border-top:1px solid #111; border-bottom:1px solid #111; font-size:13px; font-weight:700; }
+        .totals td { border:0; }
+        .due { margin-top:2mm; font-weight:700; }
+        footer { margin-top:4mm; padding-top:2mm; border-top:1px dashed #555; text-align:center; font-size:9px; }
+        @media screen { body { margin:12px auto; box-shadow:0 1px 8px #bbb; } }
+      </style></head><body><main class="receipt">
+      <header><div class="brand">ABLE LUBES</div><p>${escapeHtml(isSettlement ? 'PAYMENT RECEIPT' : 'SALES RECEIPT')}</p></header>
+      <section class="meta"><div class="line"><span>${isSettlement ? 'Reference' : 'Bill number'}</span><strong>${escapeHtml(sale.billNumber)}</strong></div><div class="line"><span>Date</span><span>${escapeHtml(formatSaleDateTime(sale.dateTime))}</span></div>${hasNamedCustomer ? `<div class="line"><span>Customer</span><span>${escapeHtml(sale.customerName)}</span></div>` : ''}</section>
+      ${isSettlement ? '' : `<table><thead><tr><th>Product / Qty</th><th class="number">Amount</th></tr></thead><tbody>${productRows}</tbody></table>`}
       <table class="totals"><tbody><tr><td>${isSettlement ? 'Payment received' : 'Bill total'}</td><td class="number">${escapeHtml(formatCurrency(isSettlement ? sale.amount : billTotal))}</td></tr></tbody></table>
-      <h2>Payments</h2><table class="payments"><thead><tr><th>Method</th><th class="number">Amount</th></tr></thead><tbody>${paymentRows}</tbody></table>
-      ${!isSettlement && (sale.paymentMode === 'Credit' || sale.paymentMode === 'Split') ? `<p><strong>Balance due: ${escapeHtml(formatCurrency(Math.max(0, billTotal - paidAmount)))}</strong></p>` : ''}
-      <footer>Thank you. This is a computer-generated receipt.</footer></body></html>`);
+      ${!isSettlement && balanceDue > 0 ? `<div class="line due"><span>Balance due</span><span>${escapeHtml(formatCurrency(balanceDue))}</span></div>` : ''}
+      <footer>Thank you for shopping with us.</footer></main></body></html>`);
     printWindow.document.close();
     printWindow.focus();
     printWindow.setTimeout(() => {

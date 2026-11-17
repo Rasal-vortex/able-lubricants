@@ -246,6 +246,7 @@ export interface CreateSalePayload {
 
 export interface ApiSale {
   id: string;
+  invoiceNumber?: string;
   customerId?: string;
   totalAmount: string | number;
   discountAmount?: string | number;

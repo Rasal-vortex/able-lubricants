@@ -17,6 +17,7 @@ import {
   ApiSupplier,
   ApiCreditBill,
   ApiExpense,
+  ApiSale,
   AUTH_SESSION_KEY,
   AUTH_SESSION_EXPIRED_EVENT,
   AUTH_SESSION_REFRESHED_EVENT,
@@ -197,7 +198,7 @@ interface AppContextType {
   adjustProductStock: (id: string, quantity: number, reason?: string) => Promise<void>;
   deleteProduct: (id: string) => Promise<void>;
 
-  addSale: (sale: Omit<SaleRecord, 'id'>) => Promise<boolean>;
+  addSale: (sale: Omit<SaleRecord, 'id'>) => Promise<ApiSale | false>;
 
   // Credit Bills
   creditBills: CreditBill[];
@@ -741,7 +742,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // Sales Actions
-  const addSale = async (saleData: Omit<SaleRecord, 'id'>): Promise<boolean> => {
+  const addSale = async (saleData: Omit<SaleRecord, 'id'>): Promise<ApiSale | false> => {
     if (!authSession) {
       showToast('Sign in before completing a sale.', 'error');
       return false;
@@ -914,7 +915,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } else {
       showToast(`Sale Bill ${newSale.billNumber} created successfully! (${formatCurrency(newSale.amount)})`);
     }
-    return true;
+    return apiSale;
   };
 
   // Credit Bill Actions

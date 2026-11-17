@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
-import { CalendarDays, Check, LoaderCircle, Plus, UserRoundPlus, X } from "lucide-react";
+import { CalendarDays, Check, LoaderCircle, Plus, Printer, UserRoundPlus, X } from "lucide-react";
 import { useApp } from "../context/AppContext";
 import { CartItem } from "../types";
 import { formatCurrency } from "../utils/currency";
@@ -15,6 +15,93 @@ const isKilogramProduct = (product?: { unit?: string; unitName?: string }) => {
   const name = product?.unitName?.trim().toLowerCase();
   const unit = product?.unit?.trim().toLowerCase();
   return name === "kilogram" || name === "kilograms" || unit === "kg";
+};
+
+type ThermalReceipt = {
+  invoiceNumber: string;
+  dateTime: string;
+  customerName: string;
+  paymentMode: string;
+  items: Array<{ name: string; quantity: string; lineTotal: number }>;
+  subtotal: number;
+  billDiscount: number;
+  couponCode?: string;
+  couponDiscount: number;
+  total: number;
+  payments: Array<{ method: string; amount: number }>;
+  balanceDue: number;
+};
+
+const escapeReceiptHtml = (value: string | number) => String(value)
+  .replace(/&/g, "&amp;")
+  .replace(/</g, "&lt;")
+  .replace(/>/g, "&gt;")
+  .replace(/\"/g, "&quot;")
+  .replace(/'/g, "&#39;");
+
+const printThermalReceipt = (receipt: ThermalReceipt) => {
+  const printWindow = window.open("", "_blank", "width=400,height=760");
+  if (!printWindow) {
+    return false;
+  }
+
+  const itemRows = receipt.items.map((item) => `<tr>
+    <td class="item"><strong>${escapeReceiptHtml(item.name)}</strong><small>${escapeReceiptHtml(item.quantity)}</small></td>
+    <td class="amount">${escapeReceiptHtml(formatCurrency(item.lineTotal))}</td>
+  </tr>`).join("");
+  const paymentRows = receipt.payments.length
+    ? receipt.payments.map((payment) => `<div class="line"><span>${escapeReceiptHtml(payment.method)}</span><span>${escapeReceiptHtml(formatCurrency(payment.amount))}</span></div>`).join("")
+    : `<div class="line"><span>Credit</span><span>${escapeReceiptHtml(formatCurrency(receipt.balanceDue))}</span></div>`;
+  const wrappedItemLines = receipt.items.reduce((lines, item) => lines + Math.max(0, Math.ceil(item.name.length / 34) - 1), 0);
+  const receiptHeightMm = Math.ceil(
+    55 + receipt.items.length * 9 + wrappedItemLines * 4 + receipt.payments.length * 5 +
+    (receipt.billDiscount > 0 ? 5 : 0) + (receipt.couponDiscount > 0 ? 5 : 0) +
+    (receipt.balanceDue > 0 ? 6 : 0),
+  );
+
+  printWindow.document.open();
+  printWindow.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Able Lubes Receipt ${escapeReceiptHtml(receipt.invoiceNumber)}</title>
+    <style>
+      @page { size: 80mm ${receiptHeightMm}mm; margin: 0; }
+      * { box-sizing: border-box; }
+      html, body { width: 80mm; margin: 0; padding: 0; color: #111; background: #fff; font: 10px/1.35 Arial, Helvetica, sans-serif; }
+      body { padding: 3mm; }
+      .receipt { width: 74mm; margin: 0 auto; }
+      header { text-align: center; padding-bottom: 2.5mm; border-bottom: 1px dashed #555; }
+      header h1 { margin: 0; font-size: 16px; letter-spacing: .04em; }
+      header p { margin: 1mm 0 0; font-size: 9px; }
+      .meta { padding: 2.5mm 0; border-bottom: 1px dashed #555; }
+      .line { display: flex; justify-content: space-between; gap: 2mm; margin: 1mm 0; }
+      .meta .line span:first-child { color: #444; }
+      table { width: 100%; margin: 2mm 0; border-collapse: collapse; }
+      th, td { padding: 1.5mm 0; border-bottom: 1px dotted #999; text-align: left; vertical-align: top; }
+      th:last-child, .amount { text-align: right; white-space: nowrap; }
+      .item small { display: block; margin-top: .5mm; color: #444; font-size: 9px; }
+      .summary { padding-top: 1.5mm; border-top: 1px dashed #555; }
+      .total { margin-top: 2mm; padding: 2mm 0; border-top: 1px solid #111; border-bottom: 1px solid #111; font-size: 13px; font-weight: 700; }
+      .due { margin-top: 2mm; font-weight: 700; }
+      footer { margin-top: 4mm; padding-top: 2mm; border-top: 1px dashed #555; text-align: center; font-size: 9px; }
+      @media screen { body { margin: 12px auto; box-shadow: 0 1px 8px #bbb; } }
+    </style></head><body><main class="receipt">
+      <header><h1>ABLE LUBES</h1><p>SALES RECEIPT</p></header>
+      <section class="meta">
+        <div class="line"><span>Invoice</span><strong>${escapeReceiptHtml(receipt.invoiceNumber)}</strong></div>
+        <div class="line"><span>Date</span><span>${escapeReceiptHtml(receipt.dateTime)}</span></div>
+        ${receipt.customerName && receipt.customerName !== "Walk-in Customer" ? `<div class="line"><span>Customer</span><span>${escapeReceiptHtml(receipt.customerName)}</span></div>` : ""}
+      </section>
+      <table><thead><tr><th>Product / Qty</th><th class="amount">Amount</th></tr></thead><tbody>${itemRows}</tbody></table>
+      <section class="summary">
+        <div class="line"><span>Subtotal</span><span>${escapeReceiptHtml(formatCurrency(receipt.subtotal))}</span></div>
+        ${receipt.billDiscount > 0 ? `<div class="line"><span>Bill discount</span><span>−${escapeReceiptHtml(formatCurrency(receipt.billDiscount))}</span></div>` : ""}
+        ${receipt.couponDiscount > 0 ? `<div class="line"><span>Coupon${receipt.couponCode ? ` (${escapeReceiptHtml(receipt.couponCode)})` : ""}</span><span>−${escapeReceiptHtml(formatCurrency(receipt.couponDiscount))}</span></div>` : ""}
+        <div class="line total"><span>Total</span><span>${escapeReceiptHtml(formatCurrency(receipt.total))}</span></div>
+        <p><strong>Payment: ${escapeReceiptHtml(receipt.paymentMode)}</strong></p>${paymentRows}
+        ${receipt.balanceDue > 0 ? `<div class="line due"><span>Balance due</span><span>${escapeReceiptHtml(formatCurrency(receipt.balanceDue))}</span></div>` : ""}
+      </section>
+      <footer>Thank you for shopping with us.</footer>
+    </main><script>window.addEventListener('load', () => setTimeout(() => { window.focus(); window.print(); }, 250));</script></body></html>`);
+  printWindow.document.close();
+  return true;
 };
 
 export const SalesBillEntryView: React.FC = () => {
@@ -76,6 +163,8 @@ export const SalesBillEntryView: React.FC = () => {
     return due.toISOString().slice(0, 10);
   });
   const [savingSale, setSavingSale] = useState(false);
+  const [lastCompletedReceipt, setLastCompletedReceipt] = useState<ThermalReceipt | null>(null);
+  const selectedCartItems = cartItems.filter((item) => item.productId);
 
   // Recalculations
   const grossSubtotal = cartItems.reduce(
@@ -146,14 +235,19 @@ export const SalesBillEntryView: React.FC = () => {
     savingSale,
   ]);
 
-  const addBlankCartItem = () => setCartItems((previous) => [...previous, {
+  const createBlankCartItem = (): CartItem => ({
     id: `cart-${Date.now()}-${Math.random()}`,
     name: "",
     sku: "",
     tax: 0,
     quantity: 1,
     price: 0,
-  }]);
+  });
+
+  const addBlankCartItem = () => {
+    setLastCompletedReceipt(null);
+    setCartItems((previous) => [...previous, createBlankCartItem()]);
+  };
 
   const handleSelectCartProduct = (rowId: string, productId: string) => {
     const row = cartItems.find((item) => item.id === rowId);
@@ -173,6 +267,7 @@ export const SalesBillEntryView: React.FC = () => {
       showToast(message, "error");
       return;
     }
+    setLastCompletedReceipt(null);
     const selectedItem: CartItem = {
       id: row?.id || `cart-${Date.now()}-${Math.random()}`,
       productId: product.id,
@@ -183,14 +278,19 @@ export const SalesBillEntryView: React.FC = () => {
       price: product.sellingPrice,
     };
     setCartItems((previous) => {
+      let nextItems: CartItem[];
       if (existingRow) {
-        return previous.filter((item) => item.id !== rowId).map((item) => item.id === existingRow.id
+        nextItems = previous.filter((item) => item.id !== rowId).map((item) => item.id === existingRow.id
           ? { ...item, quantity: item.quantity + requestedQuantity }
           : item);
+      } else {
+        nextItems = row
+          ? previous.map((item) => item.id === rowId ? selectedItem : item)
+          : [...previous, selectedItem];
       }
-      return row
-        ? previous.map((item) => item.id === rowId ? selectedItem : item)
-        : [...previous, selectedItem];
+      return nextItems.some((item) => !item.productId)
+        ? nextItems
+        : [...nextItems, createBlankCartItem()];
     });
     setQuantityDrafts((previous) => { const next = { ...previous }; delete next[rowId]; return next; });
     setPriceDrafts((previous) => { const next = { ...previous }; delete next[rowId]; return next; });
@@ -347,23 +447,19 @@ export const SalesBillEntryView: React.FC = () => {
 
   const handleCompleteSale = async () => {
     if (savingSale) return;
-    if (cartItems.length === 0) {
+    if (selectedCartItems.length === 0) {
       showToast("Cannot complete sale with an empty cart.", "error");
       return;
     }
-    if (cartItems.some((item) => !item.productId)) {
-      showToast("Select a product for each invoice item.", "error");
-      return;
-    }
-    const invalidPriceDraft = cartItems.some((item) => {
+    const invalidPriceDraft = selectedCartItems.some((item) => {
       const draft = priceDrafts[item.id];
       return draft !== undefined && !/^\d+(?:\.\d{1,2})?$/.test(draft);
     });
-    if (invalidPriceDraft || cartItems.some((item) => !Number.isFinite(item.price) || item.price < 0)) {
+    if (invalidPriceDraft || selectedCartItems.some((item) => !Number.isFinite(item.price) || item.price < 0)) {
       showToast("Enter a valid non-negative price with up to two decimal places for each product.", "error");
       return;
     }
-    const invalidQuantityDraft = cartItems.some((item) => {
+    const invalidQuantityDraft = selectedCartItems.some((item) => {
       const draft = quantityDrafts[item.id];
       if (draft === undefined) return false;
       const product = products.find((entry) => entry.id === item.productId);
@@ -440,23 +536,46 @@ export const SalesBillEntryView: React.FC = () => {
       return;
     }
     const splitCouponAmount = Number(splitAmounts.coupon || 0);
-    const itemNames = cartItems
+    const itemNames = selectedCartItems
       .map((item) => {
         const product = products.find((entry) => entry.id === item.productId);
         const gramEntry = isKilogramProduct(product);
         return `${item.name} (×${gramEntry ? `${Math.round(item.quantity * 1000)} g` : `${item.quantity} ${product?.unitName || product?.unit || ""}`})`;
       })
       .join(", ");
+    const createdAt = new Date();
+    const saleTime = createdAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const receiptDateTime = new Date(`${billDate}T${createdAt.toTimeString().slice(0, 8)}`)
+      .toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
+    const receiptPayments = paymentMode === "Split"
+      ? [
+          { method: "Cash", amount: Number(splitAmounts.cash || 0) },
+          { method: "UPI", amount: Number(splitAmounts.upi || 0) },
+          { method: "Coupon", amount: Number(splitAmounts.coupon || 0) },
+        ].filter((payment) => payment.amount > 0)
+      : paymentMode === "Credit" ? [] : [{ method: paymentMode, amount: finalTotal }];
+    const receiptItems = selectedCartItems.map((item) => {
+      const product = products.find((entry) => entry.id === item.productId);
+      const gramEntry = isKilogramProduct(product);
+      const quantity = gramEntry
+        ? `${new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(Math.round(item.quantity * 1000))} g`
+        : `${new Intl.NumberFormat("en-IN", { maximumFractionDigits: 3 }).format(item.quantity)} ${product?.unitName || product?.unit || ""}`.trim();
+      return {
+        name: item.name,
+        quantity,
+        lineTotal: item.quantity * item.price,
+      };
+    });
 
     setSavingSale(true);
     try {
-      const saved = await addSale({
+      const savedSale = await addSale({
         billNumber,
         date: billDate,
-        dateTime: `${billDate} ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`,
+        dateTime: `${billDate} ${saleTime}`,
         customerName: customerName.trim() || "Walk-in Customer",
         customerType: customerName.trim() ? "registered" : "walkin",
-        itemsCount: cartItems.length,
+        itemsCount: selectedCartItems.length,
         itemsList: itemNames,
         paymentMode,
         ...(paymentMode === "Split"
@@ -501,7 +620,7 @@ export const SalesBillEntryView: React.FC = () => {
           (paymentMode === "Split" && Number(splitAmounts.credit || 0) > 0)
             ? creditDueDate
             : undefined,
-        lineItems: cartItems.map((item) => {
+        lineItems: selectedCartItems.map((item) => {
           const product = products.find(
             (entry) => entry.id === item.productId,
           )!;
@@ -525,7 +644,23 @@ export const SalesBillEntryView: React.FC = () => {
         }),
       });
 
-      if (saved) {
+      if (savedSale) {
+        const receiptTotal = Number(savedSale.totalAmount) || finalTotal;
+        const paidAmount = receiptPayments.reduce((sum, payment) => sum + payment.amount, 0);
+        setLastCompletedReceipt({
+          invoiceNumber: savedSale.invoiceNumber || billNumber,
+          dateTime: receiptDateTime,
+          customerName: customerName.trim() || "Walk-in Customer",
+          paymentMode,
+          items: receiptItems,
+          subtotal: grossSubtotal,
+          billDiscount,
+          couponCode: couponCodeProvided ? normalizedCouponCode : undefined,
+          couponDiscount: paymentMode === "Split" ? 0 : couponDiscount,
+          total: receiptTotal,
+          payments: receiptPayments,
+          balanceDue: Math.max(0, receiptTotal - paidAmount),
+        });
         setBillNumber(`SB-${Date.now().toString().slice(-6)}`);
         setBillDate(new Date().toISOString().slice(0, 10));
         setCartItems([]);
@@ -569,11 +704,10 @@ export const SalesBillEntryView: React.FC = () => {
         <section className="relative z-10 overflow-visible rounded-2xl border border-[#e9e3d9] bg-white shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#eee8df] px-4 py-3">
             <div className="flex items-center gap-3">
-              <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#fff1c9] text-[#b27800]"><span className="material-symbols-outlined text-[22px]">inventory_2</span></span>
               <h2 className="text-lg font-bold text-[#171717]">Invoice items</h2>
               <span className="rounded-full bg-[#fff7e7] px-3 py-1 font-mono text-xs font-semibold text-[#9a6700]">{cartItems.filter((item) => item.productId).length} items</span>
             </div>
-            <button type="button" disabled={cartItems.length === 0} className="inline-flex h-9 items-center gap-1 rounded-lg px-3 text-sm font-semibold text-[#a12626] transition hover:bg-red-50 disabled:opacity-40" onClick={() => { setCartItems([]); showToast("Cart cleared", "info"); }}>
+            <button type="button" disabled={cartItems.length === 0} className="inline-flex h-9 items-center gap-1 rounded-lg px-3 text-sm font-semibold text-[#a12626] transition hover:bg-red-50 disabled:opacity-40" onClick={() => { setCartItems([]); setLastCompletedReceipt(null); showToast("Cart cleared", "info"); }}>
               <span className="material-symbols-outlined text-[17px]">delete_sweep</span>Clear cart
             </button>
           </div>
@@ -1130,10 +1264,24 @@ export const SalesBillEntryView: React.FC = () => {
 
           {/* Action Buttons */}
           <div className="order-3 pt-1 lg:col-start-2 lg:row-start-2">
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <button
+                type="button"
+                disabled={savingSale || !lastCompletedReceipt || cartItems.length > 0}
+                className="flex min-h-12 flex-1 items-center justify-center gap-2 rounded-xl border border-[#e9d6a6] bg-white text-sm font-semibold text-[#493819] transition hover:bg-[#fff7e7] disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={() => {
+                  if (lastCompletedReceipt && !printThermalReceipt(lastCompletedReceipt)) {
+                    showToast("Allow pop-ups to print the thermal receipt.", "error");
+                  }
+                }}
+              >
+                <Printer size={18} aria-hidden="true" />
+                <span>Print receipt</span>
+              </button>
             <button
               type="button"
-              disabled={savingSale || !cartItems.length || cartItems.some((item) => !item.productId)}
-              className="flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#ffc21a] text-base font-bold text-[#171717] shadow-sm transition hover:bg-[#ffb900] disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={savingSale || selectedCartItems.length === 0}
+              className="flex min-h-12 flex-1 items-center justify-center gap-2 rounded-xl bg-[#ffc21a] text-base font-bold text-[#171717] shadow-sm transition hover:bg-[#ffb900] disabled:cursor-not-allowed disabled:opacity-50"
               onClick={handleCompleteSale}
             >
               <span className="material-symbols-outlined text-[20px]">
@@ -1141,6 +1289,7 @@ export const SalesBillEntryView: React.FC = () => {
               </span>
               <span>{savingSale ? "Saving sale…" : "Complete sale"}</span>
             </button>
+            </div>
           </div>
         </section>
       </div>
