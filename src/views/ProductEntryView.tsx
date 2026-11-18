@@ -176,6 +176,10 @@ export const ProductEntryView: React.FC = () => {
     const mrp = formMRP.trim() ? parseFloat(formMRP) : undefined;
     const purchaseRate = parseFloat(formPurchaseRate);
     const qty = Number(formQty);
+    if (!Number.isFinite(purchaseRate) || purchaseRate <= 0) {
+      showToast("Purchase rate must be greater than ₹0.00.", "error");
+      return;
+    }
     if (
       !formName.trim() ||
       !formBrandId ||
@@ -183,8 +187,6 @@ export const ProductEntryView: React.FC = () => {
       !Number.isFinite(sp) ||
       sp < 0 ||
       (mrp !== undefined && (!Number.isFinite(mrp) || mrp < 0)) ||
-      !Number.isFinite(purchaseRate) ||
-      purchaseRate < 0 ||
       !Number.isFinite(qty) ||
       qty < 0
     ) {
@@ -852,7 +854,7 @@ export const ProductEntryView: React.FC = () => {
                     id="product-purchase-rate-help"
                     className="text-[11px] font-normal text-on-surface-variant"
                   >
-                    Cost per unit
+                    Cost per unit · must be greater than ₹0.00
                   </span>
                 </div>
                 {/* Optional MRP */}

@@ -158,11 +158,14 @@ export const PurchaseBillEntryView: React.FC = () => {
     const sellingPrice = Number(newProductSellingPrice);
     const mrp = Number(newProductMrp);
     const purchaseRate = Number(newProductPurchaseRate);
+    if (!Number.isFinite(purchaseRate) || purchaseRate <= 0) {
+      showToast("Purchase rate must be greater than ₹0.00.", "error");
+      return;
+    }
     if (!newProductName.trim() || !newProductBrandId || !newProductUnitId ||
       !Number.isFinite(sellingPrice) || sellingPrice < 0 ||
-      !Number.isFinite(mrp) || mrp < 0 ||
-      !Number.isFinite(purchaseRate) || purchaseRate < 0) {
-      showToast("Enter the product name, brand, unit, and valid non-negative prices.", "error");
+      !Number.isFinite(mrp) || mrp < 0) {
+      showToast("Enter the product name, brand, unit, and valid prices.", "error");
       return;
     }
     setNewProductSaving(true);
@@ -267,16 +270,20 @@ export const PurchaseBillEntryView: React.FC = () => {
       showToast("Enter valid amounts using digits and up to two decimal places.", "error");
       return;
     }
+    if (items.some((item) => item.productId && (!Number.isFinite(item.purchaseRate) || item.purchaseRate <= 0))) {
+      showToast("Purchase rate must be greater than ₹0.00 for every product line.", "error");
+      return;
+    }
     if (
       !billNumber.trim() ||
       items.some(
         (item) =>
-          !item.productId || item.quantity <= 0 || item.purchaseRate < 0 ||
+          !item.productId || item.quantity <= 0 ||
           !isUnitQuantityValid(item.quantity, products.find((product) => product.id === item.productId)?.unitAllowsDecimals ?? false),
       )
     ) {
       showToast(
-        "Choose a catalog product and enter a valid quantity and rate for each line.",
+        "Choose a catalog product and enter a valid quantity and purchase rate greater than ₹0.00 for every line.",
         "error",
       );
       return;
@@ -444,7 +451,7 @@ export const PurchaseBillEntryView: React.FC = () => {
                       </td>
                       <td className="border-r border-[#efede8] px-3 py-3 text-center text-[#68645e]">{item.unit || "—"}</td>
                       <td className="border-r border-[#efede8] px-3 py-3 text-center font-medium text-[#272727]" aria-label="Selling price (read only)">{item.productId ? formatCurrency(item.sellingPrice) : "—"}</td>
-                      <td className="border-r border-[#efede8] px-3 py-3"><input type="text" inputMode="decimal" value={purchaseRateDrafts[item.id] ?? (item.purchaseRate ? String(item.purchaseRate) : "")} placeholder="0" onPaste={blockInvalidPricePaste} onChange={(event) => { const raw = event.target.value; if (!/^\d*\.?\d{0,2}$/.test(raw)) return; setPurchaseRateDrafts((previous) => ({ ...previous, [item.id]: raw })); updateItem(item.id, "purchaseRate", Number(raw) || 0); }} onBlur={() => setPurchaseRateDrafts((previous) => { const next = { ...previous }; delete next[item.id]; return next; })} className="h-11 w-36 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-[#272727] outline-none transition focus:border-[#c58a00] focus:bg-white focus:ring-2 focus:ring-[#f5e7c3]" /></td>
+                      <td className="border-r border-[#efede8] px-3 py-3"><input type="text" inputMode="decimal" required aria-label="Purchase rate for product line, greater than zero" title="Purchase rate must be greater than ₹0.00" value={purchaseRateDrafts[item.id] ?? (item.purchaseRate ? String(item.purchaseRate) : "")} placeholder="Required" onPaste={blockInvalidPricePaste} onChange={(event) => { const raw = event.target.value; if (!/^\d*\.?\d{0,2}$/.test(raw)) return; setPurchaseRateDrafts((previous) => ({ ...previous, [item.id]: raw })); updateItem(item.id, "purchaseRate", Number(raw) || 0); }} onBlur={() => setPurchaseRateDrafts((previous) => { const next = { ...previous }; delete next[item.id]; return next; })} className="h-11 w-36 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-[#272727] outline-none transition focus:border-[#c58a00] focus:bg-white focus:ring-2 focus:ring-[#f5e7c3]" /></td>
                       <td className="border-r border-[#efede8] px-3 py-3 text-center font-semibold text-[#272727]">{formatCurrency(item.quantity * item.purchaseRate)}</td>
                       <td className="px-3 py-3 text-center"><button type="button" aria-label="Remove product" onClick={() => items.length > 1 ? setItems((prev) => prev.filter((row) => row.id !== item.id)) : showToast("A purchase needs at least one product line.", "error")} className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-red-100 bg-red-50 material-symbols-outlined text-error transition hover:bg-red-100">delete</button></td>
                     </tr>
@@ -581,7 +588,7 @@ export const PurchaseBillEntryView: React.FC = () => {
                 <input ref={(node) => { catalogFieldRefs.current[4] = node; }} data-catalog-field="4" onKeyDown={handleCatalogFieldKeyDown} required type="text" inputMode="decimal" value={newProductMrp} onPaste={blockInvalidPricePaste} onChange={(event) => updateDecimalPrice(event.target.value, setNewProductMrp)} className="h-10 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 font-normal text-[#272727] outline-none focus:border-[#c58a00] focus:bg-white" placeholder="0.00" />
               </label>
               <label className="flex flex-col gap-1.5 text-sm font-semibold text-[#77736d] sm:col-span-2">Purchase rate for this bill (₹)
-                <input ref={(node) => { catalogFieldRefs.current[5] = node; }} data-catalog-field="5" onKeyDown={handleCatalogFieldKeyDown} required type="text" inputMode="decimal" value={newProductPurchaseRate} onPaste={blockInvalidPricePaste} onChange={(event) => updateDecimalPrice(event.target.value, setNewProductPurchaseRate)} className="h-10 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 font-normal text-[#272727] outline-none focus:border-[#c58a00] focus:bg-white" placeholder="0.00" />
+                <input ref={(node) => { catalogFieldRefs.current[5] = node; }} data-catalog-field="5" onKeyDown={handleCatalogFieldKeyDown} required type="text" inputMode="decimal" value={newProductPurchaseRate} onPaste={blockInvalidPricePaste} onChange={(event) => updateDecimalPrice(event.target.value, setNewProductPurchaseRate)} className="h-10 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 font-normal text-[#272727] outline-none focus:border-[#c58a00] focus:bg-white" placeholder="Required · > 0.00" />
               </label>
             </div>
             {(!brands.length || !units.length) && <p className="mt-3 text-sm text-[#9c6a00]">Add a brand and unit above to continue.</p>}
