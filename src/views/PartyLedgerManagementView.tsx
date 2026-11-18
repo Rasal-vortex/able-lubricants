@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Building2, CreditCard, FileText, LoaderCircle, Package, Pencil, Plus, Wallet } from 'lucide-react';
+import { Building2, CreditCard, FileText, LoaderCircle, Package, Pencil, Plus, Printer, Wallet } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { createSupplierPaymentRequest, getSupplierLedgerReport } from '../services/api';
 import { NumericTextInput } from '../components/ui/NumericTextInput';
@@ -37,10 +37,25 @@ type SupplierLedger = {
   purchases: SupplierLedgerPurchase[];
 };
 
+type SupplierPaymentReceipt = {
+  firstPaymentId: string;
+  date: string;
+  amount: number;
+  methods: Set<string>;
+  purchaseNumbers: Set<string>;
+};
+
 const localToday = () => {
   const today = new Date();
   return new Date(today.getTime() - today.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 };
+
+const escapeHtml = (value: string | number) => String(value)
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/\"/g, '&quot;')
+  .replace(/'/g, '&#39;');
 
 export const PartyLedgerManagementView: React.FC = () => {
   const {
@@ -73,6 +88,23 @@ export const PartyLedgerManagementView: React.FC = () => {
   const newestFirstPurchases = [...(ledger?.purchases || [])].sort((left, right) =>
     new Date(right.date).getTime() - new Date(left.date).getTime(),
   );
+  const paymentReceipts = new Map<string, SupplierPaymentReceipt>();
+  for (const purchase of newestFirstPurchases) {
+    for (const payment of purchase.payments) {
+      const key = payment.paymentGroupId || payment.id;
+      const receipt = paymentReceipts.get(key) || {
+        firstPaymentId: payment.id,
+        date: payment.date,
+        amount: 0,
+        methods: new Set<string>(),
+        purchaseNumbers: new Set<string>(),
+      };
+      receipt.amount += Number(payment.amount) || 0;
+      receipt.methods.add(payment.method);
+      receipt.purchaseNumbers.add(purchase.supplierInvoiceNumber || purchase.purchaseNumber);
+      paymentReceipts.set(key, receipt);
+    }
+  }
 
   useEffect(() => {
     if (!selectedSupplierId || suppliers.some((supplier) => supplier.id === selectedSupplierId)) return;
@@ -143,6 +175,159 @@ export const PartyLedgerManagementView: React.FC = () => {
     setLedger(data as SupplierLedger);
   };
 
+  const printSupplierLedger = () => {
+    if (!ledger) return;
+    const printWindow = window.open('', '_blank', 'width=900,height=700');
+    if (!printWindow) {
+      showToast('Allow pop-ups to print or save the supplier ledger as PDF.', 'error');
+      return;
+    }
+    const transactions = newestFirstPurchases.flatMap((purchase, purchaseIndex) => [
+      {
+        date: String(purchase.date).slice(0, 10),
+        kind: 'Purchase' as const,
+        order: purchaseIndex,
+        description: 'Goods received',
+        debit: Number(purchase.total) || 0,
+        credit: 0,
+      },
+      ...purchase.payments.map((payment, paymentIndex) => ({
+        date: String(payment.date).slice(0, 10),
+        kind: 'Payment' as const,
+        order: purchaseIndex + paymentIndex / 1000,
+        description: `Payment received · ${payment.method === 'CASH' ? 'Cash' : payment.method === 'UPI' ? 'UPI' : payment.method}`,
+        debit: 0,
+        credit: Number(payment.amount) || 0,
+      })),
+    ]).sort((left, right) => left.date.localeCompare(right.date) || Number(left.kind === 'Payment') - Number(right.kind === 'Payment') || left.order - right.order);
+    let runningBalance = 0;
+    const statementRows = transactions.length
+      ? transactions.map((transaction) => {
+          runningBalance = Math.round((runningBalance + transaction.debit - transaction.credit) * 100) / 100;
+          const dateValue = new Date(`${transaction.date}T12:00:00`);
+          const displayDate = Number.isNaN(dateValue.getTime())
+            ? transaction.date
+            : dateValue.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+          return `<tr>
+            <td class="date">${escapeHtml(displayDate)}</td>
+            <td><span class="type ${transaction.kind.toLowerCase()}">${escapeHtml(transaction.kind)}</span><span class="description">${escapeHtml(transaction.description)}</span></td>
+            <td class="amount">${transaction.debit ? escapeHtml(formatCurrency(transaction.debit)) : '—'}</td>
+            <td class="amount">${transaction.credit ? escapeHtml(formatCurrency(transaction.credit)) : '—'}</td>
+            <td class="amount balance">${escapeHtml(formatCurrency(runningBalance))}</td>
+          </tr>`;
+        }).join('')
+      : '<tr><td colspan="5" class="empty">No purchase or payment transactions are recorded for this supplier.</td></tr>';
+    const generatedDate = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+
+    printWindow.document.open();
+    printWindow.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Supplier Account Statement</title>
+      <style>
+        * { box-sizing: border-box; }
+        @page { size: A4 portrait; margin: 14mm 13mm; }
+        body { margin: 0; padding: 14mm 13mm; color: #202124; background: #fff; font: 9.5pt/1.45 Arial, Helvetica, sans-serif; }
+        .document { max-width: 184mm; margin: 0 auto; }
+        header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12mm; padding-bottom: 7mm; border-bottom: 2px solid #c58a00; }
+        .brand { margin-bottom: 3mm; color: #8b6200; font-size: 9pt; font-weight: 800; letter-spacing: .12em; }
+        h1 { margin: 0; font-size: 21pt; line-height: 1.15; }
+        .subtitle, .generated, .muted { color: #60646c; }
+        .subtitle { margin-top: 2mm; font-size: 9pt; }
+        .generated { text-align: right; font-size: 9pt; white-space: nowrap; }
+        .party { display: flex; justify-content: space-between; gap: 10mm; margin: 7mm 0; padding: 0 0 5mm; border-bottom: 1px solid #d9dce1; }
+        .party-label, .summary-label { display: block; margin-bottom: 1.5mm; color: #60646c; font-size: 7.5pt; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+        .party-name { font-size: 13pt; font-weight: 700; }
+        .party-phone { align-self: end; text-align: right; }
+        .summary { display: grid; grid-template-columns: repeat(3, 1fr); margin-bottom: 9mm; border: 1px solid #d9dce1; }
+        .summary-card { padding: 4mm; }
+        .summary-card + .summary-card { border-left: 1px solid #d9dce1; }
+        .summary-value { font-size: 13pt; font-weight: 700; }
+        h2 { margin: 0 0 3mm; font-size: 11pt; }
+        table { width: 100%; border-collapse: collapse; }
+        thead { display: table-header-group; }
+        th { padding: 2.5mm 2mm; border-top: 1px solid #737780; border-bottom: 1px solid #737780; color: #42464d; text-align: left; font-size: 7.5pt; letter-spacing: .04em; text-transform: uppercase; }
+        td { padding: 3mm 2mm; border-bottom: 1px solid #e1e3e7; text-align: left; vertical-align: top; }
+        .date { white-space: nowrap; }
+        .amount { text-align: right; white-space: nowrap; }
+        .type { display: block; font-weight: 700; }
+        .type.payment { color: #486349; }
+        .description { display: block; margin-top: .7mm; color: #60646c; font-size: 8pt; }
+        .empty { padding: 12mm 2mm; color: #60646c; text-align: center; }
+        .closing { margin-top: 8mm; padding-top: 4mm; border-top: 1px solid #d9dce1; color: #60646c; font-size: 8pt; }
+        @media print { body { padding: 0; } .document { max-width: none; } tr { break-inside: avoid; } }
+      </style></head><body><main class="document">
+        <header><div><div class="brand">ABLE LUBES</div><h1>Supplier Account Statement</h1><div class="subtitle">Full purchase and payment history</div></div><div class="generated"><strong>STATEMENT DATE</strong><br>${escapeHtml(generatedDate)}</div></header>
+        <section class="party"><div><div class="party-label">Prepared for</div><div class="party-name">${escapeHtml(ledger.supplier.name)}</div></div>${ledger.supplier.phone ? `<div class="party-phone"><div class="party-label">Phone</div><div>${escapeHtml(ledger.supplier.phone)}</div></div>` : ''}</section>
+        <section class="summary">
+          <div class="summary-card"><span class="summary-label">Total billed</span><strong class="summary-value">${escapeHtml(formatCurrency(Number(ledger.totals.billed)))}</strong></div>
+          <div class="summary-card"><span class="summary-label">Total paid</span><strong class="summary-value">${escapeHtml(formatCurrency(Number(ledger.totals.paid)))}</strong></div>
+          <div class="summary-card"><span class="summary-label">Balance due</span><strong class="summary-value">${escapeHtml(formatCurrency(Number(ledger.totals.outstanding)))}</strong></div>
+        </section>
+        <h2>Account activity</h2>
+        <table><thead><tr><th>Date</th><th>Transaction</th><th class="amount">Debit</th><th class="amount">Credit</th><th class="amount">Balance</th></tr></thead><tbody>${statementRows}</tbody></table>
+        <div class="closing">This statement is generated from the account records available at the time of printing.</div>
+      </main></body></html>`);
+    printWindow.document.close();
+    printWindow.focus();
+    printWindow.setTimeout(() => {
+      printWindow.onafterprint = () => printWindow.close();
+      printWindow.print();
+    }, 250);
+  };
+
+  const printSupplierPaymentReceipt = (payment: SupplierLedgerPurchase['payments'][number]) => {
+    if (!ledger) return;
+    const key = payment.paymentGroupId || payment.id;
+    const receipt = paymentReceipts.get(key);
+    if (!receipt) return;
+    const printWindow = window.open('', '_blank', 'width=400,height=650');
+    if (!printWindow) {
+      showToast('Allow pop-ups to print the supplier payment receipt.', 'error');
+      return;
+    }
+    const methods = [...receipt.methods].map((method) =>
+      method === 'CASH' ? 'Cash' : method === 'UPI' ? 'UPI' : method,
+    ).join(' + ');
+    const appliedBills = [...receipt.purchaseNumbers].map((number) =>
+      `<div class="line"><span>${escapeHtml(number)}</span></div>`,
+    ).join('');
+    const receiptHeightMm = Math.ceil(72 + receipt.purchaseNumbers.size * 6);
+    const paymentDateValue = new Date(receipt.date);
+    const displayDate = Number.isNaN(paymentDateValue.getTime())
+      ? String(receipt.date).slice(0, 10)
+      : paymentDateValue.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+
+    printWindow.document.open();
+    printWindow.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Supplier Payment Receipt</title>
+      <style>
+        @page { size: 80mm ${receiptHeightMm}mm; margin: 0; }
+        * { box-sizing: border-box; }
+        html, body { width: 80mm; margin: 0; padding: 0; color: #111; background: #fff; font: 10px/1.4 Arial, Helvetica, sans-serif; }
+        body { padding: 3mm; }
+        .receipt { width: 74mm; margin: 0 auto; }
+        header { padding-bottom: 2.5mm; border-bottom: 1px dashed #555; text-align: center; }
+        header h1 { margin: 0; font-size: 16px; letter-spacing: .04em; }
+        header p { margin: 1mm 0 0; font-size: 9px; }
+        .meta { padding: 2.5mm 0; border-bottom: 1px dashed #555; }
+        .line { display: flex; justify-content: space-between; gap: 2mm; margin: 1.5mm 0; overflow-wrap: anywhere; }
+        .label { color: #444; }
+        .total { margin-top: 2mm; padding: 2.5mm 0; border-top: 1px solid #111; border-bottom: 1px solid #111; font-size: 14px; font-weight: 700; }
+        .applied { margin-top: 3mm; padding-top: 2mm; border-top: 1px dashed #555; }
+        .applied h2 { margin: 0 0 2mm; font-size: 10px; }
+        footer { margin-top: 4mm; padding-top: 2mm; border-top: 1px dashed #555; text-align: center; font-size: 9px; }
+        @media screen { body { margin: 12px auto; box-shadow: 0 1px 8px #bbb; } }
+      </style></head><body><main class="receipt">
+        <header><h1>ABLE LUBES</h1><p>SUPPLIER PAYMENT RECEIPT</p></header>
+        <section class="meta">
+          <div class="line"><span class="label">Supplier</span><strong>${escapeHtml(ledger.supplier.name)}</strong></div>
+          <div class="line"><span class="label">Date</span><span>${escapeHtml(displayDate)}</span></div>
+          <div class="line"><span class="label">Payment method</span><strong>${escapeHtml(methods)}</strong></div>
+        </section>
+        <div class="line total"><span>Amount paid</span><span>${escapeHtml(formatCurrency(receipt.amount))}</span></div>
+        ${receipt.purchaseNumbers.size ? `<section class="applied"><h2>Applied against</h2>${appliedBills}</section>` : ''}
+        <footer>Payment recorded. Keep this receipt for your records.</footer>
+      </main><script>window.addEventListener('load', () => setTimeout(() => { window.focus(); window.print(); }, 250));</script></body></html>`);
+    printWindow.document.close();
+  };
+
   const submitPayment = async () => {
     if (!authSession || !selectedSupplierId || !ledger || savingPayment) return;
     const cashAmount = Number(cashPaymentAmount) || 0;
@@ -186,7 +371,7 @@ export const PartyLedgerManagementView: React.FC = () => {
         <section className="overflow-hidden rounded-2xl border border-[#e9e3d9] bg-white shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-4 border-b border-[#efede8] bg-gradient-to-r from-[#fff8e7] via-[#fffdf8] to-white px-5 py-5">
             <div className="flex min-w-0 items-center gap-3">
-              <div className="min-w-0"><h2 className="truncate text-lg font-bold text-[#272727]">{ledger?.supplier.name || selectedSupplier?.name || 'Supplier ledger'}</h2><p className="mt-0.5 text-sm text-[#77736d]">{ledger?.supplier.phone || selectedSupplier?.phone || ''}</p></div>
+              <div className="min-w-0"><div className="flex items-center gap-1.5"><h2 className="truncate text-lg font-bold text-[#272727]">{ledger?.supplier.name || selectedSupplier?.name || 'Supplier ledger'}</h2>{selectedSupplier && <button type="button" aria-label={`Edit ${selectedSupplier.name}`} title="Edit supplier" onClick={() => editSupplier(selectedSupplier)} className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[#765000] transition hover:bg-[#fff1c9] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c58a00]"><Pencil size={14} /></button>}</div><p className="mt-0.5 text-sm text-[#77736d]">{ledger?.supplier.phone || selectedSupplier?.phone || ''}</p></div>
             </div>
             <div className="flex w-full flex-wrap items-end gap-2 sm:w-auto">
               <label className="flex min-w-[230px] flex-1 flex-col gap-1.5 text-xs font-semibold text-[#77736d] sm:flex-none">
@@ -198,7 +383,7 @@ export const PartyLedgerManagementView: React.FC = () => {
               </label>
               <button type="button" onClick={() => { resetSupplierForm(); setSupplierModalOpen(true); }} className="inline-flex h-10 items-center gap-1.5 rounded-lg bg-[#ffe4a0] px-3 text-sm font-semibold text-[#493819] shadow-sm transition hover:bg-[#ffdc82]"><Plus size={16} />Add supplier</button>
               {selectedSupplier && <>
-                <button type="button" onClick={() => editSupplier(selectedSupplier)} className="inline-flex h-11 items-center gap-2 rounded-lg border border-[#eadfc8] bg-white px-3 text-sm font-semibold text-[#765000] shadow-sm hover:bg-[#fffaf0]"><Pencil size={15} />Edit</button>
+                <button type="button" disabled={!ledger || ledgerLoading} onClick={printSupplierLedger} className="inline-flex h-11 items-center gap-2 rounded-lg border border-[#eadfc8] bg-white px-3 text-sm font-semibold text-[#765000] shadow-sm hover:bg-[#fffaf0] disabled:cursor-not-allowed disabled:opacity-50"><Printer size={15} />Print / Save PDF</button>
                 <button type="button" onClick={() => void removeSupplier(selectedSupplier)} className="h-11 rounded-lg border border-red-200 bg-white px-3 text-sm font-semibold text-red-700 shadow-sm hover:bg-red-50">Deactivate</button>
               </>}
               <button type="button" disabled={!ledger || Number(ledger.totals.outstanding) <= 0 || ledgerLoading} onClick={() => { setCashPaymentAmount(String(Number(ledger?.totals.outstanding || 0))); setUpiPaymentAmount(''); setPaymentDate(localToday()); setPaymentOpen(true); }} className="inline-flex h-11 items-center gap-2 rounded-lg bg-[#c58a00] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#a97000] disabled:cursor-not-allowed disabled:opacity-45"><Wallet size={16} />Record payment</button>
@@ -228,7 +413,10 @@ export const PartyLedgerManagementView: React.FC = () => {
                         <td className="px-3 py-3 font-semibold">{formatCurrency(Number(purchase.total))}</td>
                         <td className="px-3 py-3">{formatCurrency(Number(purchase.paid))}</td>
                         <td className={`px-3 py-3 font-semibold ${Number(purchase.outstanding) > 0 ? 'text-[#a86600]' : 'text-[#77736d]'}`}>{formatCurrency(Number(purchase.outstanding))}</td>
-                        <td className="min-w-[170px] px-3 py-3">{purchase.payments.length ? purchase.payments.map((payment) => <div key={payment.id} className="mb-1 last:mb-0 text-xs text-[#68645e]">{String(payment.date).slice(0, 10)} · {payment.method} · {formatCurrency(Number(payment.amount))}</div>) : <span className="text-[#77736d]">—</span>}</td>
+                        <td className="min-w-[170px] px-3 py-3">{purchase.payments.length ? purchase.payments.map((payment) => {
+                          const receipt = paymentReceipts.get(payment.paymentGroupId || payment.id);
+                          return <div key={payment.id} className="mb-1 flex items-center gap-1.5 text-xs text-[#68645e] last:mb-0"><span>{String(payment.date).slice(0, 10)} · {payment.method} · {formatCurrency(Number(payment.amount))}</span>{receipt && receipt.firstPaymentId === payment.id && <button type="button" onClick={() => printSupplierPaymentReceipt(payment)} aria-label={`Print payment receipt for ${formatCurrency(receipt.amount)}`} title="Print payment receipt" className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[#765000] hover:bg-[#fff1c9] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c58a00]"><Printer size={14} /></button>}</div>;
+                        }) : <span className="text-[#77736d]">—</span>}</td>
                       </tr>
                     ))}
                     {ledger.purchases.length === 0 && <tr><td colSpan={5} className="px-4 py-12 text-center text-sm text-[#77736d]">No purchase or payment records for this supplier.</td></tr>}

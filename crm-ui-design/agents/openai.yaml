@@ -1,0 +1,4 @@
+interface:
+  display_name: "CRM UI Design"
+  short_description: "Apply a polished, practical CRM interface and interaction system"
+  default_prompt: "Apply the CRM UI design skill to this project, preserving its established visual theme and product behavior."
