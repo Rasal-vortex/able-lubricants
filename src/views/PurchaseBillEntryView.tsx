@@ -34,6 +34,7 @@ export const PurchaseBillEntryView: React.FC = () => {
   const [amountPaid, setAmountPaid] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("CASH");
   const [saving, setSaving] = useState(false);
+  const purchaseRequestKey = useRef(crypto.randomUUID());
   const [activeTab, setActiveTab] = useState<"new" | "history">("new");
   const [items, setItems] = useState<PurchaseLineItem[]>([
     {
@@ -49,6 +50,7 @@ export const PurchaseBillEntryView: React.FC = () => {
   ]);
   const [quantityDrafts, setQuantityDrafts] = useState<Record<string, string>>({});
   const [purchaseRateDrafts, setPurchaseRateDrafts] = useState<Record<string, string>>({});
+  const [sellingRateDrafts, setSellingRateDrafts] = useState<Record<string, string>>({});
   const [recentSearch, setRecentSearch] = useState("");
   const [newProductOpen, setNewProductOpen] = useState(false);
   const [newProductSaving, setNewProductSaving] = useState(false);
@@ -105,6 +107,7 @@ export const PurchaseBillEntryView: React.FC = () => {
     const product = products.find((p) => p.id === productId);
     setQuantityDrafts((previous) => { const next = { ...previous }; delete next[id]; return next; });
     setPurchaseRateDrafts((previous) => { const next = { ...previous }; delete next[id]; return next; });
+    setSellingRateDrafts((previous) => { const next = { ...previous }; delete next[id]; return next; });
     setItems((prev) =>
       prev.map((item) =>
         item.id === id
@@ -123,7 +126,7 @@ export const PurchaseBillEntryView: React.FC = () => {
   };
   const updateItem = (
     id: string,
-    field: "quantity" | "purchaseRate",
+    field: "quantity" | "purchaseRate" | "sellingPrice",
     value: number,
   ) =>
     setItems((prev) =>
@@ -266,19 +269,23 @@ export const PurchaseBillEntryView: React.FC = () => {
       const draft = purchaseRateDrafts[item.id];
       return draft !== undefined && draft !== "" && (!/^\d+(?:\.\d{1,2})?$/.test(draft) || !Number.isFinite(Number(draft)));
     });
-    if (invalidPurchaseRateDraft || (amountPaid !== "" && (!/^\d*(?:\.\d{1,2})?$/.test(amountPaid) || Number(amountPaid) > totalAmount))) {
+    const invalidSellingRateDraft = items.some((item) => {
+      const draft = sellingRateDrafts[item.id];
+      return draft !== undefined && (!/^\d+(?:\.\d{1,2})?$/.test(draft) || !Number.isFinite(Number(draft)) || Number(draft) <= 0);
+    });
+    if (invalidPurchaseRateDraft || invalidSellingRateDraft || (amountPaid !== "" && (!/^\d*(?:\.\d{1,2})?$/.test(amountPaid) || Number(amountPaid) > totalAmount))) {
       showToast("Enter valid amounts using digits and up to two decimal places.", "error");
       return;
     }
-    if (items.some((item) => item.productId && (!Number.isFinite(item.purchaseRate) || item.purchaseRate <= 0))) {
-      showToast("Purchase rate must be greater than ₹0.00 for every product line.", "error");
+    if (items.some((item) => item.productId && (!Number.isFinite(item.purchaseRate) || item.purchaseRate <= 0 || !Number.isFinite(item.sellingPrice) || item.sellingPrice <= 0))) {
+      showToast("Purchase and selling rates must be greater than ₹0.00 for every product line.", "error");
       return;
     }
     if (
       !billNumber.trim() ||
       items.some(
         (item) =>
-          !item.productId || item.quantity <= 0 ||
+          !item.productId || item.quantity <= 0 || item.sellingPrice <= 0 ||
           !isUnitQuantityValid(item.quantity, products.find((product) => product.id === item.productId)?.unitAllowsDecimals ?? false),
       )
     ) {
@@ -304,8 +311,10 @@ export const PurchaseBillEntryView: React.FC = () => {
           remarks: remarks.trim(),
         },
         paymentMethod,
+        purchaseRequestKey.current,
       );
       if (!saved) return;
+      purchaseRequestKey.current = crypto.randomUUID();
       setBillNumber(makeNumber());
       setInvoiceDate(localIso());
       setRemarks("");
@@ -313,6 +322,7 @@ export const PurchaseBillEntryView: React.FC = () => {
       setPaymentMethod("CASH");
       setQuantityDrafts({});
       setPurchaseRateDrafts({});
+      setSellingRateDrafts({});
       setItems([
         {
           id: `line-${Date.now()}`,
@@ -432,7 +442,7 @@ export const PurchaseBillEntryView: React.FC = () => {
             </div>
             <div className="overflow-x-auto">
               <table className="w-full min-w-[1020px] border-collapse text-left">
-                <thead><tr className="bg-[#f6f5f2] text-xs font-bold text-[#6d685f]">{["#", "Product", "Qty", "Unit", "Selling price (₹)", "Purchase rate (₹)", "Line total (₹)", "Action"].map((h) => <th key={h} className="border-y border-r border-[#e9e3d9] px-3 py-3 text-center last:border-r-0">{h}</th>)}</tr></thead>
+                <thead><tr className="bg-[#f6f5f2] text-xs font-bold text-[#6d685f]">{["#", "Product", "Qty", "Unit", "Selling rate (₹)", "Purchase rate (₹)", "Line total (₹)", "Action"].map((h) => <th key={h} className="border-y border-r border-[#e9e3d9] px-3 py-3 text-center last:border-r-0">{h}</th>)}</tr></thead>
                 <tbody className="divide-y divide-[#efede8] text-sm text-[#272727]">
                   {items.map((item, index) => (
                     <tr key={item.id} className="transition hover:bg-[#fffdf8]">
@@ -450,7 +460,7 @@ export const PurchaseBillEntryView: React.FC = () => {
                         })()}
                       </td>
                       <td className="border-r border-[#efede8] px-3 py-3 text-center text-[#68645e]">{item.unit || "—"}</td>
-                      <td className="border-r border-[#efede8] px-3 py-3 text-center font-medium text-[#272727]" aria-label="Selling price (read only)">{item.productId ? formatCurrency(item.sellingPrice) : "—"}</td>
+                      <td className="border-r border-[#efede8] px-3 py-3"><input type="text" inputMode="decimal" required aria-label="Selling rate for new batch, greater than zero" title="Selling rate must be greater than ₹0.00" value={sellingRateDrafts[item.id] ?? (item.sellingPrice ? String(item.sellingPrice) : "")} placeholder="Required" onPaste={blockInvalidPricePaste} onChange={(event) => { const raw = event.target.value; if (!/^\d*\.?\d{0,2}$/.test(raw)) return; setSellingRateDrafts((previous) => ({ ...previous, [item.id]: raw })); updateItem(item.id, "sellingPrice", Number(raw) || 0); }} onBlur={() => setSellingRateDrafts((previous) => { const next = { ...previous }; delete next[item.id]; return next; })} className="h-11 w-36 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-[#272727] outline-none transition focus:border-[#c58a00] focus:bg-white focus:ring-2 focus:ring-[#f5e7c3]" /></td>
                       <td className="border-r border-[#efede8] px-3 py-3"><input type="text" inputMode="decimal" required aria-label="Purchase rate for product line, greater than zero" title="Purchase rate must be greater than ₹0.00" value={purchaseRateDrafts[item.id] ?? (item.purchaseRate ? String(item.purchaseRate) : "")} placeholder="Required" onPaste={blockInvalidPricePaste} onChange={(event) => { const raw = event.target.value; if (!/^\d*\.?\d{0,2}$/.test(raw)) return; setPurchaseRateDrafts((previous) => ({ ...previous, [item.id]: raw })); updateItem(item.id, "purchaseRate", Number(raw) || 0); }} onBlur={() => setPurchaseRateDrafts((previous) => { const next = { ...previous }; delete next[item.id]; return next; })} className="h-11 w-36 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-[#272727] outline-none transition focus:border-[#c58a00] focus:bg-white focus:ring-2 focus:ring-[#f5e7c3]" /></td>
                       <td className="border-r border-[#efede8] px-3 py-3 text-center font-semibold text-[#272727]">{formatCurrency(item.quantity * item.purchaseRate)}</td>
                       <td className="px-3 py-3 text-center"><button type="button" aria-label="Remove product" onClick={() => items.length > 1 ? setItems((prev) => prev.filter((row) => row.id !== item.id)) : showToast("A purchase needs at least one product line.", "error")} className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-red-100 bg-red-50 material-symbols-outlined text-error transition hover:bg-red-100">delete</button></td>

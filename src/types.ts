@@ -9,6 +9,15 @@ export type NavScreen =
   | 'party-ledger-management'
   | 'reports-and-profit-calculation';
 
+export interface InventoryBatchOption {
+  id: string;
+  label?: string | null;
+  sellingRate: number;
+  remainingQuantity: number;
+  receivedAt: string;
+  source: 'PURCHASE' | 'OPENING' | 'ADJUSTMENT';
+}
+
 export interface Product {
   id: string;
   name: string;
@@ -24,6 +33,7 @@ export interface Product {
   purchaseRate: number;
   mrp: number;
   quantity: number;
+  batches: InventoryBatchOption[];
   status: 'Active' | 'Inactive';
   minThreshold?: number;
 }
@@ -39,6 +49,7 @@ export interface Party {
 
 export interface SaleLineItem {
   productId: string;
+  inventoryBatchId?: string;
   name: string;
   sku: string;
   unit: string;
@@ -55,6 +66,7 @@ export interface SaleLineItem {
 export interface CartItem {
   id: string;
   productId?: string;
+  inventoryBatchId?: string;
   name: string;
   sku: string;
   tax: number;

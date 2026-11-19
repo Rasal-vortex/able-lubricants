@@ -223,6 +223,14 @@ export interface ApiProduct {
   unitSymbol: string | null;
   unitAllowsDecimals: boolean;
   active?: boolean;
+  batches?: Array<{
+    id: string;
+    label?: string | null;
+    sellingRate: string | number;
+    remainingQuantity: string | number;
+    receivedAt: string;
+    source: 'PURCHASE' | 'OPENING' | 'ADJUSTMENT';
+  }>;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -235,6 +243,7 @@ export interface CreateSalePayload {
   couponPrice?: number;
   items: Array<{
     productId: string;
+    inventoryBatchId: string;
     quantity: number;
     unitSellingPrice?: number;
     displayQuantity?: number;
@@ -254,11 +263,15 @@ export interface ApiSale {
   items?: Array<{
     id: string;
     productId: string;
+    inventoryBatchId?: string | null;
     quantity: string | number;
     displayQuantity?: string | number | null;
     displayUnitName?: string | null;
     displayUnitSymbol?: string | null;
     sellingPrice: string | number;
+    historicalCostSnapshot?: string | number | null;
+    batchSellingPriceSnapshot?: string | number | null;
+    costSnapshotSource?: 'VERIFIED_BATCH' | 'LEGACY_ESTIMATE' | null;
     discountAmount: string | number;
     totalAmount: string | number;
   }>;
@@ -332,6 +345,7 @@ export interface ApiPage<T> {
 }
 
 export interface CreatePurchasePayload {
+  idempotencyKey: string;
   supplierId: string;
   supplierInvoiceNumber: string;
   discountAmount: number;
@@ -339,6 +353,7 @@ export interface CreatePurchasePayload {
     productId: string;
     quantity: number;
     supplierRate: number;
+    sellingRate: number;
   }>;
 }
 
@@ -354,6 +369,16 @@ export interface ApiPurchase {
     productId: string;
     quantity: string | number;
     supplierRate: string | number;
+    inventoryBatch?: {
+      id: string;
+      label?: string | null;
+      purchaseRate: string | number;
+      sellingRate: string | number;
+      receivedQuantity: string | number;
+      remainingQuantity: string | number;
+      receivedAt: string;
+      source: 'PURCHASE' | 'OPENING' | 'ADJUSTMENT';
+    } | null;
     totalAmount: string | number;
   }>;
   createdAt?: string;
@@ -393,19 +418,35 @@ export const getSalesReport = (token: string, from: string, to: string) => {
   return apiRequest<any>(`/reports/sales?${query.toString()}`, {}, token);
 };
 
+export const getExpenseReport = (token: string, from: string, to: string) => {
+  const query = new URLSearchParams({ from, to });
+  return apiRequest<any>(`/reports/expenses?${query.toString()}`, {}, token);
+};
+
 export const getSupplierOutstandingReport = (token: string) =>
   apiRequest<any[]>('/reports/suppliers/outstanding', {}, token);
 
 export const getSupplierLedgerReport = (token: string, supplierId: string) =>
   apiRequest<any>(`/reports/suppliers/${encodeURIComponent(supplierId)}/ledger`, {}, token);
 
-export interface StockAdjustmentPayload {
-  productId: string;
-  quantity: number;
-  direction: 'IN' | 'OUT';
-  reason?: string;
-  notes?: string;
-}
+export type StockAdjustmentPayload =
+  | {
+      productId: string;
+      quantity: number;
+      direction: 'IN';
+      purchaseRate: number;
+      sellingRate: number;
+      reason?: string;
+      notes?: string;
+    }
+  | {
+      productId: string;
+      quantity: number;
+      direction: 'OUT';
+      inventoryBatchId: string;
+      reason?: string;
+      notes?: string;
+    };
 
 export interface ApiStockAdjustment {
   id: string;
@@ -575,6 +616,7 @@ export const createSupplierPaymentRequest = (
     purchaseId: string;
     paymentDate?: string;
     notes?: string;
+    receiptNumber?: string;
     amount?: number;
     method?: PaymentMethod;
     tenders?: Array<{ method: 'CASH' | 'UPI'; amount: number }>;

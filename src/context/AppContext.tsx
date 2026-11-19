@@ -136,6 +136,14 @@ const mapProduct = (product: ApiProduct): Product => ({
   purchaseRate: Number(product.purchaseRate),
   mrp: Number(product.mrp),
   quantity: Number(product.currentStock),
+  batches: (product.batches || []).map((batch) => ({
+    id: batch.id,
+    label: batch.label,
+    sellingRate: Number(batch.sellingRate),
+    remainingQuantity: Number(batch.remainingQuantity),
+    receivedAt: batch.receivedAt,
+    source: batch.source,
+  })),
   status: product.active === false ? 'Inactive' : 'Active',
   minThreshold: 10,
 });
@@ -195,7 +203,12 @@ interface AppContextType {
   updateUnit: (id: string, payload: { name: string; symbol: string | null; allowsDecimals: boolean }) => Promise<ApiUnit>;
   addProduct: (product: CreateProductPayload) => Promise<Product>;
   updateProduct: (id: string, updates: Partial<ProductPayload>) => Promise<void>;
-  adjustProductStock: (id: string, quantity: number, reason?: string) => Promise<void>;
+  adjustProductStock: (
+    id: string,
+    quantity: number,
+    reason?: string,
+    batchDetails?: { inventoryBatchId?: string; purchaseRate?: number; sellingRate?: number },
+  ) => Promise<void>;
   deleteProduct: (id: string) => Promise<void>;
 
   addSale: (sale: Omit<SaleRecord, 'id'>) => Promise<ApiSale | false>;
@@ -214,7 +227,7 @@ interface AppContextType {
 
   // Purchase Bills
   purchases: PurchaseBill[];
-  addPurchaseBill: (bill: Omit<PurchaseBill, 'id'>, paymentMethod: PaymentMethod) => Promise<boolean>;
+  addPurchaseBill: (bill: Omit<PurchaseBill, 'id'>, paymentMethod: PaymentMethod, idempotencyKey: string) => Promise<boolean>;
   cancelPurchaseBill: (id: string) => Promise<boolean>;
 
   // Party Ledger
@@ -622,7 +635,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     showToast(`Product details updated successfully.`);
   };
 
-  const adjustProductStock = async (id: string, desiredQuantity: number, reason = "") => {
+  const adjustProductStock = async (
+    id: string,
+    desiredQuantity: number,
+    reason = "",
+    batchDetails: { inventoryBatchId?: string; purchaseRate?: number; sellingRate?: number } = {},
+  ) => {
     if (!authSession) throw new Error('Sign in to adjust product stock.');
     if (authSession.user.role !== 'ADMIN') throw new Error('Only Admin users can adjust product stock.');
     const product = products.find((entry) => entry.id === id);
@@ -640,18 +658,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
 
-    const payload: StockAdjustmentPayload = {
+    const common = {
       productId: id,
       quantity: Math.abs(delta),
-      direction: delta > 0 ? 'IN' : 'OUT',
       ...(reason.trim() ? { reason: reason.trim() } : {}),
     };
+    const payload: StockAdjustmentPayload = delta > 0
+      ? {
+          ...common,
+          direction: 'IN',
+          purchaseRate: batchDetails.purchaseRate ?? 0,
+          sellingRate: batchDetails.sellingRate ?? 0,
+        }
+      : {
+          ...common,
+          direction: 'OUT',
+          inventoryBatchId: batchDetails.inventoryBatchId ?? '',
+        };
 
     try {
       const adjustment = await createStockAdjustmentRequest(authSession.token, payload);
       const stockAfter = Number(adjustment.stockAfter);
       if (!Number.isFinite(stockAfter)) throw new Error('The API did not return the updated stock quantity.');
       setProducts((previous) => previous.map((product) => product.id === id ? { ...product, quantity: stockAfter } : product));
+      try {
+        const refreshed = await getProductRequest(authSession.token, id);
+        setProducts((previous) => previous.map((product) => product.id === id ? mapProduct(refreshed) : product));
+      } catch {
+        // The committed movement response is enough to keep aggregate stock current.
+      }
       showToast(`Stock quantity updated to ${stockAfter}.`);
     } catch (error) {
       // Refresh in case the server committed the adjustment but the response was lost.
@@ -659,7 +694,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const latest = await getProductRequest(authSession.token, id);
         const latestQuantity = Number(latest.currentStock);
         if (Number.isFinite(latestQuantity)) {
-          setProducts((previous) => previous.map((product) => product.id === id ? { ...product, quantity: latestQuantity } : product));
+          setProducts((previous) => previous.map((product) => product.id === id ? mapProduct(latest) : product));
         }
       } catch {
         // Keep the original adjustment error for the form.
@@ -753,6 +788,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       showToast('Add at least one catalog product to the bill.', 'error');
       return false;
     }
+    const unassignedBatch = requested.find((item) => !item.inventoryBatchId);
+    if (unassignedBatch) {
+      showToast('Choose a stock batch for every product line.', 'error');
+      return false;
+    }
+    const quantityByBatch = requested.reduce<Record<string, number>>((totals, item) => {
+      const batchId = item.inventoryBatchId!;
+      totals[batchId] = (totals[batchId] || 0) + item.quantity;
+      return totals;
+    }, {});
+    const unavailableBatch = Object.entries(quantityByBatch).find(([batchId, quantity]) => {
+      const batch = products.flatMap((product) => product.batches).find((entry) => entry.id === batchId);
+      return !batch || batch.remainingQuantity < quantity;
+    });
+    if (unavailableBatch) {
+      showToast('The selected stock batch does not have enough remaining quantity.', 'error');
+      return false;
+    }
     const invalidQuantity = requested.find((item) => {
       const product = products.find((candidate) => candidate.id === item.productId);
       return !isUnitQuantityValid(item.quantity, product?.unitAllowsDecimals ?? false);
@@ -813,6 +866,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         : {}),
       items: requested.map((item) => ({
         productId: item.productId,
+        inventoryBatchId: item.inventoryBatchId!,
         quantity: item.quantity,
         unitSellingPrice: item.sellingPrice,
         ...(item.displayQuantity !== undefined && item.displayUnitName
@@ -869,11 +923,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       id: apiSale.id,
       amount: Number(apiSale.totalAmount),
       paymentTenders: tenderPayments,
-      costOfGoodsSold: requested.reduce((sum, item) => sum + item.quantity * item.purchaseRate, 0),
+      costOfGoodsSold: apiSale.items
+        ? apiSale.items.reduce((sum, item) => sum + Number(item.historicalCostSnapshot || 0) * Number(item.quantity), 0)
+        : requested.reduce((sum, item) => sum + item.quantity * item.purchaseRate, 0),
     };
     setProducts((prev) => prev.map((product) => {
       const qty = quantityByProduct[product.id];
-      return qty ? { ...product, quantity: product.quantity - qty } : product;
+      if (!qty) return product;
+      return {
+        ...product,
+        quantity: product.quantity - qty,
+        batches: product.batches.map((batch) => {
+          const batchQuantity = quantityByBatch[batch.id] || 0;
+          return batchQuantity ? { ...batch, remainingQuantity: Math.max(0, batch.remainingQuantity - batchQuantity) } : batch;
+        }),
+      };
     }));
 
     // Keep the current view responsive; the backend credit-bill row is created with the sale.
@@ -1060,6 +1124,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const addPurchaseBill = async (
     billData: Omit<PurchaseBill, 'id'>,
     paymentMethod: PaymentMethod,
+    idempotencyKey: string,
   ): Promise<boolean> => {
     if (!authSession) {
       showToast('Sign in before recording a purchase.', 'error');
@@ -1086,6 +1151,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     const payload: CreatePurchasePayload = {
+      idempotencyKey,
       supplierId: supplier.id,
       supplierInvoiceNumber: billData.invoiceNumber,
       discountAmount: 0,
@@ -1093,6 +1159,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         productId: item.productId!,
         quantity: item.quantity,
         supplierRate: item.purchaseRate,
+        sellingRate: item.sellingPrice,
       })),
     };
 
@@ -1144,7 +1211,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setProducts((prev) => prev.map((product) => {
         const receivedQty = items.filter((item) => item.productId === product.id).reduce((sum, item) => sum + item.quantity, 0);
         const purchaseRate = items.find((item) => item.productId === product.id)?.purchaseRate;
-        return receivedQty ? { ...product, quantity: product.quantity + receivedQty, purchaseRate: purchaseRate || product.purchaseRate } : product;
+        const newBatches = (apiPurchase.items || [])
+          .filter((item) => item.productId === product.id && item.inventoryBatch)
+          .map((item) => ({
+            id: item.inventoryBatch!.id,
+            label: item.inventoryBatch!.label,
+            sellingRate: Number(item.inventoryBatch!.sellingRate),
+            remainingQuantity: Number(item.inventoryBatch!.remainingQuantity),
+            receivedAt: item.inventoryBatch!.receivedAt,
+            source: item.inventoryBatch!.source,
+          }));
+        return receivedQty ? {
+          ...product,
+          quantity: product.quantity + receivedQty,
+          purchaseRate: purchaseRate || product.purchaseRate,
+          batches: [...product.batches, ...newBatches],
+        } : product;
       }));
     }
 

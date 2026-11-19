@@ -254,19 +254,20 @@ export const SalesBillEntryView: React.FC = () => {
     if (!productId) return;
     const product = products.find((entry) => entry.id === productId && entry.status === "Active");
     if (!product) return;
-    const existingRow = cartItems.find((item) => item.id !== rowId && item.productId === product.id);
     const otherQuantity = cartItems
       .filter((item) => item.id !== rowId && item.productId === product.id)
       .reduce((sum, item) => sum + item.quantity, 0);
     const requestedQuantity = row?.productId && row.productId !== product.id ? 1 : row?.quantity ?? 1;
-    const stockQuantity = Math.round(product.quantity * 1000) / 1000;
+    const stockQuantity = Math.round((product.batches || []).reduce((sum, batch) => sum + batch.remainingQuantity, 0) * 1000) / 1000;
     const requestedTotal = Math.round((otherQuantity + requestedQuantity) * 1000) / 1000;
-    if (requestedTotal > stockQuantity) {
-      const message = `Only ${product.quantity} ${product.unit || "units"} of ${product.name} are available.`;
+    if (requestedTotal > Math.min(product.quantity, stockQuantity)) {
+      const message = `Only ${Math.min(product.quantity, stockQuantity)} ${product.unit || "units"} of ${product.name} are available in batches.`;
       setStockWarning(message);
       showToast(message, "error");
       return;
     }
+    const availableBatches = (product.batches || []).filter((batch) => batch.remainingQuantity > 0);
+    const selectedBatch = availableBatches.length === 1 ? availableBatches[0] : undefined;
     setLastCompletedReceipt(null);
     const selectedItem: CartItem = {
       id: row?.id || `cart-${Date.now()}-${Math.random()}`,
@@ -275,19 +276,13 @@ export const SalesBillEntryView: React.FC = () => {
       sku: product.sku,
       tax: 0,
       quantity: requestedQuantity,
-      price: product.sellingPrice,
+      ...(selectedBatch ? { inventoryBatchId: selectedBatch.id } : {}),
+      price: selectedBatch?.sellingRate ?? 0,
     };
     setCartItems((previous) => {
-      let nextItems: CartItem[];
-      if (existingRow) {
-        nextItems = previous.filter((item) => item.id !== rowId).map((item) => item.id === existingRow.id
-          ? { ...item, quantity: item.quantity + requestedQuantity }
-          : item);
-      } else {
-        nextItems = row
-          ? previous.map((item) => item.id === rowId ? selectedItem : item)
-          : [...previous, selectedItem];
-      }
+      const nextItems = row
+        ? previous.map((item) => item.id === rowId ? selectedItem : item)
+        : [...previous, selectedItem];
       return nextItems.some((item) => !item.productId)
         ? nextItems
         : [...nextItems, createBlankCartItem()];
@@ -379,7 +374,8 @@ export const SalesBillEntryView: React.FC = () => {
         {isOpen && productDropdownPosition && createPortal(<div role="listbox" className="fixed z-[9999] overflow-y-auto rounded-lg border border-[#e5ded1] bg-white py-1 shadow-xl" style={{ top: productDropdownPosition.top, left: productDropdownPosition.left, width: productDropdownPosition.width, maxHeight: productDropdownPosition.maxHeight }}>
           {matchingProducts.map((product, index) => {
             const otherQuantity = cartItems.filter((item) => item.id !== rowId && item.productId === product.id).reduce((sum, item) => sum + item.quantity, 0);
-            const available = Math.max(0, Math.round((product.quantity - otherQuantity) * 1000) / 1000);
+            const batchQuantity = (product.batches || []).reduce((sum, batch) => sum + batch.remainingQuantity, 0);
+            const available = Math.max(0, Math.round((Math.min(product.quantity, batchQuantity) - otherQuantity) * 1000) / 1000);
             const disabled = available <= 0 && selectedProductId !== product.id;
             return <button key={product.id} type="button" role="option" aria-selected={activeProductOptionIndex === index} disabled={disabled} onMouseDown={(event) => event.preventDefault()} onMouseEnter={() => setActiveProductOptionIndex(index)} onClick={() => handleSelectCartProduct(rowId, product.id)} className={`flex w-full items-center justify-between gap-3 border-b border-[#f0ede7] px-3 py-2 text-left last:border-b-0 ${disabled ? "cursor-not-allowed opacity-50" : activeProductOptionIndex === index ? "bg-[#fff1c9]" : "hover:bg-[#faf8f4]"}`}>
               <span className="min-w-0"><span className="block truncate text-sm font-semibold text-[#272727]">{product.name}</span><span className="block truncate text-xs text-[#77736d]">{[product.brand, product.sku, product.unitName || product.unit].filter(Boolean).join(" · ")}</span></span>
@@ -390,6 +386,34 @@ export const SalesBillEntryView: React.FC = () => {
         </div>, document.body)}
       </div>
     );
+  };
+
+  const getCartBatchAvailability = (item: CartItem, batchId = item.inventoryBatchId) => {
+    const product = products.find((entry) => entry.id === item.productId);
+    const batch = product?.batches.find((entry) => entry.id === batchId);
+    if (!batch) return 0;
+    const otherQuantity = cartItems
+      .filter((entry) => entry.id !== item.id && entry.inventoryBatchId === batch.id)
+      .reduce((sum, entry) => sum + entry.quantity, 0);
+    return Math.max(0, batch.remainingQuantity - otherQuantity);
+  };
+
+  const handleSelectCartBatch = (item: CartItem, batchId: string) => {
+    const product = products.find((entry) => entry.id === item.productId);
+    const batch = product?.batches.find((entry) => entry.id === batchId);
+    if (!product || !batch) return;
+    const available = getCartBatchAvailability(item, batch.id);
+    if (item.quantity > available) {
+      const message = `This batch has ${available} ${product.unitName || product.unit} available.`;
+      setStockWarning(message);
+      showToast(message, "error");
+      return;
+    }
+    setCartItems((previous) => previous.map((entry) => entry.id === item.id
+      ? { ...entry, inventoryBatchId: batch.id, price: batch.sellingRate }
+      : entry));
+    setPriceDrafts((previous) => { const next = { ...previous }; delete next[item.id]; return next; });
+    setStockWarning("");
   };
 
   const handleAddCustomer = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -451,6 +475,24 @@ export const SalesBillEntryView: React.FC = () => {
       showToast("Cannot complete sale with an empty cart.", "error");
       return;
     }
+    if (selectedCartItems.some((item) => !item.inventoryBatchId)) {
+      showToast("Select a stock batch for each product line before completing the sale.", "error");
+      return;
+    }
+    const batchQuantities = new Map<string, number>();
+    for (const item of selectedCartItems) {
+      const batchId = item.inventoryBatchId!;
+      batchQuantities.set(batchId, (batchQuantities.get(batchId) || 0) + item.quantity);
+    }
+    const overdrawnBatch = selectedCartItems.find((item) => {
+      const product = products.find((entry) => entry.id === item.productId);
+      const batch = product?.batches.find((entry) => entry.id === item.inventoryBatchId);
+      return !batch || (batchQuantities.get(batch.id) || 0) > batch.remainingQuantity;
+    });
+    if (overdrawnBatch) {
+      showToast(`The selected batch no longer has enough stock for ${overdrawnBatch.name}.`, "error");
+      return;
+    }
     const invalidPriceDraft = selectedCartItems.some((item) => {
       const draft = priceDrafts[item.id];
       return draft !== undefined && !/^\d+(?:\.\d{1,2})?$/.test(draft);
@@ -471,7 +513,7 @@ export const SalesBillEntryView: React.FC = () => {
         !draft ||
         (gramEntry ? !/^\d+$/.test(draft) : !isUnitQuantityInputValid(draft, allowsDecimals)) ||
         quantity <= 0 ||
-        quantity > (product?.quantity ?? 0)
+        quantity > getCartBatchAvailability(item)
       );
     });
     if (invalidQuantityDraft) {
@@ -626,6 +668,7 @@ export const SalesBillEntryView: React.FC = () => {
           )!;
           return {
             productId: product.id,
+            inventoryBatchId: item.inventoryBatchId!,
             name: product.name,
             sku: product.sku,
             unit: product.unit,
@@ -731,6 +774,14 @@ export const SalesBillEntryView: React.FC = () => {
                   const product = products.find(
                     (entry) => entry.id === item.productId,
                   );
+                  const availableBatches = (product?.batches || []).filter((batch) => batch.remainingQuantity > 0);
+                  const selectedBatch = availableBatches.find((batch) => batch.id === item.inventoryBatchId);
+                  const otherProductQuantity = cartItems
+                    .filter((entry) => entry.id !== item.id && entry.productId === item.productId)
+                    .reduce((sum, entry) => sum + entry.quantity, 0);
+                  const maximumCartQuantity = selectedBatch
+                    ? getCartBatchAvailability(item, selectedBatch.id)
+                    : Math.max(0, Math.min(product?.quantity ?? 0, availableBatches.reduce((sum, batch) => sum + batch.remainingQuantity, 0)) - otherProductQuantity);
                   const allowsDecimals = product?.unitAllowsDecimals ?? false;
                   const gramEntry = isKilogramProduct(product);
                   const quantityScale = gramEntry ? 1000 : 1;
@@ -749,7 +800,30 @@ export const SalesBillEntryView: React.FC = () => {
                         {String(index + 1).padStart(2, "0")}
                       </td>
                       <td className="py-2 px-space-md">
-                        {renderProductSelector(item.id, item.productId)}
+                        <div className="space-y-1.5">
+                          {renderProductSelector(item.id, item.productId)}
+                          {product && availableBatches.length > 1 && (
+                            <select
+                              aria-label={`Stock batch for ${item.name}`}
+                              value={item.inventoryBatchId || ""}
+                              onChange={(event) => handleSelectCartBatch(item, event.target.value)}
+                              className="h-8 w-full rounded-md border border-[#dedbd6] bg-white px-2 text-xs text-[#37342f] outline-none focus:border-[#c58a00]"
+                            >
+                              <option value="" disabled>Select stock batch</option>
+                              {availableBatches.map((batch) => {
+                                const available = getCartBatchAvailability(item, batch.id);
+                                const source = batch.source === "OPENING" ? "Opening stock" : batch.source === "ADJUSTMENT" ? "Stock adjustment" : "Purchase";
+                                const receivedDate = new Date(batch.receivedAt).toLocaleDateString("en-IN");
+                                return <option key={batch.id} value={batch.id}>
+                                  {(batch.label || source)} · {receivedDate} · {formatCurrency(batch.sellingRate)} · {available} available
+                                </option>;
+                              })}
+                            </select>
+                          )}
+                          {product && availableBatches.length === 0 && (
+                            <span className="block text-xs text-[#a12626]">No available stock batches</span>
+                          )}
+                        </div>
                       </td>
                       <td className="py-2 px-space-sm">
                         <span className="rounded bg-surface-container-high px-2 py-1 text-xs text-on-surface-variant">
@@ -811,7 +885,7 @@ export const SalesBillEntryView: React.FC = () => {
                                 );
                                 return;
                               }
-                              const maximum = product?.quantity ?? 0;
+                              const maximum = maximumCartQuantity;
                               if (
                                 requested < minimumQuantity ||
                                 requested > maximum
@@ -844,7 +918,7 @@ export const SalesBillEntryView: React.FC = () => {
                                 !raw ||
                                 !validInput ||
                                 requested < minimumQuantity ||
-                                requested > (product?.quantity ?? 0)
+                                requested > maximumCartQuantity
                               ) {
                                 setQuantityDrafts((previous) => {
                                   const next = { ...previous };
@@ -871,7 +945,7 @@ export const SalesBillEntryView: React.FC = () => {
                             type="button"
                             aria-label={`Increase ${item.name} quantity`}
                             title={
-                              item.quantity >= (product?.quantity ?? 0)
+                              item.quantity >= maximumCartQuantity
                                 ? "Maximum available stock reached"
                                 : "Increase quantity"
                             }
@@ -885,9 +959,9 @@ export const SalesBillEntryView: React.FC = () => {
                               });
                               if (
                                 product &&
-                                item.quantity >= product.quantity
+                                item.quantity >= maximumCartQuantity
                               ) {
-                                const message = `Only ${product.quantity} ${product.unit || "units"} of ${product.name} are available.`;
+                                const message = `Only ${maximumCartQuantity} ${product.unit || "units"} are available in the selected batch.`;
                                 setStockWarning(message);
                                 showToast(message, "error");
                                 return;
@@ -898,7 +972,7 @@ export const SalesBillEntryView: React.FC = () => {
                                     ? {
                                         ...it,
                                         quantity: Math.min(
-                                          product?.quantity ??
+                                          maximumCartQuantity ??
                                             it.quantity + quantityIncrement,
                                           Math.round(
                                             (it.quantity + quantityIncrement) *

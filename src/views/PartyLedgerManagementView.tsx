@@ -28,6 +28,7 @@ type SupplierLedgerPurchase = {
     amount: string | number;
     method: string;
     date: string;
+    receiptNumber?: string | null;
   }>;
 };
 
@@ -43,6 +44,7 @@ type SupplierPaymentReceipt = {
   amount: number;
   methods: Set<string>;
   purchaseNumbers: Set<string>;
+  receiptNumber: string | null;
 };
 
 const localToday = () => {
@@ -82,6 +84,7 @@ export const PartyLedgerManagementView: React.FC = () => {
   const [cashPaymentAmount, setCashPaymentAmount] = useState('');
   const [upiPaymentAmount, setUpiPaymentAmount] = useState('');
   const [paymentDate, setPaymentDate] = useState(localToday);
+  const [receiptNumber, setReceiptNumber] = useState('');
   const [savingPayment, setSavingPayment] = useState(false);
 
   const selectedSupplier = suppliers.find((supplier) => supplier.id === selectedSupplierId);
@@ -98,6 +101,7 @@ export const PartyLedgerManagementView: React.FC = () => {
         amount: 0,
         methods: new Set<string>(),
         purchaseNumbers: new Set<string>(),
+        receiptNumber: payment.receiptNumber || null,
       };
       receipt.amount += Number(payment.amount) || 0;
       receipt.methods.add(payment.method);
@@ -195,7 +199,7 @@ export const PartyLedgerManagementView: React.FC = () => {
         date: String(payment.date).slice(0, 10),
         kind: 'Payment' as const,
         order: purchaseIndex + paymentIndex / 1000,
-        description: `Payment received · ${payment.method === 'CASH' ? 'Cash' : payment.method === 'UPI' ? 'UPI' : payment.method}`,
+        description: `Payment received · ${payment.method === 'CASH' ? 'Cash' : payment.method === 'UPI' ? 'UPI' : payment.method}${payment.receiptNumber ? ` · Receipt #${payment.receiptNumber}` : ''}`,
         debit: 0,
         credit: Number(payment.amount) || 0,
       })),
@@ -320,6 +324,7 @@ export const PartyLedgerManagementView: React.FC = () => {
           <div class="line"><span class="label">Supplier</span><strong>${escapeHtml(ledger.supplier.name)}</strong></div>
           <div class="line"><span class="label">Date</span><span>${escapeHtml(displayDate)}</span></div>
           <div class="line"><span class="label">Payment method</span><strong>${escapeHtml(methods)}</strong></div>
+          ${receipt.receiptNumber ? `<div class="line"><span class="label">Receipt number</span><strong>${escapeHtml(receipt.receiptNumber)}</strong></div>` : ''}
         </section>
         <div class="line total"><span>Amount paid</span><span>${escapeHtml(formatCurrency(receipt.amount))}</span></div>
         ${receipt.purchaseNumbers.size ? `<section class="applied"><h2>Applied against</h2>${appliedBills}</section>` : ''}
@@ -350,11 +355,13 @@ export const PartyLedgerManagementView: React.FC = () => {
         purchaseId: oldestDuePurchase.id,
         tenders,
         paymentDate,
+        ...(receiptNumber.trim() ? { receiptNumber: receiptNumber.trim() } : {}),
       });
       await reloadLedger();
       setPaymentOpen(false);
       setCashPaymentAmount('');
       setUpiPaymentAmount('');
+      setReceiptNumber('');
       showToast('Payment recorded and applied to the oldest outstanding bills first.');
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Unable to record the supplier payment.', 'error');
@@ -386,7 +393,7 @@ export const PartyLedgerManagementView: React.FC = () => {
                 <button type="button" disabled={!ledger || ledgerLoading} onClick={printSupplierLedger} className="inline-flex h-11 items-center gap-2 rounded-lg border border-[#eadfc8] bg-white px-3 text-sm font-semibold text-[#765000] shadow-sm hover:bg-[#fffaf0] disabled:cursor-not-allowed disabled:opacity-50"><Printer size={15} />Print / Save PDF</button>
                 <button type="button" onClick={() => void removeSupplier(selectedSupplier)} className="h-11 rounded-lg border border-red-200 bg-white px-3 text-sm font-semibold text-red-700 shadow-sm hover:bg-red-50">Deactivate</button>
               </>}
-              <button type="button" disabled={!ledger || Number(ledger.totals.outstanding) <= 0 || ledgerLoading} onClick={() => { setCashPaymentAmount(String(Number(ledger?.totals.outstanding || 0))); setUpiPaymentAmount(''); setPaymentDate(localToday()); setPaymentOpen(true); }} className="inline-flex h-11 items-center gap-2 rounded-lg bg-[#c58a00] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#a97000] disabled:cursor-not-allowed disabled:opacity-45"><Wallet size={16} />Record payment</button>
+              <button type="button" disabled={!ledger || Number(ledger.totals.outstanding) <= 0 || ledgerLoading} onClick={() => { setCashPaymentAmount(String(Number(ledger?.totals.outstanding || 0))); setUpiPaymentAmount(''); setPaymentDate(localToday()); setReceiptNumber(''); setPaymentOpen(true); }} className="inline-flex h-11 items-center gap-2 rounded-lg bg-[#c58a00] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#a97000] disabled:cursor-not-allowed disabled:opacity-45"><Wallet size={16} />Record payment</button>
             </div>
           </div>
 
@@ -415,7 +422,7 @@ export const PartyLedgerManagementView: React.FC = () => {
                         <td className={`px-3 py-3 font-semibold ${Number(purchase.outstanding) > 0 ? 'text-[#a86600]' : 'text-[#77736d]'}`}>{formatCurrency(Number(purchase.outstanding))}</td>
                         <td className="min-w-[170px] px-3 py-3">{purchase.payments.length ? purchase.payments.map((payment) => {
                           const receipt = paymentReceipts.get(payment.paymentGroupId || payment.id);
-                          return <div key={payment.id} className="mb-1 flex items-center gap-1.5 text-xs text-[#68645e] last:mb-0"><span>{String(payment.date).slice(0, 10)} · {payment.method} · {formatCurrency(Number(payment.amount))}</span>{receipt && receipt.firstPaymentId === payment.id && <button type="button" onClick={() => printSupplierPaymentReceipt(payment)} aria-label={`Print payment receipt for ${formatCurrency(receipt.amount)}`} title="Print payment receipt" className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[#765000] hover:bg-[#fff1c9] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c58a00]"><Printer size={14} /></button>}</div>;
+                          return <div key={payment.id} className="mb-1 flex items-center gap-1.5 text-xs text-[#68645e] last:mb-0"><span>{String(payment.date).slice(0, 10)} · {payment.method} · {formatCurrency(Number(payment.amount))}{payment.receiptNumber ? <span className="block font-medium text-[#765000]">Receipt # {payment.receiptNumber}</span> : null}</span>{receipt && receipt.firstPaymentId === payment.id && <button type="button" onClick={() => printSupplierPaymentReceipt(payment)} aria-label={`Print payment receipt for ${formatCurrency(receipt.amount)}`} title="Print payment receipt" className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[#765000] hover:bg-[#fff1c9] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c58a00]"><Printer size={14} /></button>}</div>;
                         }) : <span className="text-[#77736d]">—</span>}</td>
                       </tr>
                     ))}
@@ -472,6 +479,7 @@ export const PartyLedgerManagementView: React.FC = () => {
                 <label className="flex flex-col gap-1 text-sm font-medium text-[#68645e]">Payment date<input type="date" value={paymentDate} onChange={(event) => setPaymentDate(event.target.value)} className="h-11 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-[#272727] outline-none focus:border-[#c58a00]" /></label>
                 <div className="flex items-end text-xs text-[#77736d]">Allocated oldest outstanding first.</div>
               </div>
+              <label className="flex flex-col gap-1 text-sm font-medium text-[#68645e]">Receipt Number <span className="font-normal text-xs text-[#77736d]">Optional</span><input type="text" value={receiptNumber} onChange={(event) => setReceiptNumber(event.target.value)} maxLength={120} className="h-11 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-[#272727] outline-none focus:border-[#c58a00]" placeholder="Enter receipt number" /></label>
             </div>
             <div className="mt-5 flex justify-end gap-2 border-t border-[#efede8] pt-3"><button type="button" disabled={savingPayment} onClick={() => setPaymentOpen(false)} className="h-10 rounded-lg border border-[#e9e3d9] px-4 text-sm font-semibold text-[#555]">Cancel</button><button type="button" disabled={savingPayment} onClick={() => void submitPayment()} className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#ffe4a0] px-4 text-sm font-semibold text-[#493819] shadow-sm disabled:opacity-60">{savingPayment && <LoaderCircle size={15} className="animate-spin" />}{savingPayment ? 'Saving…' : 'Save payment'}</button></div>
           </div>

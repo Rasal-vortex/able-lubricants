@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { useApp } from "../context/AppContext";
 import { Product } from "../types";
 import { formatCurrency } from "../utils/currency";
@@ -34,6 +34,10 @@ export const ProductEntryView: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState("");
   const [brandFilter, setBrandFilter] = useState("all");
   const [stockFilter, setStockFilter] = useState("all");
+  const [deletingProductIds, setDeletingProductIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const deletingProductIdsRef = useRef(new Set<string>());
 
   // Drawer state
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -46,6 +50,9 @@ export const ProductEntryView: React.FC = () => {
   const [formUnitId, setFormUnitId] = useState("");
   const [formQty, setFormQty] = useState("0");
   const [stockAdjustmentReason, setStockAdjustmentReason] = useState("");
+  const [stockAdjustmentBatchId, setStockAdjustmentBatchId] = useState("");
+  const [stockAdjustmentPurchaseRate, setStockAdjustmentPurchaseRate] = useState("");
+  const [stockAdjustmentSellingRate, setStockAdjustmentSellingRate] = useState("");
   const [formPurchaseRate, setFormPurchaseRate] = useState("");
   const [formSellingPrice, setFormSellingPrice] = useState("");
   const [formMRP, setFormMRP] = useState("");
@@ -141,6 +148,9 @@ export const ProductEntryView: React.FC = () => {
     setFormUnitId("");
     setFormQty("0");
     setStockAdjustmentReason("");
+    setStockAdjustmentBatchId("");
+    setStockAdjustmentPurchaseRate("");
+    setStockAdjustmentSellingRate("");
     setFormPurchaseRate("");
     setFormSellingPrice("");
     setFormMRP("");
@@ -164,6 +174,9 @@ export const ProductEntryView: React.FC = () => {
     setFormUnitId(product.unitId || productUnit?.id || "");
     setFormQty(product.quantity.toString());
     setStockAdjustmentReason("");
+    setStockAdjustmentBatchId("");
+    setStockAdjustmentPurchaseRate("");
+    setStockAdjustmentSellingRate("");
     setFormPurchaseRate(String(product.purchaseRate ?? 0));
     setFormSellingPrice(product.sellingPrice.toString());
     setFormMRP(product.mrp > 0 ? product.mrp.toString() : "");
@@ -216,6 +229,18 @@ export const ProductEntryView: React.FC = () => {
       showToast("Only Admin users can change stock quantity.", "error");
       return;
     }
+    const stockDelta = productBeingEdited ? qty - productBeingEdited.quantity : 0;
+    const stockOutBatch = stockDelta < 0
+      ? productBeingEdited?.batches.find((batch) => batch.id === stockAdjustmentBatchId)
+      : undefined;
+    if (stockDelta > 0 && (!Number.isFinite(Number(stockAdjustmentPurchaseRate)) || Number(stockAdjustmentPurchaseRate) <= 0 || !Number.isFinite(Number(stockAdjustmentSellingRate)) || Number(stockAdjustmentSellingRate) <= 0)) {
+      showToast("Stock increases need a positive purchase rate and selling rate for the new batch.", "error");
+      return;
+    }
+    if (stockDelta < 0 && (!stockOutBatch || -stockDelta > stockOutBatch.remainingQuantity)) {
+      showToast("Select a batch with enough available stock for this reduction.", "error");
+      return;
+    }
     setFormSaving(true);
     try {
       const payload = {
@@ -231,7 +256,9 @@ export const ProductEntryView: React.FC = () => {
         await updateProduct(editingId, payload);
         if (quantityChanged) {
           try {
-            await adjustProductStock(editingId, qty, stockAdjustmentReason);
+            await adjustProductStock(editingId, qty, stockAdjustmentReason, stockDelta > 0
+              ? { purchaseRate: Number(stockAdjustmentPurchaseRate), sellingRate: Number(stockAdjustmentSellingRate) }
+              : { inventoryBatchId: stockAdjustmentBatchId });
           } catch (error) {
             throw new Error(
               `Product details were saved, but stock was not confirmed: ${error instanceof Error ? error.message : "stock adjustment failed."}`,
@@ -304,21 +331,26 @@ export const ProductEntryView: React.FC = () => {
   };
 
   const handleDelete = async (id: string, name: string) => {
-    if (
-      window.confirm(
-        `Are you sure you want to remove "${name}" from the billing catalog?`,
-      )
-    ) {
-      try {
-        await deleteProduct(id);
-      } catch (error) {
-        showToast(
-          error instanceof Error
-            ? error.message
-            : "Unable to deactivate the product.",
-          "error",
-        );
-      }
+    if (deletingProductIdsRef.current.has(id)) return;
+    deletingProductIdsRef.current.add(id);
+    setDeletingProductIds(new Set(deletingProductIdsRef.current));
+    try {
+      if (
+        !window.confirm(
+          `Are you sure you want to remove "${name}" from the billing catalog?`,
+        )
+      ) return;
+      await deleteProduct(id);
+    } catch (error) {
+      showToast(
+        error instanceof Error
+          ? error.message
+          : "Unable to deactivate the product.",
+        "error",
+      );
+    } finally {
+      deletingProductIdsRef.current.delete(id);
+      setDeletingProductIds(new Set(deletingProductIdsRef.current));
     }
   };
 
@@ -494,6 +526,7 @@ export const ProductEntryView: React.FC = () => {
                   return (
                     <tr
                       key={p.id}
+                      aria-busy={deletingProductIds.has(p.id)}
                       className={`hover:bg-surface-container-low transition-colors group ${
                         idx % 2 === 1 ? "bg-surface-container-lowest/50" : ""
                       }`}
@@ -534,13 +567,15 @@ export const ProductEntryView: React.FC = () => {
                             </span>
                           </button>
                           <button
-                            className="p-1 rounded text-on-surface-variant hover:text-error hover:bg-error-container/20 transition-colors"
+                            className="p-1 rounded text-on-surface-variant hover:text-error hover:bg-error-container/20 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                             onClick={() => void handleDelete(p.id, p.name)}
-                            title="Deactivate Product"
+                            aria-label={deletingProductIds.has(p.id) ? "Deleting product" : "Deactivate product"}
+                            disabled={deletingProductIds.has(p.id)}
+                            title={deletingProductIds.has(p.id) ? "Deleting product…" : "Deactivate Product"}
                             type="button"
                           >
-                            <span className="material-symbols-outlined text-[18px]">
-                              delete
+                            <span className={`material-symbols-outlined text-[18px] ${deletingProductIds.has(p.id) ? "animate-spin" : ""}`}>
+                              {deletingProductIds.has(p.id) ? "progress_activity" : "delete"}
                             </span>
                           </button>
                         </div>
@@ -787,17 +822,48 @@ export const ProductEntryView: React.FC = () => {
                 )}
               </label>
               {drawerMode === "edit" && isAdmin && quantityChanged && (
-                <label className="flex flex-col gap-1.5 text-[12px] font-medium text-on-surface">
-                  Stock adjustment reason (optional)
-                  <input
-                    data-product-form-field="reason"
-                    onKeyDown={handleProductFormArrowNavigation}
-                    value={stockAdjustmentReason}
-                    onChange={(e) => setStockAdjustmentReason(e.target.value)}
-                    placeholder="e.g. Physical stock count correction"
-                    className="h-8 px-2 bg-surface-container-low border border-outline-variant rounded text-on-surface font-normal"
-                  />
-                </label>
+                <div className="flex flex-col gap-3 rounded-lg border border-outline-variant/40 bg-surface-container-lowest p-3">
+                  {Number(formQty) < (productBeingEdited?.quantity ?? 0) ? (
+                    <label className="flex flex-col gap-1.5 text-[12px] font-medium text-on-surface">
+                      Batch to reduce
+                      <select
+                        data-product-form-field="batch"
+                        value={stockAdjustmentBatchId}
+                        onChange={(event) => setStockAdjustmentBatchId(event.target.value)}
+                        className="h-8 px-2 bg-surface-container-low border border-outline-variant rounded text-on-surface font-normal"
+                      >
+                        <option value="">Select a stock batch</option>
+                        {productBeingEdited?.batches.map((batch) => (
+                          <option key={batch.id} value={batch.id}>
+                            {batch.label || `${batch.source} · ${new Date(batch.receivedAt).toLocaleDateString()}`} · {batch.remainingQuantity} available
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-3">
+                      <label className="flex flex-col gap-1.5 text-[12px] font-medium text-on-surface">
+                        New batch purchase rate (₹)
+                        <NumericTextInput maxDecimals={2} value={stockAdjustmentPurchaseRate} onValueChange={setStockAdjustmentPurchaseRate} className="h-8 px-2 bg-surface-container-low border border-outline-variant rounded text-on-surface font-normal" />
+                      </label>
+                      <label className="flex flex-col gap-1.5 text-[12px] font-medium text-on-surface">
+                        New batch selling rate (₹)
+                        <NumericTextInput maxDecimals={2} value={stockAdjustmentSellingRate} onValueChange={setStockAdjustmentSellingRate} className="h-8 px-2 bg-surface-container-low border border-outline-variant rounded text-on-surface font-normal" />
+                      </label>
+                    </div>
+                  )}
+                  <label className="flex flex-col gap-1.5 text-[12px] font-medium text-on-surface">
+                    Stock adjustment reason (optional)
+                    <input
+                      data-product-form-field="reason"
+                      onKeyDown={handleProductFormArrowNavigation}
+                      value={stockAdjustmentReason}
+                      onChange={(e) => setStockAdjustmentReason(e.target.value)}
+                      placeholder="e.g. Physical stock count correction"
+                      className="h-8 px-2 bg-surface-container-low border border-outline-variant rounded text-on-surface font-normal"
+                    />
+                  </label>
+                </div>
               )}
               {/* Prices Row */}
               <div className="grid grid-cols-2 gap-space-md">
