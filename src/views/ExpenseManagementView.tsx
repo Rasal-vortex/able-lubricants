@@ -4,6 +4,7 @@ import { useApp } from '../context/AppContext';
 import { Expense } from '../types';
 import { formatCurrency } from '../utils/currency';
 import { NumericTextInput } from '../components/ui/NumericTextInput';
+import { DEFAULT_PAGE_SIZE, getPageRecords, getPaginationRange, PaginationControls } from '../components/PaginationControls';
 
 interface ExpenseManagementViewProps {
   embedded?: boolean;
@@ -21,6 +22,7 @@ export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ em
   const localIso = (date: Date) => new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
   const [fromDate, setFromDate] = useState(localIso(new Date(now.getFullYear(), now.getMonth(), 1)));
   const [toDate, setToDate] = useState(localIso(now));
+  const [expensePage, setExpensePage] = useState(1);
 
   // Modal State
   const [modalOpen, setModalOpen] = useState(false);
@@ -49,6 +51,12 @@ export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ em
   });
 
   const totalExpenseAmount = filteredExpenses.reduce((sum, e) => sum + e.amount, 0);
+  const expensePageCount = Math.max(1, Math.ceil(filteredExpenses.length / DEFAULT_PAGE_SIZE));
+  const safeExpensePage = Math.min(expensePage, expensePageCount);
+  const pageExpenses = getPageRecords(filteredExpenses, safeExpensePage);
+  const expenseRange = getPaginationRange(filteredExpenses.length, safeExpensePage);
+
+  useEffect(() => setExpensePage(1), [effectiveFromDate, effectiveToDate, effectiveSearchTerm]);
 
   const openAddModal = () => {
     setModalMode('add');
@@ -201,7 +209,7 @@ export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ em
               </tr>
             </thead>
             <tbody className="font-body-md text-body-md text-on-surface">
-              {filteredExpenses.map((exp, idx) => {
+              {pageExpenses.map((exp, idx) => {
                 return (
                   <tr
                     key={exp.id}
@@ -247,12 +255,15 @@ export const ExpenseManagementView: React.FC<ExpenseManagementViewProps> = ({ em
         {/* Pagination Container */}
         <div className="flex flex-col sm:flex-row items-center justify-between px-space-md py-space-sm bg-surface-container-low gap-space-sm border-t border-outline-variant/20">
           <div className="font-data-mono-sm text-data-mono-sm text-on-surface-variant">
-            Showing <span className="font-semibold text-on-surface">{filteredExpenses.length ? `1-${filteredExpenses.length}` : '0'}</span> of{' '}
-            <span className="font-semibold text-on-surface">{embedded ? expensesInRange.length : expenses.length}</span> expenses
+            Showing <span className="font-semibold text-on-surface">{expenseRange.start}-{expenseRange.end}</span> of{' '}
+            <span className="font-semibold text-on-surface">{filteredExpenses.length}</span> matching expenses
           </div>
-          <div className="text-right">
-            <div className="text-xs font-semibold uppercase tracking-wide text-on-surface-variant">Grand Total</div>
-            <div className="text-2xl font-extrabold tracking-tight text-on-surface">{formatCurrency(totalExpenseAmount)}</div>
+          <div className="flex flex-wrap items-center justify-end gap-4">
+            <div className="text-right">
+              <div className="text-xs font-semibold uppercase tracking-wide text-on-surface-variant">Grand Total</div>
+              <div className="text-2xl font-extrabold tracking-tight text-on-surface">{formatCurrency(totalExpenseAmount)}</div>
+            </div>
+            <PaginationControls totalRecords={filteredExpenses.length} page={safeExpensePage} pageSize={DEFAULT_PAGE_SIZE} onPageChange={setExpensePage} />
           </div>
         </div>
       </div>

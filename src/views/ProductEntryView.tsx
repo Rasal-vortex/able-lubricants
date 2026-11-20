@@ -1,10 +1,11 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useApp } from "../context/AppContext";
 import { Product } from "../types";
 import { formatCurrency } from "../utils/currency";
 import { UnitEditorModal } from "../components/UnitEditorModal";
 import { NumericTextInput } from "../components/ui/NumericTextInput";
 import { isUnitQuantityValid } from "../utils/unitQuantity";
+import { DEFAULT_PAGE_SIZE, getPageRecords, getPaginationRange, PaginationControls } from "../components/PaginationControls";
 
 const isUuid = (value: string) =>
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
@@ -34,6 +35,7 @@ export const ProductEntryView: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState("");
   const [brandFilter, setBrandFilter] = useState("all");
   const [stockFilter, setStockFilter] = useState("all");
+  const [productPage, setProductPage] = useState(1);
   const [deletingProductIds, setDeletingProductIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -88,6 +90,11 @@ export const ProductEntryView: React.FC = () => {
 
     return matchesSearch && matchesBrand && matchesStock;
   });
+  const pageCount = Math.max(1, Math.ceil(filteredProducts.length / DEFAULT_PAGE_SIZE));
+  const safeProductPage = Math.min(productPage, pageCount);
+  const pageProducts = getPageRecords(filteredProducts, safeProductPage);
+  const productRange = getPaginationRange(filteredProducts.length, safeProductPage);
+  useEffect(() => setProductPage(1), [searchTerm, brandFilter, stockFilter]);
   const brandNames = Array.from(
     new Set(products.map((product) => product.brand).filter(Boolean)),
   );
@@ -522,7 +529,7 @@ export const ProductEntryView: React.FC = () => {
                 </tr>
               )}
               {!masterDataLoading &&
-                filteredProducts.map((p, idx) => {
+                pageProducts.map((p, idx) => {
                   return (
                     <tr
                       key={p.id}
@@ -605,67 +612,16 @@ export const ProductEntryView: React.FC = () => {
             <span className="font-data-mono-sm text-data-mono-sm">
               Showing{" "}
               <strong className="text-on-surface font-semibold">
-                1-{filteredProducts.length}
+                {productRange.start}-{productRange.end}
               </strong>{" "}
               of{" "}
               <strong className="text-on-surface font-semibold">
-                {products.length}
+                {filteredProducts.length}
               </strong>{" "}
-              products
+              matching products <span className="text-outline">({products.length} total)</span>
             </span>
           </div>
-          <div className="flex items-center gap-1">
-            <button
-              className="h-8 px-2.5 rounded bg-surface-container-lowest text-outline hover:text-on-surface transition-colors flex items-center justify-center disabled:opacity-40"
-              disabled
-              type="button"
-            >
-              <span className="material-symbols-outlined text-[18px]">
-                chevron_left
-              </span>
-              <span className="hidden sm:inline ml-1 font-body-sm text-body-sm">
-                Previous
-              </span>
-            </button>
-            <button
-              className="h-8 w-8 rounded bg-primary-container text-on-primary font-data-mono-sm text-data-mono-sm font-semibold"
-              type="button"
-            >
-              1
-            </button>
-            <button
-              className="h-8 w-8 rounded bg-surface-container-lowest text-on-surface hover:bg-surface-container font-data-mono-sm text-data-mono-sm transition-colors"
-              type="button"
-            >
-              2
-            </button>
-            <button
-              className="h-8 w-8 rounded bg-surface-container-lowest text-on-surface hover:bg-surface-container font-data-mono-sm text-data-mono-sm transition-colors"
-              type="button"
-            >
-              3
-            </button>
-            <span className="px-1 text-outline font-data-mono-sm text-data-mono-sm">
-              ...
-            </span>
-            <button
-              className="h-8 w-8 rounded bg-surface-container-lowest text-on-surface hover:bg-surface-container font-data-mono-sm text-data-mono-sm transition-colors"
-              type="button"
-            >
-              8
-            </button>
-            <button
-              className="h-8 px-2.5 rounded bg-surface-container-lowest text-on-surface hover:bg-surface-container transition-colors flex items-center justify-center"
-              type="button"
-            >
-              <span className="hidden sm:inline mr-1 font-body-sm text-body-sm">
-                Next
-              </span>
-              <span className="material-symbols-outlined text-[18px]">
-                chevron_right
-              </span>
-            </button>
-          </div>
+          <PaginationControls totalRecords={filteredProducts.length} page={safeProductPage} pageSize={DEFAULT_PAGE_SIZE} onPageChange={setProductPage} />
         </div>
       </div>
 

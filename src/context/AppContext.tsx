@@ -35,7 +35,10 @@ import {
   createCustomerPaymentRequest,
   getCustomerCreditBillsRequest,
   createCustomerCreditBillRequest,
+  deleteCustomerCreditBillRequest,
   recordManualCreditBillPaymentRequest,
+  cancelSaleCreditBillRequest,
+  settleCreditBillRefundRequest,
   createExpenseRequest,
   getExpensesRequest,
   updateExpenseRequest,
@@ -68,11 +71,12 @@ import { formatCurrency } from '../utils/currency';
 import { getSaleCouponErrorMessage, normalizeCouponCode } from '../utils/coupons';
 import { isUnitQuantityValid } from '../utils/unitQuantity';
 
-const toPaymentMethodLabel = (method: PaymentMethod) => ({
+const toPaymentMethodLabel = (method: PaymentMethod | 'STORE_CREDIT') => ({
   CASH: 'Cash',
   UPI: 'UPI',
   BANK_TRANSFER: 'Bank transfer',
   CHEQUE: 'Cheque',
+  STORE_CREDIT: 'Store credit',
 })[method];
 
 const mapCreditBill = (bill: ApiCreditBill): CreditBill => ({
@@ -91,6 +95,16 @@ const mapCreditBill = (bill: ApiCreditBill): CreditBill => ({
   netDue: Number(bill.netDue),
   dueDate: bill.dueDate,
   remarks: bill.remarks || undefined,
+  invoiceReference: bill.invoiceReference || undefined,
+  saleItems: bill.saleItems?.map((item) => ({ ...item, quantity: Number(item.quantity) })),
+  cancelledAt: bill.cancelledAt || undefined,
+  cancellationReason: bill.cancellationReason || undefined,
+  cancelledByName: bill.cancelledByName || undefined,
+  actualReceivedAmount: bill.actualReceivedAmount == null ? undefined : Number(bill.actualReceivedAmount),
+  paymentCorrections: bill.paymentCorrections?.map((correction) => ({ ...correction, amount: Number(correction.amount) })),
+  refundPayable: Number(bill.refundPayable || 0),
+  refunds: bill.refunds?.map((refund) => ({ ...refund, amount: Number(refund.amount) })),
+  payments: bill.payments?.map((payment) => ({ ...payment, amount: Number(payment.amount) })),
 });
 
 const DEMO_STORAGE_PREFIX = 'able_lubes_demo_v1_';
@@ -154,6 +168,7 @@ const mapCustomer = (customer: ApiCustomer): Party => ({
   phone: customer.phone || '',
   address: customer.address || '',
   active: customer.active !== false,
+  availableStoreCredit: Number(customer.availableStoreCredit) || 0,
   type: 'customer',
 });
 
@@ -218,6 +233,9 @@ interface AppContextType {
   creditBillLoading: boolean;
   creditBillError: string | null;
   addCreditBill: (bill: Omit<CreditBill, 'id'> & { customerId?: string }) => Promise<boolean>;
+  deleteCreditBill: (id: string) => Promise<boolean>;
+  cancelCreditBillSale: (id: string, reason: string, refundMode: 'PENDING' | 'NOW', actualPayments: Array<{ amount: number; method: 'CASH' | 'UPI' | 'BANK' | 'OTHER' }>, refunds: Array<{ amount: number; method: 'CASH' | 'UPI' | 'BANK' | 'OTHER'; reference?: string; originalPaymentId?: string }>, actualReceivedConfirmed: boolean) => Promise<boolean>;
+  settleCreditBillRefund: (id: string, amount: number, method: 'CASH' | 'UPI' | 'BANK' | 'OTHER', reference: string | undefined, idempotencyKey: string, originalPaymentId?: string) => Promise<boolean>;
   collectCreditPayment: (billNumber: string, amount: number, paymentMethod: string) => Promise<boolean>;
 
   // Expenses
@@ -232,6 +250,7 @@ interface AppContextType {
 
   // Party Ledger
   customers: Party[];
+  refreshCustomers: () => Promise<void>;
   addCustomer: (customer: CustomerPayload) => Promise<void>;
   updateCustomer: (id: string, updates: Partial<CustomerPayload>) => Promise<void>;
   deactivateCustomer: (id: string) => Promise<void>;
@@ -720,6 +739,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     showToast(`Customer "${customer.name}" added.`);
   };
 
+  const refreshCustomers = async () => {
+    if (!authSession) return;
+    const latest = await getCustomers(authSession.token);
+    setCustomers(latest.map(mapCustomer).filter((customer) => customer.active !== false));
+  };
+
   const updateCustomer = async (id: string, updates: Partial<CustomerPayload>) => {
     if (!authSession) throw new Error('Sign in to update customers.');
     const updated = await updateCustomerRequest(authSession.token, id, updates);
@@ -911,6 +936,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             method: tender.method,
             ...(tender.notes ? { notes: tender.notes } : {}),
           });
+          if (tender.method === 'STORE_CREDIT' && customer) {
+            setCustomers((previous) => previous.map((entry) => entry.id === customer.id
+              ? { ...entry, availableStoreCredit: Math.max(0, (entry.availableStoreCredit || 0) - tender.amount) }
+              : entry));
+          }
           paymentRecordedAmount += tender.amount;
         }
       } catch (error) {
@@ -1014,6 +1044,95 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return true;
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'The credit bill could not be saved.', 'error');
+      return false;
+    }
+  };
+
+  const deleteCreditBill = async (id: string): Promise<boolean> => {
+    if (!authSession) {
+      showToast('Sign in to delete a customer credit bill.', 'error');
+      return false;
+    }
+    const bill = creditBills.find((entry) => entry.id === id);
+    if (!bill) {
+      showToast('Credit bill was not found. Refresh the list and try again.', 'error');
+      return false;
+    }
+    if (bill.saleId || (bill.paidAmount || 0) > 0) {
+      showToast('Only manually added credit bills with no payments can be deleted.', 'error');
+      return false;
+    }
+    try {
+      await deleteCustomerCreditBillRequest(authSession.token, id);
+      setCreditBills((previous) => previous.filter((entry) => entry.id !== id));
+      showToast(`Credit bill ${bill.billNumber} deleted.`);
+      return true;
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'The credit bill could not be deleted.', 'error');
+      return false;
+    }
+  };
+
+  const cancelCreditBillSale = async (
+    id: string,
+    reason: string,
+    refundMode: 'PENDING' | 'NOW',
+    actualPayments: Array<{ amount: number; method: 'CASH' | 'UPI' | 'BANK' | 'OTHER' }>,
+    refunds: Array<{ amount: number; method: 'CASH' | 'UPI' | 'BANK' | 'OTHER'; reference?: string; originalPaymentId?: string }>,
+    actualReceivedConfirmed: boolean,
+  ): Promise<boolean> => {
+    if (!authSession) {
+      showToast('Sign in to cancel a sale.', 'error');
+      return false;
+    }
+    try {
+      await cancelSaleCreditBillRequest(authSession.token, id, { reason, refundMode, actualPayments, refunds, actualReceivedConfirmed });
+      const [billResult, productResult] = await Promise.allSettled([
+        getCustomerCreditBillsRequest(authSession.token),
+        getProducts(authSession.token),
+      ]);
+      if (billResult.status === 'fulfilled') {
+        setCreditBills(billResult.value.map(mapCreditBill));
+        setCreditBillError(null);
+      } else setCreditBillError('Sale was cancelled, but the bill history could not be refreshed.');
+      if (productResult.status === 'fulfilled') setProducts(productResult.value.map(mapProduct));
+      showToast(billResult.status === 'fulfilled' && productResult.status === 'fulfilled'
+        ? 'Sale cancelled. Original bill and receipts are preserved.'
+        : 'Sale cancelled. Refresh the page to reload all updated records.', billResult.status === 'fulfilled' ? 'success' : 'warning');
+      return true;
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'The sale could not be cancelled.', 'error');
+      return false;
+    }
+  };
+
+  const settleCreditBillRefund = async (
+    id: string,
+    amount: number,
+    method: 'CASH' | 'UPI' | 'BANK' | 'OTHER',
+    reference: string | undefined,
+    idempotencyKey: string,
+    originalPaymentId?: string,
+  ): Promise<boolean> => {
+    if (!authSession) {
+      showToast('Sign in to settle a customer refund.', 'error');
+      return false;
+    }
+    try {
+      await settleCreditBillRefundRequest(authSession.token, id, { amount, method, reference, idempotencyKey, originalPaymentId });
+      try {
+        const rows = await getCustomerCreditBillsRequest(authSession.token);
+        setCreditBills(rows.map(mapCreditBill));
+        setCreditBillError(null);
+      } catch {
+        setCreditBillError('Refund was recorded, but the bill history could not be refreshed.');
+        showToast('Refund recorded. Refresh the page to reload the updated balance.', 'warning');
+        return true;
+      }
+      showToast('Customer refund settlement recorded.');
+      return true;
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'The refund settlement could not be saved.', 'error');
       return false;
     }
   };
@@ -1406,6 +1525,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         creditBillLoading,
         creditBillError,
         addCreditBill,
+        deleteCreditBill,
+        cancelCreditBillSale,
+        settleCreditBillRefund,
         collectCreditPayment,
         expenses,
         addExpense,
@@ -1414,6 +1536,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         addPurchaseBill,
         cancelPurchaseBill,
         customers,
+        refreshCustomers,
         addCustomer,
         updateCustomer,
         deactivateCustomer,

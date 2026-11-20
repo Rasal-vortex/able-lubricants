@@ -278,6 +278,67 @@ export interface ApiSale {
   createdAt?: string;
 }
 
+export interface ApiSaleReturnDetail {
+  id: string;
+  invoiceNumber: string;
+  billDate: string;
+  totalAmount: string | number;
+  discountAmount: string | number;
+  status: string;
+  returnStatus: 'NONE' | 'PARTIALLY_RETURNED' | 'FULLY_RETURNED';
+  customer: { id: string; name: string; availableStoreCredit: string | number } | null;
+  payments: Array<{ id: string; amount: string | number; method: string; paymentDate: string }>;
+  items: Array<{
+    id: string;
+    productId: string;
+    productName: string;
+    inventoryBatchId: string | null;
+    quantity: string | number;
+    displayQuantity?: string | number | null;
+    displayUnitName?: string | null;
+    displayUnitSymbol?: string | null;
+    unitName: string;
+    unitSymbol?: string | null;
+    unitAllowsDecimals: boolean;
+    unitSellingPrice: string | number;
+    discountAmount: string | number;
+    lineTotal: string | number;
+    historicalCostSnapshot?: string | number | null;
+    returnedQuantity: string | number;
+    returnedAmount: string | number;
+    returnedDisplayQuantity?: string | number | null;
+    remainingQuantity: string | number;
+  }>;
+  returns: Array<{
+    id: string;
+    reason: string;
+    returnedAt: string;
+    returnedBy?: { id: string; name: string } | null;
+    amount: string | number;
+    creditAppliedAmount: string | number;
+    settlementType: 'BALANCE_OFFSET' | 'REFUND' | 'CUSTOMER_CREDIT' | 'PENDING';
+    pendingRefundPayable: string | number;
+    items: Array<{ saleItemId: string; productName: string; quantity: string | number; amount: string | number; costAmount: string | number }>;
+    settlements: Array<{ id: string; type: string; amount: string | number; method?: string | null; reference?: string | null; createdAt: string; createdBy?: { id: string; name: string } | null }>;
+  }>;
+  creditBill: { id: string; billAmount: string | number; paidAmount: string | number } | null;
+}
+
+export interface CreateSalesReturnPayload {
+  idempotencyKey: string;
+  reason: string;
+  settlementType: 'BALANCE_OFFSET' | 'REFUND' | 'CUSTOMER_CREDIT' | 'PENDING';
+  items: Array<{ saleItemId: string; quantity: number }>;
+  refunds?: Array<{ amount: number; method: 'CASH' | 'UPI' | 'BANK' | 'OTHER'; reference?: string }>;
+}
+
+export const getSaleForReturnRequest = (token: string, id: string) =>
+  apiRequest<ApiSaleReturnDetail>(`/sales/${encodeURIComponent(id)}`, {}, token);
+export const createSalesReturnRequest = (token: string, id: string, payload: CreateSalesReturnPayload) =>
+  apiRequest(`/sales/${encodeURIComponent(id)}/returns`, { method: 'POST', body: JSON.stringify(payload) }, token);
+export const settleSalesReturnRequest = (token: string, id: string, payload: { idempotencyKey: string; refunds: Array<{ amount: number; method: 'CASH' | 'UPI' | 'BANK' | 'OTHER'; reference?: string }> }) =>
+  apiRequest(`/sales/returns/${encodeURIComponent(id)}/settlements`, { method: 'POST', body: JSON.stringify(payload) }, token);
+
 export interface ApiCreditBill {
   id: string;
   saleId?: string | null;
@@ -287,13 +348,22 @@ export interface ApiCreditBill {
   billDate: string;
   dueDate: string;
   term: string;
-  status: 'Overdue' | 'Partially Paid' | 'Unpaid' | 'Settled';
+  status: 'Overdue' | 'Partially Paid' | 'Unpaid' | 'Settled' | 'Cancelled';
   priorBalance: string | number;
   billAmount: string | number;
   paidAmount: string | number;
   netDue: string | number;
   remarks?: string | null;
-  payments: Array<{ id: string; amount: string | number; method: string; date: string }>;
+  invoiceReference?: string | null;
+  saleItems?: Array<{ productName: string; quantity: string | number; unitName: string; unitSymbol?: string | null }>;
+  cancelledAt?: string | null;
+  cancellationReason?: string | null;
+  cancelledByName?: string | null;
+  actualReceivedAmount?: string | number | null;
+  paymentCorrections?: Array<{ id: string; type: 'REVERSAL' | 'ACTUAL_RECEIPT'; amount: string | number; method: string; reason: string; createdAt: string; originalPaymentId?: string | null }>;
+  refundPayable?: string | number;
+  refunds?: Array<{ id: string; amount: string | number; method: string; reference?: string | null; date: string; createdByName?: string | null; originalPaymentId?: string | null }>;
+  payments?: Array<{ id: string; amount: string | number; method: string; date: string }>;
 }
 
 export interface CreateCreditBillPayload {
@@ -391,7 +461,7 @@ export interface ApiPurchaseCancellation {
 }
 
 export type PaymentMethod = 'CASH' | 'UPI' | 'BANK_TRANSFER' | 'CHEQUE';
-export type CustomerTenderMethod = 'CASH' | 'UPI' | 'COUPON';
+export type CustomerTenderMethod = 'CASH' | 'UPI' | 'COUPON' | 'STORE_CREDIT';
 
 export interface CustomerPaymentPayload {
   customerId?: string;
@@ -467,6 +537,7 @@ export interface CustomerPayload {
 
 export interface ApiCustomer extends CustomerPayload {
   id: string;
+  availableStoreCredit?: string | number;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -552,8 +623,17 @@ export const getCustomerCreditBillsRequest = (token: string) =>
 export const createCustomerCreditBillRequest = (token: string, payload: CreateCreditBillPayload) =>
   apiRequest<ApiCreditBill>('/credit-bills', { method: 'POST', body: JSON.stringify(payload) }, token);
 
+export const deleteCustomerCreditBillRequest = (token: string, id: string) =>
+  apiRequest<{ id: string }>(`/credit-bills/${encodeURIComponent(id)}`, { method: 'DELETE' }, token);
+
 export const recordManualCreditBillPaymentRequest = (token: string, id: string, payload: { amount: number; paymentDate?: string; method: 'CASH' | 'UPI' }) =>
   apiRequest<ApiCreditBill>(`/credit-bills/${encodeURIComponent(id)}/payments`, { method: 'POST', body: JSON.stringify(payload) }, token);
+
+export const cancelSaleCreditBillRequest = (token: string, id: string, payload: { reason: string; refundMode: 'PENDING' | 'NOW'; actualPayments: Array<{ amount: number; method: 'CASH' | 'UPI' | 'BANK' | 'OTHER' }>; refunds: Array<{ amount: number; method: 'CASH' | 'UPI' | 'BANK' | 'OTHER'; reference?: string; originalPaymentId?: string }>; actualReceivedConfirmed: boolean }) =>
+  apiRequest<ApiCreditBill>(`/credit-bills/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: JSON.stringify(payload) }, token);
+
+export const settleCreditBillRefundRequest = (token: string, id: string, payload: { amount: number; method: 'CASH' | 'UPI' | 'BANK' | 'OTHER'; reference?: string; idempotencyKey: string; originalPaymentId?: string }) =>
+  apiRequest<ApiCreditBill>(`/credit-bills/${encodeURIComponent(id)}/refunds`, { method: 'POST', body: JSON.stringify(payload) }, token);
 
 export const getCouponsRequest = async (
   token: string,

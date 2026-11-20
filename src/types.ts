@@ -45,15 +45,18 @@ export interface Party {
   type: 'customer' | 'supplier';
   address?: string;
   active?: boolean;
+  availableStoreCredit?: number;
 }
 
 export interface SaleLineItem {
+  saleItemId?: string;
   productId: string;
   inventoryBatchId?: string;
   name: string;
   sku: string;
   unit: string;
   quantity: number;
+  returnedQuantity?: number;
   displayQuantity?: number;
   displayUnitName?: string;
   displayUnitSymbol?: string;
@@ -76,6 +79,8 @@ export interface CartItem {
 
 export interface SaleRecord {
   id: string;
+  saleId?: string;
+  returnStatus?: 'NONE' | 'PARTIALLY_RETURNED' | 'FULLY_RETURNED';
   billNumber: string;
   dateTime: string;
   customerName: string;
@@ -84,9 +89,10 @@ export interface SaleRecord {
   itemsCount: number;
   itemsList: string;
   paymentMode: 'Cash' | 'Credit' | 'UPI' | 'Coupon' | 'Split';
-  paymentTenders?: Array<{ method: 'CASH' | 'UPI' | 'COUPON'; amount: number; notes?: string }>;
+  paymentTenders?: Array<{ method: 'CASH' | 'UPI' | 'COUPON' | 'STORE_CREDIT'; amount: number; notes?: string }>;
   upiRef?: string;
   amount: number;
+  netSalesAmount?: number;
   subtotal: number;
   billTotal?: number;
   couponCode?: string;
@@ -112,13 +118,23 @@ export interface CreditBill {
   partyName: string;
   gstin: string;
   term: string;
-  status: 'Overdue' | 'Partially Paid' | 'Unpaid' | 'Settled';
+  status: 'Overdue' | 'Partially Paid' | 'Unpaid' | 'Settled' | 'Cancelled';
   overdueDays?: number;
   priorBalance: number;
   billAmount: number;
   netDue: number;
   dueDate: string;
   remarks?: string;
+  invoiceReference?: string;
+  saleItems?: Array<{ productName: string; quantity: number; unitName: string; unitSymbol?: string | null }>;
+  cancelledAt?: string;
+  cancellationReason?: string;
+  cancelledByName?: string;
+  actualReceivedAmount?: number;
+  paymentCorrections?: Array<{ id: string; type: 'REVERSAL' | 'ACTUAL_RECEIPT'; amount: number; method: string; reason: string; createdAt: string; originalPaymentId?: string | null }>;
+  refundPayable?: number;
+  refunds?: Array<{ id: string; amount: number; method: string; reference?: string | null; date: string; createdByName?: string | null; originalPaymentId?: string | null }>;
+  payments?: Array<{ id: string; amount: number; method: string; date: string }>;
 }
 
 export interface Expense {

@@ -5,6 +5,7 @@ import { getExpenseReport, getProfitReport, getSalesReport } from '../services/a
 import LoaderOne from '../components/ui/loader-one';
 import CountUp from '../components/ReactBitsCountUp';
 import { Package, ShoppingCart, TrendingUp, Wallet, type LucideIcon } from 'lucide-react';
+import { DEFAULT_PAGE_SIZE, getPageRecords, getPaginationRange, PaginationControls } from '../components/PaginationControls';
 
 const localDate = (d: Date) => { const x = new Date(d.getTime() - d.getTimezoneOffset() * 60000); return x.toISOString().slice(0, 10); };
 
@@ -20,6 +21,7 @@ export const ReportsProfitView: React.FC = () => {
   const [salesLoading, setSalesLoading] = useState(false);
   const [apiExpenseReport, setApiExpenseReport] = useState<any>(null);
   const [expenseLoading, setExpenseLoading] = useState(false);
+  const [reportPage, setReportPage] = useState(1);
   const normalizeDate = (value?: string) => {
     if (!value) return '';
     if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
@@ -144,6 +146,12 @@ export const ReportsProfitView: React.FC = () => {
       return [date, formatCurrency(daySales), formatCurrency(dayExpense), dayProfit === null ? '—' : formatCurrency(dayProfit)];
     });
   }, [report, rangedPurchases, rangedExpenses, products, creditBills, totalSales, totalExpenses, apiProfit, apiSalesReport, apiExpenseReport, salesInvoices]);
+  const reportPageCount = Math.max(1, Math.ceil(reportRows.length / DEFAULT_PAGE_SIZE));
+  const safeReportPage = Math.min(reportPage, reportPageCount);
+  const pageReportRows = getPageRecords(reportRows, safeReportPage);
+  const reportRange = getPaginationRange(reportRows.length, safeReportPage);
+  useEffect(() => { setReportPage(1); }, [report, from, to]);
+  useEffect(() => { if (reportPage > reportPageCount) setReportPage(reportPageCount); }, [reportPage, reportPageCount]);
   const columns = report === 'sales' ? ['Date', 'Bill', 'Customer', 'Payment', 'Total (INR)'] : report === 'purchases' ? ['Date', 'Supplier invoice', 'Supplier', 'Items', 'Total (INR)', 'Balance (INR)'] : report === 'stock' ? ['SKU', 'Product', 'Batch', 'Unit', 'Available', 'Selling rate (INR)', 'Status'] : report === 'outstanding' ? ['Party type', 'Party', 'Reference', 'Due date', 'Outstanding (INR)', 'Status'] : report === 'profit' ? ['Date', 'Product', 'Quantity', 'Sale (INR)', 'Purchase rate (INR)', 'Cost basis', 'Profit (INR)'] : ['Date', 'Sales (INR)', 'Expenses (INR)', 'Net (INR)'];
   const exportCsv = () => {
     const csv = [columns, ...reportRows].map(row => row.map(value => `"${String(value).replace(/"/g, '""')}"`).join(',')).join('\n');
@@ -212,13 +220,17 @@ export const ReportsProfitView: React.FC = () => {
                 {(profitLoading || salesLoading || expenseLoading) ? (
                   <tr><td colSpan={columns.length} className="px-4 py-14 text-center"><LoaderOne /></td></tr>
                 ) : reportRows.length ? (
-                  reportRows.map((row, i) => <tr key={i} className="transition hover:bg-[#fffdf8]">{row.map((cell, j) => <td key={j} className="px-4 py-3">{cell}</td>)}</tr>)
+                  pageReportRows.map((row, i) => <tr key={(safeReportPage - 1) * DEFAULT_PAGE_SIZE + i} className="transition hover:bg-[#fffdf8]">{row.map((cell, j) => <td key={j} className="px-4 py-3">{cell}</td>)}</tr>)
                 ) : (
                   <tr><td colSpan={columns.length} className="px-4 py-14 text-center text-sm text-[#77736d]">No records in this date range.</td></tr>
                 )}
               </tbody>
             </table>
           </div>
+          <footer className="flex flex-col gap-3 border-t border-[#efede8] bg-[#f8f7f4] px-4 py-3 text-xs text-[#77736d] sm:flex-row sm:items-center sm:justify-between">
+            <span>Showing <strong className="text-[#272727]">{reportRange.start}-{reportRange.end}</strong> of <strong className="text-[#272727]">{reportRows.length}</strong> records</span>
+            <PaginationControls totalRecords={reportRows.length} page={safeReportPage} onPageChange={setReportPage} />
+          </footer>
         </section>
       </div>
     </div>

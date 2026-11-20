@@ -11,6 +11,7 @@ import {
   updateCouponRequest,
 } from "../services/api";
 import { formatCurrency } from "../utils/currency";
+import { DEFAULT_PAGE_SIZE, getPageRecords, getPaginationRange, PaginationControls } from "../components/PaginationControls";
 import LoaderOne from "../components/ui/loader-one";
 import {
   CouponFieldErrors,
@@ -47,6 +48,7 @@ export const CouponsView: React.FC = () => {
   const [deleteTarget, setDeleteTarget] = useState<ApiCoupon | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [actionError, setActionError] = useState("");
+  const [couponPage, setCouponPage] = useState(1);
 
   const loadCoupons = useCallback(async () => {
     if (!authSession) {
@@ -185,6 +187,16 @@ export const CouponsView: React.FC = () => {
       }, {}))
     : [];
   const hasVisibleCoupons = visibleCoupons.length > 0 || legacyCouponUses.length > 0;
+  const couponRows = [
+    ...visibleCoupons.map((coupon) => ({ type: 'coupon' as const, coupon })),
+    ...legacyCouponUses.map(([code, amount]) => ({ type: 'legacy' as const, code, amount })),
+  ];
+  const couponPageCount = Math.max(1, Math.ceil(couponRows.length / DEFAULT_PAGE_SIZE));
+  const safeCouponPage = Math.min(couponPage, couponPageCount);
+  const pageCouponRows = getPageRecords(couponRows, safeCouponPage);
+  const couponRange = getPaginationRange(couponRows.length, safeCouponPage);
+  useEffect(() => { setCouponPage(1); }, [filter]);
+  useEffect(() => { if (couponPage > couponPageCount) setCouponPage(couponPageCount); }, [couponPage, couponPageCount]);
 
   return (
     <div className="flex flex-col gap-space-md">
@@ -280,7 +292,7 @@ export const CouponsView: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-outline-variant/20">
-                {visibleCoupons.map((coupon) => (
+                {pageCouponRows.map((row) => row.type === 'coupon' ? (() => { const coupon = row.coupon; return (
                   <tr
                     key={coupon.id}
                     className="hover:bg-surface-container-low/50"
@@ -332,12 +344,11 @@ export const CouponsView: React.FC = () => {
                       )}
                     </td>
                   </tr>
-                ))}
-                {legacyCouponUses.map(([code, amount]) => (
-                  <tr key={`past-use-${code}`} className="bg-surface-container-low/40">
-                    <td className="px-4 py-3 font-mono font-semibold text-on-surface">{code}</td>
-                    <td className="px-4 py-3 text-right font-mono text-on-surface">{formatCurrency(amount)}</td>
-                    <td className="px-4 py-3 text-right font-mono text-on-surface-variant">{formatCurrency(amount)}</td>
+                ); })() : (
+                  <tr key={`past-use-${row.code}`} className="bg-surface-container-low/40">
+                    <td className="px-4 py-3 font-mono font-semibold text-on-surface">{row.code}</td>
+                    <td className="px-4 py-3 text-right font-mono text-on-surface">{formatCurrency(row.amount)}</td>
+                    <td className="px-4 py-3 text-right font-mono text-on-surface-variant">{formatCurrency(row.amount)}</td>
                     <td className="px-4 py-3 text-right font-mono text-on-surface-variant">—</td>
                     <td className="px-4 py-3"><span className="inline-flex rounded-full bg-surface-variant px-2.5 py-1 text-xs font-medium text-on-surface-variant">Sale-based</span></td>
                     <td className="px-4 py-3 text-right text-xs text-on-surface-variant">Used in bill</td>
@@ -345,6 +356,10 @@ export const CouponsView: React.FC = () => {
                 ))}
               </tbody>
             </table>
+            <footer className="flex flex-col gap-3 border-t border-outline-variant/20 bg-surface-container-low/70 px-4 py-3 text-xs text-on-surface-variant sm:flex-row sm:items-center sm:justify-between">
+              <span>Showing <strong className="text-on-surface">{couponRange.start}-{couponRange.end}</strong> of <strong className="text-on-surface">{couponRows.length}</strong> coupon records</span>
+              <PaginationControls totalRecords={couponRows.length} page={safeCouponPage} onPageChange={setCouponPage} />
+            </footer>
           </div>
         )}
       </section>

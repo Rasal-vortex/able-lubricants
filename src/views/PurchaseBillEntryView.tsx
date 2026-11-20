@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
 import { useApp } from "../context/AppContext";
 import { PurchaseLineItem } from "../types";
@@ -6,6 +6,7 @@ import { formatCurrency } from "../utils/currency";
 import { PaymentMethod } from "../services/api";
 import { UnitEditorModal } from "../components/UnitEditorModal";
 import { isUnitQuantityInputValid, isUnitQuantityValid, quantityStep } from "../utils/unitQuantity";
+import { DEFAULT_PAGE_SIZE, getPageRecords, getPaginationRange, PaginationControls } from "../components/PaginationControls";
 
 const localIso = () => {
   const d = new Date();
@@ -36,6 +37,7 @@ export const PurchaseBillEntryView: React.FC = () => {
   const [saving, setSaving] = useState(false);
   const purchaseRequestKey = useRef(crypto.randomUUID());
   const [activeTab, setActiveTab] = useState<"new" | "history">("new");
+  const [historyPage, setHistoryPage] = useState(1);
   const [items, setItems] = useState<PurchaseLineItem[]>([
     {
       id: "line-1",
@@ -347,6 +349,12 @@ export const PurchaseBillEntryView: React.FC = () => {
         .toLowerCase()
         .includes(searchTerm),
   );
+  const historyPageCount = Math.max(1, Math.ceil(filtered.length / DEFAULT_PAGE_SIZE));
+  const safeHistoryPage = Math.min(historyPage, historyPageCount);
+  const pagePurchases = getPageRecords(filtered, safeHistoryPage);
+  const historyRange = getPaginationRange(filtered.length, safeHistoryPage);
+  useEffect(() => { setHistoryPage(1); }, [searchTerm]);
+  useEffect(() => { if (historyPage > historyPageCount) setHistoryPage(historyPageCount); }, [historyPage, historyPageCount]);
   const clearPurchaseData = () => {
     if (!window.confirm("Reset the purchase form? Saved purchases will remain unchanged.")) return;
     setPartyName(suppliers[0]?.name || "");
@@ -525,7 +533,7 @@ export const PurchaseBillEntryView: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#efede8] text-sm text-[#272727]">
-                {filtered.map((p) => (
+                {pagePurchases.map((p) => (
                   <tr key={p.id}>
                     <td className="px-4 py-3 text-[#68645e]">
                       {p.invoiceDate}
@@ -566,6 +574,10 @@ export const PurchaseBillEntryView: React.FC = () => {
               </tbody>
             </table>
           </div>
+          <footer className="flex flex-col gap-3 border-t border-[#efede8] bg-[#f8f7f4] px-4 py-3 text-xs text-[#77736d] sm:flex-row sm:items-center sm:justify-between">
+            <span>Showing <strong className="text-[#272727]">{historyRange.start}-{historyRange.end}</strong> of <strong className="text-[#272727]">{filtered.length}</strong> purchases</span>
+            <PaginationControls totalRecords={filtered.length} page={safeHistoryPage} onPageChange={setHistoryPage} />
+          </footer>
         </section>
       )}
       {newProductOpen && (

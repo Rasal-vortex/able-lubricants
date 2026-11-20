@@ -5,6 +5,7 @@ import { createSupplierPaymentRequest, getSupplierLedgerReport } from '../servic
 import { NumericTextInput } from '../components/ui/NumericTextInput';
 import LoaderOne from '../components/ui/loader-one';
 import { formatCurrency } from '../utils/currency';
+import { DEFAULT_PAGE_SIZE, getPageRecords, getPaginationRange, PaginationControls } from '../components/PaginationControls';
 
 type SupplierLedgerPurchase = {
   id: string;
@@ -86,11 +87,18 @@ export const PartyLedgerManagementView: React.FC = () => {
   const [paymentDate, setPaymentDate] = useState(localToday);
   const [receiptNumber, setReceiptNumber] = useState('');
   const [savingPayment, setSavingPayment] = useState(false);
+  const [purchasePage, setPurchasePage] = useState(1);
 
   const selectedSupplier = suppliers.find((supplier) => supplier.id === selectedSupplierId);
   const newestFirstPurchases = [...(ledger?.purchases || [])].sort((left, right) =>
     new Date(right.date).getTime() - new Date(left.date).getTime(),
   );
+  const purchasePageCount = Math.max(1, Math.ceil(newestFirstPurchases.length / DEFAULT_PAGE_SIZE));
+  const safePurchasePage = Math.min(purchasePage, purchasePageCount);
+  const pageLedgerPurchases = getPageRecords(newestFirstPurchases, safePurchasePage);
+  const purchaseRange = getPaginationRange(newestFirstPurchases.length, safePurchasePage);
+  useEffect(() => { setPurchasePage(1); }, [selectedSupplierId]);
+  useEffect(() => { if (purchasePage > purchasePageCount) setPurchasePage(purchasePageCount); }, [purchasePage, purchasePageCount]);
   const paymentReceipts = new Map<string, SupplierPaymentReceipt>();
   for (const purchase of newestFirstPurchases) {
     for (const payment of purchase.payments) {
@@ -414,7 +422,7 @@ export const PartyLedgerManagementView: React.FC = () => {
                 <table className="w-full min-w-[720px] border-collapse text-left">
                   <thead><tr className="h-11 bg-[#f8f7f4] text-xs font-bold uppercase tracking-wide text-[#6d685f]">{['Purchase / date', 'Total (₹)', 'Paid (₹)', 'Outstanding (₹)', 'Payments'].map((heading) => <th key={heading} className="px-3 py-2">{heading}</th>)}</tr></thead>
                   <tbody className="divide-y divide-[#efede8] text-sm text-[#272727]">
-                    {newestFirstPurchases.map((purchase) => (
+                    {pageLedgerPurchases.map((purchase) => (
                       <tr key={purchase.id} className="align-top transition-colors hover:bg-[#fffdf8]">
                         <td className="px-3 py-3"><span className="block font-semibold text-[#a86600]">{purchase.supplierInvoiceNumber || purchase.purchaseNumber}</span><span className="mt-1 block text-xs text-[#77736d]">{String(purchase.date).slice(0, 10)}</span></td>
                         <td className="px-3 py-3 font-semibold">{formatCurrency(Number(purchase.total))}</td>
@@ -430,6 +438,10 @@ export const PartyLedgerManagementView: React.FC = () => {
                   </tbody>
                 </table>
               </div>
+              <footer className="flex flex-col gap-3 border-t border-[#efede8] bg-[#f8f7f4] px-4 py-3 text-xs text-[#77736d] sm:flex-row sm:items-center sm:justify-between">
+                <span>Showing <strong className="text-[#272727]">{purchaseRange.start}-{purchaseRange.end}</strong> of <strong className="text-[#272727]">{newestFirstPurchases.length}</strong> purchases</span>
+                <PaginationControls totalRecords={newestFirstPurchases.length} page={safePurchasePage} onPageChange={setPurchasePage} />
+              </footer>
             </>
           )}
         </section>

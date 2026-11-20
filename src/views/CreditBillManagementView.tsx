@@ -1,9 +1,10 @@
-import React, { useEffect, useState } from 'react';
-import { LoaderCircle } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { AlertTriangle, LoaderCircle, Trash2, RotateCcw, Plus, X, ChevronDown } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { CreditBill, PurchaseBill } from '../types';
 import { formatCurrency } from '../utils/currency';
 import LoaderOne from '../components/ui/loader-one';
+import { DEFAULT_PAGE_SIZE, getPageRecords, getPaginationRange, PaginationControls } from '../components/PaginationControls';
 
 export const CreditBillManagementView: React.FC = () => {
   const {
@@ -11,6 +12,9 @@ export const CreditBillManagementView: React.FC = () => {
     creditBillLoading,
     creditBillError,
     addCreditBill,
+    deleteCreditBill,
+    cancelCreditBillSale,
+    settleCreditBillRefund,
     collectCreditPayment,
     showToast,
     customers,
@@ -29,7 +33,9 @@ export const CreditBillManagementView: React.FC = () => {
   const localToday = new Date(today.getTime() - today.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'All' | 'Overdue' | 'Partial' | 'Unpaid' | 'Paid'>('All');
+  const [statusFilter, setStatusFilter] = useState<'All' | 'Overdue' | 'Partial' | 'Unpaid' | 'Paid' | 'Cancelled'>('All');
+  const [customerPage, setCustomerPage] = useState(1);
+  const [supplierPage, setSupplierPage] = useState(1);
 
   // Record Drawer
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -47,6 +53,25 @@ export const CreditBillManagementView: React.FC = () => {
   const [postingPayment, setPostingPayment] = useState(false);
   const [payAmountInput, setPayAmountInput] = useState('');
   const [payMethod, setPayMethod] = useState<'Cash' | 'UPI'>('Cash');
+  const [deleteModalBill, setDeleteModalBill] = useState<CreditBill | null>(null);
+  const [deletingCreditBill, setDeletingCreditBill] = useState(false);
+  const deleteCreditBillInFlight = useRef(false);
+  const [cancelModalBill, setCancelModalBill] = useState<CreditBill | null>(null);
+  const [cancellationReason, setCancellationReason] = useState('');
+  const [actualPaymentAmounts, setActualPaymentAmounts] = useState<Record<'CASH' | 'UPI' | 'BANK' | 'OTHER', string>>({ CASH: '0', UPI: '0', BANK: '0', OTHER: '0' });
+  const [actualReceivedConfirmed, setActualReceivedConfirmed] = useState(false);
+  const [paymentSectionOpen, setPaymentSectionOpen] = useState(false);
+  const [refundMode, setRefundMode] = useState<'PENDING' | 'NOW'>('PENDING');
+  const [refundLines, setRefundLines] = useState<Array<{ amount: string; method: 'CASH' | 'UPI' | 'BANK' | 'OTHER'; reference: string; originalPaymentId?: string }>>([]);
+  const [savingCancellation, setSavingCancellation] = useState(false);
+  const cancellationInFlight = useRef(false);
+  const [refundModalBill, setRefundModalBill] = useState<CreditBill | null>(null);
+  const [refundSettlementAmount, setRefundSettlementAmount] = useState('');
+  const [refundSettlementMethod, setRefundSettlementMethod] = useState<'CASH' | 'UPI' | 'BANK' | 'OTHER'>('CASH');
+  const [refundSettlementReference, setRefundSettlementReference] = useState('');
+  const [refundSettlementOriginalPaymentId, setRefundSettlementOriginalPaymentId] = useState('');
+  const [savingRefundSettlement, setSavingRefundSettlement] = useState(false);
+  const refundSettlementIdempotencyKey = useRef<string | null>(null);
   const [supplierPayPurchase, setSupplierPayPurchase] = useState<PurchaseBill | null>(null);
   const [supplierPayAmount, setSupplierPayAmount] = useState('');
   const [supplierPayDate, setSupplierPayDate] = useState(localToday);
@@ -57,6 +82,10 @@ export const CreditBillManagementView: React.FC = () => {
   const priorDue = creditBills.filter((bill) => bill.partyName === selectedParty && bill.netDue > 0).reduce((sum, bill) => sum + bill.netDue, 0);
   const currentAmt = parseFloat(newBillAmount) || 0;
   const expectedBalance = priorDue + currentAmt;
+  const cancellationPaymentMethods = ['CASH', 'UPI', 'BANK', 'OTHER'] as const;
+  const actualReceivedAmount = cancellationPaymentMethods.reduce((total, method) => total + (Number(actualPaymentAmounts[method]) || 0), 0);
+  const recordedCollectedAmount = (cancelModalBill?.payments || []).reduce((total, payment) => payment.method === 'COUPON' ? total : total + Number(payment.amount || 0), 0);
+  const hasRecordedPayments = Boolean(cancelModalBill?.payments?.length);
 
   // Filter customer credit bills.
   const filteredBills = creditBills.filter((bill) => {
@@ -72,6 +101,7 @@ export const CreditBillManagementView: React.FC = () => {
     if (statusFilter === 'Partial') matchesStatus = bill.status === 'Partially Paid';
     if (statusFilter === 'Unpaid') matchesStatus = bill.status === 'Unpaid';
     if (statusFilter === 'Paid') matchesStatus = bill.status === 'Settled';
+    if (statusFilter === 'Cancelled') matchesStatus = bill.status === 'Cancelled';
 
     const parsedDate = new Date(bill.billDate);
     const date = /^\d{4}-\d{2}-\d{2}$/.test(bill.billDate) ? bill.billDate : Number.isNaN(parsedDate.getTime()) ? bill.billDate : new Date(parsedDate.getTime() - parsedDate.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
@@ -80,6 +110,11 @@ export const CreditBillManagementView: React.FC = () => {
     return matchesParty && matchesSearch && matchesStatus && dateMatch;
   });
   const grandTotalDue = filteredBills.reduce((total, bill) => total + bill.netDue, 0);
+  const totalPendingRefunds = filteredBills.reduce((total, bill) => total + (bill.refundPayable || 0), 0);
+  const customerPageCount = Math.max(1, Math.ceil(filteredBills.length / DEFAULT_PAGE_SIZE));
+  const safeCustomerPage = Math.min(customerPage, customerPageCount);
+  const pageBills = getPageRecords(filteredBills, safeCustomerPage);
+  const customerRange = getPaginationRange(filteredBills.length, safeCustomerPage);
 
   const supplierPurchaseDue = (purchase: PurchaseBill) => Math.max(
     0,
@@ -100,6 +135,14 @@ export const CreditBillManagementView: React.FC = () => {
       (statusFilter === 'Paid' && due <= 0);
     return matchesSearch && matchesDate && matchesStatus;
   });
+  const supplierPageCount = Math.max(1, Math.ceil(supplierPurchases.length / DEFAULT_PAGE_SIZE));
+  const safeSupplierPage = Math.min(supplierPage, supplierPageCount);
+  const pageSupplierPurchases = getPageRecords(supplierPurchases, safeSupplierPage);
+  const supplierRange = getPaginationRange(supplierPurchases.length, safeSupplierPage);
+  useEffect(() => { setCustomerPage(1); }, [searchTerm, customerFilter, statusFilter, fromDate, toDate]);
+  useEffect(() => { setSupplierPage(1); }, [searchTerm, supplierFilter, statusFilter, fromDate, toDate, creditView]);
+  useEffect(() => { if (customerPage > customerPageCount) setCustomerPage(customerPageCount); }, [customerPage, customerPageCount]);
+  useEffect(() => { if (supplierPage > supplierPageCount) setSupplierPage(supplierPageCount); }, [supplierPage, supplierPageCount]);
   const supplierTotals = supplierPurchases.reduce((totals, purchase) => ({
     billed: totals.billed + purchase.totalAmount,
     paid: totals.paid + (purchase.amountPaid || 0),
@@ -160,6 +203,100 @@ export const CreditBillManagementView: React.FC = () => {
       if (saved) setPayModalBill(null);
     } finally {
       setPostingPayment(false);
+    }
+  };
+
+  const handleConfirmDeleteCreditBill = async () => {
+    if (!deleteModalBill || deleteCreditBillInFlight.current) return;
+    deleteCreditBillInFlight.current = true;
+    setDeletingCreditBill(true);
+    try {
+      const deleted = await deleteCreditBill(deleteModalBill.id);
+      if (deleted) setDeleteModalBill(null);
+    } finally {
+      deleteCreditBillInFlight.current = false;
+      setDeletingCreditBill(false);
+    }
+  };
+
+  const openCancelSale = (bill: CreditBill) => {
+    setCancelModalBill(bill);
+    setCancellationReason('');
+    setActualReceivedConfirmed(!bill.payments?.length);
+    setPaymentSectionOpen(false);
+    // Recorded receipts are evidence to review, not proof that the customer paid.
+    // Start at zero and require staff to confirm or correct the actual received amount.
+    setActualPaymentAmounts({ CASH: '0', UPI: '0', BANK: '0', OTHER: '0' });
+    setRefundMode('PENDING');
+    setRefundLines([{ amount: '', method: 'CASH', reference: '' }]);
+  };
+
+  const handleCancelSale = async () => {
+    if (!cancelModalBill || cancellationInFlight.current) return;
+    const reason = cancellationReason.trim();
+    if (!reason) {
+      showToast('Enter a reason for cancelling this sale.', 'error');
+      return;
+    }
+    const invalidActualPayment = cancellationPaymentMethods.some((method) => {
+      const amount = actualPaymentAmounts[method].trim() ? Number(actualPaymentAmounts[method]) : 0;
+      return !Number.isFinite(amount) || amount < 0;
+    });
+    if (invalidActualPayment || actualReceivedAmount - recordedCollectedAmount > 0.005 || actualReceivedAmount - cancelModalBill.billAmount > 0.005) {
+      showToast('Actual payment amounts must be valid and cannot exceed the recorded collection or sale total.', 'error');
+      return;
+    }
+    const invalidRefundInput = refundLines.some((line) => line.amount.trim() && (!Number.isFinite(Number(line.amount)) || Number(line.amount) < 0));
+    if (refundMode === 'NOW' && invalidRefundInput) {
+      showToast('Refund amounts must be valid non-negative numbers.', 'error');
+      return;
+    }
+    const actualPayments = cancellationPaymentMethods.map((method) => ({ amount: Number(actualPaymentAmounts[method]) || 0, method }));
+    const refunds = (refundMode === 'NOW' && actualReceivedAmount > 0 ? refundLines : [])
+      .map((line) => ({ amount: Number(line.amount), method: line.method, ...(line.reference.trim() ? { reference: line.reference.trim() } : {}), ...(line.originalPaymentId ? { originalPaymentId: line.originalPaymentId } : {}) }))
+      .filter((line) => line.amount > 0 && Number.isFinite(line.amount));
+    const refundTotal = refunds.reduce((sum, line) => sum + line.amount, 0);
+    if (refundTotal - actualReceivedAmount > 0.005) {
+      showToast('Refund total cannot exceed the amount actually received.', 'error');
+      return;
+    }
+    cancellationInFlight.current = true;
+    setSavingCancellation(true);
+    try {
+      if (refundMode === 'NOW' && actualReceivedAmount > 0 && refunds.length === 0) {
+        showToast('Enter at least one amount being refunded now, or choose Refund pending.', 'error');
+        return;
+      }
+      const success = await cancelCreditBillSale(cancelModalBill.id, reason, refundMode, actualPayments, refunds, actualReceivedConfirmed);
+      if (success) setCancelModalBill(null);
+    } finally {
+      cancellationInFlight.current = false;
+      setSavingCancellation(false);
+    }
+  };
+
+  const openSettleRefund = (bill: CreditBill) => {
+    setRefundModalBill(bill);
+    setRefundSettlementAmount(Number(bill.refundPayable || 0).toFixed(2));
+    setRefundSettlementMethod('CASH');
+    setRefundSettlementReference('');
+    setRefundSettlementOriginalPaymentId('');
+    refundSettlementIdempotencyKey.current = crypto.randomUUID();
+  };
+
+  const handleSettleRefund = async () => {
+    if (!refundModalBill || savingRefundSettlement) return;
+    const amount = Number(refundSettlementAmount);
+    if (!Number.isFinite(amount) || amount <= 0 || amount > Number(refundModalBill.refundPayable || 0)) {
+      showToast('Enter a refund amount greater than zero and no more than the pending refund.', 'error');
+      return;
+    }
+    setSavingRefundSettlement(true);
+    try {
+      const success = await settleCreditBillRefund(refundModalBill.id, amount, refundSettlementMethod, refundSettlementReference.trim() || undefined, refundSettlementIdempotencyKey.current || crypto.randomUUID(), refundSettlementOriginalPaymentId || undefined);
+      if (success) setRefundModalBill(null);
+    } finally {
+      setSavingRefundSettlement(false);
     }
   };
 
@@ -335,7 +472,7 @@ export const CreditBillManagementView: React.FC = () => {
               onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}
               className="h-10 min-w-0 flex-1 rounded-lg border border-outline-variant/25 bg-surface-container-low px-3 text-sm font-medium text-on-surface outline-none focus:border-primary"
             >
-              {(creditView === 'customers' ? ['All', 'Overdue', 'Partial', 'Unpaid', 'Paid'] : ['All', 'Partial', 'Unpaid', 'Paid']).map((status) => <option key={status} value={status}>{status}</option>)}
+              {(creditView === 'customers' ? ['All', 'Overdue', 'Partial', 'Unpaid', 'Paid', 'Cancelled'] : ['All', 'Partial', 'Unpaid', 'Paid']).map((status) => <option key={status} value={status}>{status}</option>)}
             </select>
           </label>
 
@@ -374,7 +511,7 @@ export const CreditBillManagementView: React.FC = () => {
             <tbody className="divide-y divide-surface-container text-body-md font-body-md text-on-surface">
               {creditBillLoading ? (
                 <tr><td colSpan={7} className="px-4 py-14"><LoaderOne /></td></tr>
-              ) : filteredBills.map((bill) => (
+              ) : pageBills.map((bill) => (
                 <tr key={bill.id} className="hover:bg-surface-container-low/50 transition-colors group">
                   <td className="px-space-md py-2.5 font-data-mono-sm text-data-mono-sm text-on-surface whitespace-nowrap">
                     {bill.billDate}
@@ -382,9 +519,13 @@ export const CreditBillManagementView: React.FC = () => {
                   <td className="px-space-md py-2.5 font-title-md text-body-md font-medium text-on-surface">
                     <div className="flex flex-col">
                       <span className="truncate">{bill.partyName}</span>
-                      <span className="font-data-mono-sm text-data-mono-sm text-on-surface-variant">
-                        Term: {bill.term}
-                      </span>
+                      <span className="font-data-mono-sm text-data-mono-sm text-on-surface-variant">{bill.status === 'Cancelled' ? 'Sale cancelled' : `Term: ${bill.term}`}</span>
+                      {bill.status === 'Cancelled' && bill.cancellationReason && <span className="max-w-[220px] truncate text-xs text-on-surface-variant" title={bill.cancellationReason}>Reason: {bill.cancellationReason}</span>}
+                      {bill.status === 'Cancelled' && bill.cancelledAt && <span className="text-xs text-on-surface-variant">Cancelled {new Date(bill.cancelledAt).toLocaleDateString()}{bill.cancelledByName ? ` by ${bill.cancelledByName}` : ''}</span>}
+                      {bill.status === 'Cancelled' && (bill.payments?.length || 0) > 0 && <span className="max-w-[250px] truncate text-xs text-on-surface-variant" title={bill.payments?.map((payment) => `${payment.method} ${formatCurrency(payment.amount)}`).join(', ')}>Original receipts: {bill.payments?.map((payment) => `${payment.method} ${formatCurrency(payment.amount)}`).join(' · ')}</span>}
+                      {bill.status === 'Cancelled' && bill.actualReceivedAmount != null && <span className="text-xs text-on-surface-variant">Verified received: {formatCurrency(bill.actualReceivedAmount)}</span>}
+                      {bill.status === 'Cancelled' && (bill.paymentCorrections?.length || 0) > 0 && <span className="max-w-[280px] truncate text-xs text-on-surface-variant" title={bill.paymentCorrections?.map((correction) => `${correction.type === 'REVERSAL' ? 'Reversed' : 'Verified'} ${correction.method} ${formatCurrency(correction.amount)}`).join(', ')}>Payment corrections: {bill.paymentCorrections?.map((correction) => `${correction.type === 'REVERSAL' ? 'Reversed' : 'Verified'} ${correction.method} ${formatCurrency(correction.amount)}`).join(' · ')}</span>}
+                      {bill.status === 'Cancelled' && (bill.refunds?.length || 0) > 0 && <span className="max-w-[250px] truncate text-xs text-on-surface-variant" title={bill.refunds?.map((refund) => `${refund.method} ${formatCurrency(refund.amount)}`).join(', ')}>Refunded: {bill.refunds?.map((refund) => `${refund.method} ${formatCurrency(refund.amount)}`).join(' · ')}</span>}
                     </div>
                   </td>
                   <td className="px-space-md py-2.5 whitespace-nowrap">
@@ -396,6 +537,8 @@ export const CreditBillManagementView: React.FC = () => {
                           ? 'bg-surface-container-high text-secondary'
                           : bill.status === 'Settled'
                           ? 'bg-tertiary-fixed text-on-tertiary-fixed-variant'
+                          : bill.status === 'Cancelled'
+                          ? 'bg-error-container text-on-error-container'
                           : 'bg-surface-container text-on-surface-variant'
                       }`}
                     >
@@ -419,7 +562,7 @@ export const CreditBillManagementView: React.FC = () => {
                   </td>
                   <td className="px-space-md py-2.5 text-center whitespace-nowrap">
                     <div className="inline-flex items-center gap-1 justify-end">
-                      {bill.status !== 'Settled' ? (
+                      {bill.status !== 'Settled' && bill.status !== 'Cancelled' ? (
                         <button
                           className="h-7 px-2 rounded-lg bg-surface-container-high hover:bg-surface-variant text-primary font-label-sm text-label-sm font-medium transition-colors"
                           title="Record payment against this bill"
@@ -445,6 +588,19 @@ export const CreditBillManagementView: React.FC = () => {
                       >
                         <span className="material-symbols-outlined text-[17px]">print</span>
                       </button>
+                      {bill.saleId && bill.status !== 'Cancelled' ? (
+                        <button className="inline-flex h-7 items-center gap-1 rounded-lg px-2 text-error transition-colors hover:bg-error-container/40 disabled:opacity-50" title="Cancel this sale and safely reverse its stock and credit" aria-label={`Cancel sale ${bill.invoiceReference || bill.billNumber}`} type="button" disabled={savingCancellation} onClick={() => openCancelSale(bill)}>
+                          <RotateCcw size={14} aria-hidden="true" /><span className="text-xs font-semibold">Cancel</span>
+                        </button>
+                      ) : bill.status === 'Cancelled' && (bill.refundPayable || 0) > 0 ? (
+                        <button className="inline-flex h-7 items-center gap-1 rounded-lg bg-primary px-2 text-xs font-semibold text-on-primary hover:bg-primary-container" title="Settle pending customer refund" type="button" onClick={() => openSettleRefund(bill)}>
+                          Refund {formatCurrency(bill.refundPayable || 0)}
+                        </button>
+                      ) : !bill.saleId ? (
+                        <button className="flex h-7 w-7 items-center justify-center rounded-lg text-error transition-colors hover:bg-error-container/40 disabled:cursor-not-allowed disabled:text-outline/50 disabled:hover:bg-transparent" title={(bill.paidAmount || 0) > 0 ? 'Bills with payment history cannot be deleted' : 'Delete credit bill'} aria-label={`Delete credit bill ${bill.billNumber}`} type="button" disabled={(bill.paidAmount || 0) > 0 || deletingCreditBill} onClick={() => setDeleteModalBill(bill)}>
+                          <Trash2 size={15} aria-hidden="true" />
+                        </button>
+                      ) : <span className="px-2 text-xs text-on-surface-variant">{(bill.paidAmount || 0) > 0 ? 'Refund settled' : 'No refund due'}</span>}
                     </div>
                   </td>
                 </tr>
@@ -458,8 +614,8 @@ export const CreditBillManagementView: React.FC = () => {
         <div className="px-space-md py-space-sm bg-surface-container-low/70 flex flex-col sm:flex-row items-center justify-between gap-space-sm border-t border-outline-variant/20">
           <div className="flex items-center gap-space-md text-on-surface-variant font-label-sm text-label-sm">
             <span>
-              Showing <strong className="text-on-surface font-semibold">1 - {filteredBills.length}</strong> of{' '}
-              <strong className="text-on-surface font-semibold">{creditBills.length}</strong> customer credit bills
+              Showing <strong className="text-on-surface font-semibold">{customerRange.start} - {customerRange.end}</strong> of{' '}
+              <strong className="text-on-surface font-semibold">{filteredBills.length}</strong> customer credit bills
             </span>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-space-md">
@@ -467,27 +623,8 @@ export const CreditBillManagementView: React.FC = () => {
               <div className="text-xs font-semibold uppercase tracking-wide text-on-surface-variant">Grand total due</div>
               <div className="text-xl font-extrabold text-error">{formatCurrency(grandTotalDue)}</div>
             </div>
-            <div className="flex items-center gap-space-xs">
-            <button
-              className="h-7 w-7 rounded-lg bg-surface-container-lowest text-outline opacity-50 flex items-center justify-center cursor-not-allowed"
-              disabled
-              type="button"
-            >
-              <span className="material-symbols-outlined text-[16px]">chevron_left</span>
-            </button>
-            <button className="h-7 px-2.5 rounded-lg bg-primary text-on-primary font-data-mono-sm text-data-mono-sm font-semibold" type="button">
-              1
-            </button>
-            <button className="h-7 px-2.5 rounded-lg bg-surface-container-lowest text-on-surface hover:bg-surface-container font-data-mono-sm text-data-mono-sm transition-colors" type="button">
-              2
-            </button>
-            <button className="h-7 px-2.5 rounded-lg bg-surface-container-lowest text-on-surface hover:bg-surface-container font-data-mono-sm text-data-mono-sm transition-colors" type="button">
-              3
-            </button>
-            <button className="h-7 w-7 rounded-lg bg-surface-container-lowest text-on-surface hover:bg-surface-container flex items-center justify-center transition-colors" type="button">
-              <span className="material-symbols-outlined text-[16px]">chevron_right</span>
-            </button>
-            </div>
+            {totalPendingRefunds > 0 && <div className="text-right"><div className="text-xs font-semibold uppercase tracking-wide text-on-surface-variant">Pending refunds</div><div className="text-xl font-extrabold text-primary">{formatCurrency(totalPendingRefunds)}</div></div>}
+            <PaginationControls totalRecords={filteredBills.length} page={safeCustomerPage} onPageChange={setCustomerPage} />
           </div>
         </div>
       </div>
@@ -499,7 +636,7 @@ export const CreditBillManagementView: React.FC = () => {
                 {['Supplier', 'Purchase date', 'Invoice total (₹)', 'Paid (₹)', 'Outstanding (₹)', 'Status', 'Payments', 'Actions'].map((heading) => <th key={heading} className="px-4 py-3">{heading}</th>)}
               </tr></thead>
               <tbody className="divide-y divide-surface-container text-sm text-on-surface">
-                {supplierPurchases.map((purchase) => {
+                {pageSupplierPurchases.map((purchase) => {
                   const due = supplierPurchaseDue(purchase);
                   const paymentRows = supplierLedger.filter((entry) => entry.invoiceNumber === purchase.invoiceNumber && entry.transactionType === 'PAYMENTS');
                   return <tr key={purchase.id || purchase.invoiceNumber} className="transition hover:bg-surface-container-low/50">
@@ -518,6 +655,10 @@ export const CreditBillManagementView: React.FC = () => {
               {!!supplierPurchases.length && <tfoot><tr className="border-t border-outline-variant/20 bg-surface-container-low/70 font-semibold"><td colSpan={2} className="px-4 py-3">Totals</td><td className="px-4 py-3">{formatCurrency(supplierTotals.billed)}</td><td className="px-4 py-3">{formatCurrency(supplierTotals.paid)}</td><td className="px-4 py-3 text-error">{formatCurrency(supplierTotals.due)}</td><td colSpan={3} /></tr></tfoot>}
             </table>
           </div>
+          <footer className="flex flex-col gap-3 border-t border-outline-variant/20 bg-surface-container-low/70 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <span className="text-xs text-on-surface-variant">Showing <strong className="text-on-surface">{supplierRange.start}-{supplierRange.end}</strong> of <strong className="text-on-surface">{supplierPurchases.length}</strong> supplier invoices</span>
+            <PaginationControls totalRecords={supplierPurchases.length} page={safeSupplierPage} onPageChange={setSupplierPage} />
+          </footer>
         </div>
       )}
 
@@ -833,6 +974,106 @@ export const CreditBillManagementView: React.FC = () => {
               <button type="button" disabled={savingSupplierPayment} onClick={() => void handleSupplierPayment()} className="inline-flex h-10 items-center gap-2 rounded-lg bg-primary px-4 text-sm font-semibold text-on-primary shadow-sm hover:bg-primary-container disabled:cursor-wait disabled:opacity-70">{savingSupplierPayment && <LoaderCircle size={15} className="animate-spin" aria-hidden="true" />}{savingSupplierPayment ? 'Saving…' : 'Save payment'}</button>
             </div>
           </div>
+        </div>
+      )}
+      {cancelModalBill && (
+        <div className="fixed inset-0 z-[85] flex items-center justify-center bg-inverse-surface/50 p-4 backdrop-blur-[2px]" onMouseDown={(event) => { if (event.target === event.currentTarget && !savingCancellation) setCancelModalBill(null); }}>
+          <section role="alertdialog" aria-modal="true" aria-labelledby="cancel-sale-title" className="flex max-h-[88vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-outline-variant/20 bg-surface-container-lowest shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex shrink-0 items-center gap-3 border-b border-surface-container px-5 py-3">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-surface-container text-on-surface-variant"><AlertTriangle size={18} aria-hidden="true" /></div>
+              <h2 id="cancel-sale-title" className="min-w-0 flex-1 text-lg font-semibold text-on-surface">Cancel this sale?</h2>
+              <button type="button" disabled={savingCancellation} onClick={() => setCancelModalBill(null)} className="rounded-lg p-1.5 text-on-surface-variant hover:bg-surface-container disabled:opacity-50" aria-label="Close"><X size={18} /></button>
+            </div>
+            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4 sm:p-5">
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                <div className="col-span-2 rounded-lg bg-surface-container-low px-3 py-2 sm:col-span-2"><div className="text-[11px] font-medium uppercase tracking-wide text-on-surface-variant">Invoice · Customer</div><strong className="block truncate text-sm text-on-surface">{cancelModalBill.invoiceReference || cancelModalBill.billNumber} · {cancelModalBill.partyName}</strong></div>
+                <div className="rounded-lg bg-surface-container-low px-3 py-2"><div className="text-[11px] font-medium uppercase tracking-wide text-on-surface-variant">Bill amount</div><strong className="text-sm text-on-surface">{formatCurrency(cancelModalBill.billAmount)}</strong></div>
+                <div className="rounded-lg bg-surface-container-low px-3 py-2"><div className="text-[11px] font-medium uppercase tracking-wide text-on-surface-variant">Credit to reverse</div><strong className="text-sm text-on-surface">{formatCurrency(cancelModalBill.netDue)}</strong></div>
+                <div className="col-span-2 flex items-center justify-between rounded-lg border border-outline-variant/20 px-3 py-2 text-sm sm:col-span-4"><span className="text-on-surface-variant">{hasRecordedPayments ? 'Refund required' : 'No payment recorded · Refund required'}</span><strong className="text-on-surface">{formatCurrency(actualReceivedAmount)}</strong></div>
+              </div>
+              {hasRecordedPayments && (
+                <section className="overflow-hidden rounded-lg border border-outline-variant/25">
+                  <button type="button" aria-expanded={paymentSectionOpen} onClick={() => setPaymentSectionOpen((open) => !open)} className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left hover:bg-surface-container-low">
+                    <span><strong className="block text-sm text-on-surface">Payment received?</strong><span className="text-xs text-on-surface-variant">Recorded: {formatCurrency(recordedCollectedAmount)} · Actual: {formatCurrency(actualReceivedAmount)}</span></span>
+                    <ChevronDown size={17} className={`shrink-0 text-on-surface-variant transition-transform ${paymentSectionOpen ? 'rotate-180' : ''}`} aria-hidden="true" />
+                  </button>
+                  {paymentSectionOpen && <div className="space-y-3 border-t border-outline-variant/20 bg-surface-container-low p-3">
+                    <div className="space-y-1 rounded-md bg-surface-container-lowest px-3 py-2">
+                      {(cancelModalBill.payments || []).map((payment) => <div key={payment.id} className="flex justify-between gap-3 text-sm"><span className="text-on-surface-variant">{payment.method === 'COUPON' ? 'Coupon' : payment.method}</span><strong className="text-on-surface">{formatCurrency(payment.amount)}</strong></div>)}
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {cancellationPaymentMethods.map((method) => <label key={method} className="text-xs font-medium text-on-surface-variant">Actual {method === 'UPI' ? 'UPI' : method.charAt(0) + method.slice(1).toLowerCase()}<input inputMode="decimal" value={actualPaymentAmounts[method]} onChange={(event) => { setActualPaymentAmounts((current) => ({ ...current, [method]: event.target.value })); setActualReceivedConfirmed(false); }} className="mt-1 h-9 w-full rounded-lg border border-outline-variant/30 bg-surface-container-lowest px-3 text-sm text-on-surface outline-none focus:border-primary" placeholder="0" /></label>)}
+                    </div>
+                    <div className="flex items-center justify-between rounded-md bg-surface-container-lowest px-3 py-2 text-sm"><span className="text-on-surface-variant">Actual amount received</span><strong className="text-on-surface">{formatCurrency(actualReceivedAmount)} <span className="text-xs font-normal">(max {formatCurrency(Math.min(recordedCollectedAmount, cancelModalBill.billAmount))})</span></strong></div>
+                    <label className="flex cursor-pointer items-start gap-2 text-xs text-on-surface"><input type="checkbox" checked={actualReceivedConfirmed} onChange={(event) => setActualReceivedConfirmed(event.target.checked)} className="mt-0.5 accent-primary" /><span>I confirm the actual amount above is correct.</span></label>
+                  </div>}
+                </section>
+              )}
+              {actualReceivedAmount > 0 && <div className="space-y-3 rounded-lg border border-outline-variant/25 p-3">
+                <div className="flex items-center justify-between gap-2"><h3 className="text-sm font-semibold text-on-surface">Refund handling</h3><span className="text-xs text-on-surface-variant">Received {formatCurrency(actualReceivedAmount)}</span></div>
+                <div className="grid grid-cols-2 gap-2"><button type="button" onClick={() => setRefundMode('PENDING')} className={`rounded-lg border px-3 py-2 text-left text-sm ${refundMode === 'PENDING' ? 'border-primary bg-primary/10 text-on-surface' : 'border-outline-variant/30 text-on-surface-variant'}`}><strong className="block">Refund pending</strong><span className="text-xs">Pay later</span></button><button type="button" onClick={() => setRefundMode('NOW')} className={`rounded-lg border px-3 py-2 text-left text-sm ${refundMode === 'NOW' ? 'border-primary bg-primary/10 text-on-surface' : 'border-outline-variant/30 text-on-surface-variant'}`}><strong className="block">Refund now</strong><span className="text-xs">Record payout</span></button></div>
+                {refundMode === 'NOW' && <>
+                  {refundLines.map((line, index) => <div key={index} className="grid gap-2 sm:grid-cols-[1fr_1fr_1.2fr_auto]">
+                    <label className="text-xs font-medium text-on-surface-variant">Refund amount<input inputMode="decimal" value={line.amount} onChange={(event) => setRefundLines((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, amount: event.target.value } : row))} className="mt-1 h-9 w-full rounded-lg border border-outline-variant/30 bg-surface-container-low px-3 text-sm text-on-surface outline-none focus:border-primary" /></label>
+                    <label className="text-xs font-medium text-on-surface-variant">Method<select value={line.method} onChange={(event) => setRefundLines((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, method: event.target.value as typeof row.method } : row))} className="mt-1 h-9 w-full rounded-lg border border-outline-variant/30 bg-surface-container-low px-2 text-sm text-on-surface outline-none focus:border-primary"><option value="CASH">Cash</option><option value="UPI">UPI</option><option value="BANK">Bank</option><option value="OTHER">Other</option></select></label>
+                    <label className="text-xs font-medium text-on-surface-variant">Reference (optional)<input value={line.reference} onChange={(event) => setRefundLines((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, reference: event.target.value } : row))} className="mt-1 h-9 w-full rounded-lg border border-outline-variant/30 bg-surface-container-low px-3 text-sm text-on-surface outline-none focus:border-primary" /></label>
+                    <button type="button" disabled={refundLines.length <= 1} onClick={() => setRefundLines((rows) => rows.filter((_, rowIndex) => rowIndex !== index))} className="mt-4 flex h-8 w-8 items-center justify-center rounded-lg text-on-surface-variant hover:bg-surface-container-low disabled:opacity-30" aria-label="Remove refund method"><X size={15} /></button>
+                  </div>)}
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs"><button type="button" onClick={() => setRefundLines((rows) => [...rows, { amount: '', method: 'UPI', reference: '' }])} className="inline-flex h-8 items-center gap-1 rounded-lg border border-outline-variant/30 px-2.5 font-semibold text-on-surface hover:bg-surface-container-low"><Plus size={13} /> Add method</button><span className="text-on-surface-variant">Now: {formatCurrency(refundLines.reduce((sum, line) => sum + (Number(line.amount) || 0), 0))} · Pending: {formatCurrency(Math.max(0, actualReceivedAmount - refundLines.reduce((sum, line) => sum + (Number(line.amount) || 0), 0)))}</span></div>
+                </>}
+              </div>}
+              {cancelModalBill.saleItems?.length ? <div><h3 className="mb-1.5 text-sm font-semibold text-on-surface">Stock to restore</h3><ul className="max-h-32 divide-y divide-outline-variant/20 overflow-y-auto rounded-lg border border-outline-variant/20">{cancelModalBill.saleItems.map((item, index) => <li key={`${item.productName}-${index}`} className="flex justify-between gap-4 px-3 py-1.5 text-sm"><span className="truncate text-on-surface">{item.productName}</span><strong className="shrink-0 text-on-surface">{item.quantity} {item.unitSymbol || item.unitName}</strong></li>)}</ul></div> : null}
+              <div>
+                <span className="text-xs font-semibold text-on-surface-variant">Quick reasons</span>
+                <div className="mt-1.5 flex flex-wrap gap-2">
+                  {['Wrong customer', 'Incorrect items', 'Duplicate bill'].map((reason) => (
+                    <button key={reason} type="button" aria-pressed={cancellationReason === reason} onClick={() => setCancellationReason(reason)} className={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${cancellationReason === reason ? 'border-primary bg-primary/10 text-on-surface' : 'border-outline-variant/30 text-on-surface-variant hover:border-primary/50 hover:bg-surface-container-low'}`}>
+                      {reason}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <label className="block text-xs font-semibold text-on-surface-variant">Cancellation reason <span>*</span><textarea required maxLength={1000} value={cancellationReason} onChange={(event) => setCancellationReason(event.target.value)} rows={2} placeholder="Choose a reason or enter a short explanation" className="mt-1 w-full resize-y rounded-lg border border-outline-variant/30 bg-surface-container-low px-3 py-2 text-sm text-on-surface outline-none focus:border-primary" /></label>
+            </div>
+            <div className="sticky bottom-0 flex shrink-0 justify-end gap-2 border-t border-surface-container bg-surface-container-lowest px-4 py-3 sm:px-5"><button type="button" disabled={savingCancellation} onClick={() => setCancelModalBill(null)} className="h-10 rounded-lg px-4 text-sm font-semibold text-on-surface-variant hover:bg-surface-container-low disabled:opacity-50">Keep sale</button><button type="button" disabled={savingCancellation || !cancellationReason.trim() || !actualReceivedConfirmed} onClick={() => void handleCancelSale()} className="inline-flex h-10 items-center gap-2 rounded-lg bg-error px-4 text-sm font-semibold text-white shadow-sm hover:bg-error/90 disabled:opacity-60">{savingCancellation && <LoaderCircle size={15} className="animate-spin" aria-hidden="true" />}{savingCancellation ? 'Cancelling…' : 'Confirm cancellation'}</button></div>
+          </section>
+        </div>
+      )}
+      {refundModalBill && (
+        <div className="fixed inset-0 z-[86] flex items-center justify-center bg-inverse-surface/50 p-4 backdrop-blur-[2px]" onMouseDown={(event) => { if (event.target === event.currentTarget && !savingRefundSettlement) setRefundModalBill(null); }}>
+          <section role="dialog" aria-modal="true" aria-labelledby="settle-refund-title" className="w-full max-w-md overflow-hidden rounded-2xl border border-outline-variant/20 bg-surface-container-lowest shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+            <div className="border-b border-surface-container p-5"><h2 id="settle-refund-title" className="text-lg font-semibold text-on-surface">Settle pending refund</h2><p className="mt-1 text-sm text-on-surface-variant">{refundModalBill.partyName} · {refundModalBill.invoiceReference || refundModalBill.billNumber}</p></div>
+            <div className="space-y-3 p-5"><div className="flex justify-between rounded-lg bg-surface-container-low p-3 text-sm"><span className="text-on-surface-variant">Pending</span><strong className="text-error">{formatCurrency(refundModalBill.refundPayable || 0)}</strong></div><label className="block text-sm font-medium text-on-surface-variant">Refund amount<input inputMode="decimal" value={refundSettlementAmount} onChange={(event) => setRefundSettlementAmount(event.target.value)} className="mt-1 h-10 w-full rounded-lg border border-outline-variant/30 bg-surface-container-low px-3 text-on-surface outline-none focus:border-primary" /></label><label className="block text-sm font-medium text-on-surface-variant">Refund method<select value={refundSettlementMethod} onChange={(event) => setRefundSettlementMethod(event.target.value as typeof refundSettlementMethod)} className="mt-1 h-10 w-full rounded-lg border border-outline-variant/30 bg-surface-container-low px-3 text-on-surface outline-none focus:border-primary"><option value="CASH">Cash</option><option value="UPI">UPI</option><option value="BANK">Bank</option><option value="OTHER">Other</option></select></label>{(refundModalBill.payments?.length || 0) > 0 && <label className="block text-sm font-medium text-on-surface-variant">Link to original receipt (optional)<select value={refundSettlementOriginalPaymentId} onChange={(event) => setRefundSettlementOriginalPaymentId(event.target.value)} className="mt-1 h-10 w-full rounded-lg border border-outline-variant/30 bg-surface-container-low px-3 text-on-surface outline-none focus:border-primary"><option value="">No specific receipt</option>{refundModalBill.payments?.map((payment) => <option key={payment.id} value={payment.id}>{payment.method} · {formatCurrency(payment.amount)} · {new Date(payment.date).toLocaleDateString()}</option>)}</select></label>}<label className="block text-sm font-medium text-on-surface-variant">Reference (optional)<input value={refundSettlementReference} onChange={(event) => setRefundSettlementReference(event.target.value)} className="mt-1 h-10 w-full rounded-lg border border-outline-variant/30 bg-surface-container-low px-3 text-on-surface outline-none focus:border-primary" /></label></div>
+            <div className="flex justify-end gap-2 border-t border-surface-container px-5 py-4"><button type="button" disabled={savingRefundSettlement} onClick={() => setRefundModalBill(null)} className="h-10 rounded-lg px-4 text-sm font-semibold text-on-surface-variant hover:bg-surface-container-low">Cancel</button><button type="button" disabled={savingRefundSettlement} onClick={() => void handleSettleRefund()} className="inline-flex h-10 items-center gap-2 rounded-lg bg-primary px-4 text-sm font-semibold text-on-primary shadow-sm hover:bg-primary-container disabled:opacity-60">{savingRefundSettlement && <LoaderCircle size={15} className="animate-spin" />}{savingRefundSettlement ? 'Saving…' : 'Record refund'}</button></div>
+          </section>
+        </div>
+      )}
+      {deleteModalBill && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-inverse-surface/45 p-4 backdrop-blur-[2px]"
+          onMouseDown={(event) => { if (event.target === event.currentTarget && !deletingCreditBill) setDeleteModalBill(null); }}
+        >
+          <section role="alertdialog" aria-modal="true" aria-labelledby="delete-credit-bill-title" aria-describedby="delete-credit-bill-description" className="w-full max-w-md overflow-hidden rounded-2xl border border-outline-variant/20 bg-surface-container-lowest shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-start gap-3 p-5">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-error-container/50 text-error"><AlertTriangle size={21} aria-hidden="true" /></div>
+              <div className="min-w-0 flex-1">
+                <h2 id="delete-credit-bill-title" className="text-lg font-semibold text-on-surface">Delete this credit bill?</h2>
+                <p id="delete-credit-bill-description" className="mt-1 text-sm leading-5 text-on-surface-variant">This permanently removes the manually entered, unpaid credit bill. Bills linked to sales or with payment history are protected.</p>
+              </div>
+            </div>
+            <div className="mx-5 rounded-xl border border-outline-variant/20 bg-surface-container-low px-4 py-3">
+              <div className="flex items-center justify-between gap-3 text-sm"><span className="text-on-surface-variant">Bill</span><strong className="truncate text-on-surface">{deleteModalBill.billNumber}</strong></div>
+              <div className="mt-1 flex items-center justify-between gap-3 text-sm"><span className="text-on-surface-variant">Customer</span><strong className="truncate text-on-surface">{deleteModalBill.partyName}</strong></div>
+              <div className="mt-1 flex items-center justify-between gap-3 text-sm"><span className="text-on-surface-variant">Amount</span><strong className="text-on-surface">{formatCurrency(deleteModalBill.billAmount)}</strong></div>
+            </div>
+            <div className="mt-5 flex justify-end gap-2 border-t border-surface-container px-5 py-4">
+              <button type="button" disabled={deletingCreditBill} onClick={() => setDeleteModalBill(null)} className="h-10 rounded-lg px-4 text-sm font-semibold text-on-surface-variant transition hover:bg-surface-container-low disabled:opacity-60">Cancel</button>
+              <button type="button" disabled={deletingCreditBill} onClick={() => void handleConfirmDeleteCreditBill()} className="inline-flex h-10 items-center gap-2 rounded-lg bg-error px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-error/90 disabled:cursor-wait disabled:opacity-70">
+                {deletingCreditBill ? <LoaderCircle size={15} className="animate-spin" aria-hidden="true" /> : <Trash2 size={15} aria-hidden="true" />}
+                {deletingCreditBill ? 'Deleting…' : 'Delete bill'}
+              </button>
+            </div>
+          </section>
         </div>
       )}
     </div>

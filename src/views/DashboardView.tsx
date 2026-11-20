@@ -1,11 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { ArrowRight, ShoppingCart, Wallet, UsersRound, Truck } from 'lucide-react';
+import { ArrowRight, Package, ShoppingCart, Wallet, UsersRound, Truck } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { formatCurrency } from '../utils/currency';
 import { StatsWidget } from '../components/ui/stats-widget';
 import { SalesRevenueAreaChart } from '../components/ui/sales-revenue-area-chart';
 import CountUp from '../components/ReactBitsCountUp';
 import { DashboardSummary, getDashboardSummary } from '../services/api';
+import { StockHealthBarChart } from '../components/ui/stock-health-bar-chart';
 
 const formatMoney = formatCurrency;
 
@@ -25,7 +26,7 @@ const DashboardPanel: React.FC<{ title: string; icon: React.ReactNode; action: s
 );
 
 export const DashboardView: React.FC = () => {
-  const { authSession, setActiveScreen } = useApp();
+  const { authSession, setActiveScreen, products, masterDataLoading, masterDataError } = useApp();
   const now = new Date();
   const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
   const [selectedMonth, setSelectedMonth] = useState(currentMonth);
@@ -108,17 +109,10 @@ export const DashboardView: React.FC = () => {
       </section>
 
       <section className="grid grid-cols-1 gap-3">
-        <DashboardPanel title="Recent sales" icon={<ShoppingCart size={21} />} action="View sales" onAction={() => setActiveScreen('daily-sales-management')}>
-          <div className="overflow-x-auto px-4 pb-4 sm:px-5">
-            <table className="w-full min-w-[540px] text-left text-sm">
-              <thead className="bg-[#f6f3ee] text-[#605b52]"><tr><th className="rounded-l-lg px-3 py-2.5 font-semibold">Invoice</th><th className="px-3 py-2.5 font-semibold">Customer</th><th className="px-3 py-2.5 font-semibold">Payment</th><th className="rounded-r-lg px-3 py-2.5 text-right font-semibold">Total</th></tr></thead>
-              <tbody className="divide-y divide-[#eee8df]">
-                {summary?.latestSales.map((sale) => <tr key={sale.invoiceNumber} className="hover:bg-[#fffaf1]"><td className="px-3 py-3 font-semibold text-[#a86600] underline decoration-[#dfbd7b] underline-offset-2">{sale.invoiceNumber}</td><td className="px-3 py-3">{sale.customerName}</td><td className="px-3 py-3"><span className="rounded-full bg-[#fff0c7] px-3 py-1 text-xs font-semibold text-[#493819]">{sale.paymentMethod}</span></td><td className="px-3 py-3 text-right font-bold">{formatMoney(Number(sale.total))}</td></tr>)}
-                {!loading && (!summary?.latestSales.length) && <tr><td colSpan={4} className="px-3 py-9 text-center text-[#77736d]">No sales recorded yet.</td></tr>}
-                {loading && <tr><td colSpan={4} className="px-3 py-9 text-center text-[#77736d]">Loading sales…</td></tr>}
-                {error && <tr><td colSpan={4} className="px-3 py-3 text-center text-red-700">{error}</td></tr>}
-              </tbody>
-            </table>
+        <DashboardPanel title="Stock Health" icon={<Package size={21} />} action="View all products" onAction={() => setActiveScreen('product-entry')}>
+          <div className="border-t border-[#eee8df] pt-4">
+            <p className="px-5 pb-1 text-xs text-[#77736d] sm:px-6">Current available stock; minimum stock requirements are needed to assess stock health.</p>
+            <StockHealthBarChart products={products} loading={masterDataLoading} error={masterDataError} />
           </div>
         </DashboardPanel>
 
