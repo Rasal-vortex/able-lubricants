@@ -226,6 +226,7 @@ export interface ApiProduct {
   batches?: Array<{
     id: string;
     label?: string | null;
+    purchaseRate: string | number;
     sellingRate: string | number;
     remainingQuantity: string | number;
     receivedAt: string;
@@ -432,6 +433,7 @@ export interface ApiPurchase {
   supplierId: string;
   supplierInvoiceNumber: string;
   totalAmount: string | number;
+  creditApplied?: string | number;
   discountAmount?: string | number;
   status?: string;
   items?: Array<{
@@ -458,6 +460,24 @@ export interface ApiPurchaseCancellation {
   id: string;
   status: string;
   updatedAt?: string;
+  cancellation?: {
+    reason: string;
+    cancelledAt: string;
+    refund?: {
+      id: string;
+      amount: string | number;
+      settled: string | number;
+      pending: string | number;
+      status: 'NO_REFUND_REQUIRED' | 'REFUND_PENDING' | 'PARTIALLY_REFUNDED' | 'FULLY_REFUNDED';
+    };
+  };
+}
+
+export interface SupplierRefundLinePayload {
+  originalPaymentId: string;
+  amount: number;
+  method: 'CASH' | 'UPI' | 'BANK' | 'OTHER';
+  reference?: string;
 }
 
 export type PaymentMethod = 'CASH' | 'UPI' | 'BANK_TRANSFER' | 'CHEQUE';
@@ -686,8 +706,25 @@ export const deleteCouponRequest = (token: string, id: string) =>
 export const createPurchaseRequest = (token: string, payload: CreatePurchasePayload) =>
   apiRequest<ApiPurchase>('/purchases', { method: 'POST', body: JSON.stringify(payload) }, token);
 
-export const cancelPurchaseRequest = (token: string, purchaseId: string) =>
-  apiRequest<ApiPurchaseCancellation>(`/purchases/${encodeURIComponent(purchaseId)}/cancel`, { method: 'POST' }, token);
+export const cancelPurchaseRequest = (
+  token: string,
+  purchaseId: string,
+  payload: { idempotencyKey: string; reason: string; paymentGroupDecisions: Array<{ paymentGroupId: string | null; paymentId: string | null; wasTransferred: boolean }>; refundNow: SupplierRefundLinePayload[]; refundPending: Array<{ originalPaymentId: string; amount: number }>; refundDate?: string },
+) => apiRequest<ApiPurchaseCancellation>(
+  `/purchases/${encodeURIComponent(purchaseId)}/cancel`,
+  { method: 'POST', body: JSON.stringify(payload) },
+  token,
+);
+
+export const settleSupplierRefundRequest = (
+  token: string,
+  purchaseId: string,
+  payload: { idempotencyKey: string; settledAt?: string; refunds: SupplierRefundLinePayload[] },
+) => apiRequest<{ id: string; amount: string; pendingAmount: string; replayed: boolean }>(
+  `/purchases/${encodeURIComponent(purchaseId)}/refunds/settlements`,
+  { method: 'POST', body: JSON.stringify(payload) },
+  token,
+);
 
 export const createSupplierPaymentRequest = (
   token: string,

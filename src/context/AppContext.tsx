@@ -46,6 +46,7 @@ import {
   createPurchaseRequest,
   createSupplierPaymentRequest,
   cancelPurchaseRequest,
+  settleSupplierRefundRequest,
   createSupplierRequest,
   getBrands,
   getCustomers,
@@ -153,6 +154,7 @@ const mapProduct = (product: ApiProduct): Product => ({
   batches: (product.batches || []).map((batch) => ({
     id: batch.id,
     label: batch.label,
+    purchaseRate: Number(batch.purchaseRate),
     sellingRate: Number(batch.sellingRate),
     remainingQuantity: Number(batch.remainingQuantity),
     receivedAt: batch.receivedAt,
@@ -246,7 +248,8 @@ interface AppContextType {
   // Purchase Bills
   purchases: PurchaseBill[];
   addPurchaseBill: (bill: Omit<PurchaseBill, 'id'>, paymentMethod: PaymentMethod, idempotencyKey: string) => Promise<boolean>;
-  cancelPurchaseBill: (id: string) => Promise<boolean>;
+  cancelPurchaseBill: (id: string, input: { idempotencyKey: string; reason: string; paymentGroupDecisions: Array<{ paymentGroupId: string | null; paymentId: string | null; wasTransferred: boolean }>; refundNow: Array<{ originalPaymentId: string; amount: number; method: 'CASH' | 'UPI' | 'BANK' | 'OTHER'; reference?: string }>; refundPending: Array<{ originalPaymentId: string; amount: number }>; refundDate?: string }) => Promise<boolean>;
+  settleSupplierRefund: (id: string, input: { idempotencyKey: string; settledAt?: string; refunds: Array<{ originalPaymentId: string; amount: number; method: 'CASH' | 'UPI' | 'BANK' | 'OTHER'; reference?: string }> }) => Promise<boolean>;
 
   // Party Ledger
   customers: Party[];
@@ -441,9 +444,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             const invoiceNumber = purchase.supplierInvoiceNumber || purchase.purchaseNumber;
             const amountPaid = Number(purchase.paid) || 0;
             const totalAmount = Number(purchase.total) || 0;
+            const creditApplied = Number(purchase.creditApplied) || 0;
             purchaseRows.push({
               id: purchase.id,
-              status: Number(purchase.outstanding) > 0 ? (amountPaid > 0 ? 'PARTIALLY_PAID' : 'UNPAID') : 'PAID',
+              status: purchase.status === 'CANCELLED' ? 'CANCELLED' : Number(purchase.outstanding) > 0 ? (amountPaid + creditApplied > 0 ? 'PARTIALLY_PAID' : 'UNPAID') : 'PAID',
               invoiceNumber,
               partyName: ledger.supplier?.name || '',
               invoiceDate: String(purchase.date || '').slice(0, 10),
@@ -461,7 +465,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               taxShipping: 0,
               totalAmount,
               amountPaid,
+              supplierCreditApplied: creditApplied,
               outstandingBalance: Number(purchase.outstanding) || 0,
+              cancellation: purchase.cancellation ? {
+                reason: purchase.cancellation.reason,
+                cancelledAt: purchase.cancellation.cancelledAt,
+                refund: purchase.cancellation.refund ? {
+                  amount: Number(purchase.cancellation.refund.amount) || 0,
+                  settled: Number(purchase.cancellation.refund.settled) || 0,
+                  pending: Number(purchase.cancellation.refund.pending) || 0,
+                  status: purchase.cancellation.refund.status,
+                } : undefined,
+              } : undefined,
             });
             (purchase.payments || []).forEach((payment: any) => ledgerRows.push({
               id: payment.id,
@@ -1293,7 +1308,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const totalAmount = Number(apiPurchase.totalAmount);
     let amountPaid = 0;
     let paymentError: string | undefined;
-    const requestedPayment = Math.max(0, Math.min(billData.amountPaid || 0, totalAmount));
+    const creditApplied = Math.min(totalAmount, Math.max(0, Number(apiPurchase.creditApplied) || 0));
+    const amountDueAfterCredit = Math.max(0, totalAmount - creditApplied);
+    const requestedPayment = Math.max(0, Math.min(billData.amountPaid || 0, amountDueAfterCredit));
 
     if (requestedPayment > 0) {
       try {
@@ -1313,11 +1330,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const newPurchase: PurchaseBill = {
       ...billData,
       id: apiPurchase.id,
-      status: amountPaid > 0 ? (amountPaid >= totalAmount ? 'PAID' : 'PARTIALLY_PAID') : apiPurchase.status || 'UNPAID',
+      status: amountPaid + creditApplied >= totalAmount ? 'PAID' : amountPaid > 0 || creditApplied > 0 ? 'PARTIALLY_PAID' : apiPurchase.status || 'UNPAID',
       totalAmount,
       subtotal: totalAmount,
       amountPaid,
-      outstandingBalance: Math.max(0, totalAmount - amountPaid),
+      supplierCreditApplied: creditApplied,
+      outstandingBalance: Math.max(0, totalAmount - creditApplied - amountPaid),
       items: items.map((item) => ({ ...item, totalAmount: item.quantity * item.purchaseRate })),
     };
     setPurchases((prev) => [newPurchase, ...prev]);
@@ -1335,6 +1353,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           .map((item) => ({
             id: item.inventoryBatch!.id,
             label: item.inventoryBatch!.label,
+            purchaseRate: Number(item.inventoryBatch!.purchaseRate),
             sellingRate: Number(item.inventoryBatch!.sellingRate),
             remainingQuantity: Number(item.inventoryBatch!.remainingQuantity),
             receivedAt: item.inventoryBatch!.receivedAt,
@@ -1378,15 +1397,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ...prev,
     ]);
 
+    const creditNotice = creditApplied > 0 ? ` Supplier credit ${formatCurrency(creditApplied)} applied.` : '';
     if (paymentError) {
-      showToast(`Purchase saved and stock updated, but the payment was not recorded: ${paymentError}`, 'error');
+      showToast(`Purchase saved and stock updated${creditNotice} but the payment was not recorded: ${paymentError}`, 'error');
     } else {
-      showToast(`Purchase invoice ${newPurchase.invoiceNumber} saved. Stock updated${amountPaid > 0 ? ' and payment recorded' : ''}.`);
+      showToast(`Purchase invoice ${newPurchase.invoiceNumber} saved. Stock updated${amountPaid > 0 ? ' and payment recorded' : ''}.${creditNotice}`);
     }
     return true;
   };
 
-  const cancelPurchaseBill = async (id: string): Promise<boolean> => {
+  const cancelPurchaseBill = async (id: string, input: { idempotencyKey: string; reason: string; paymentGroupDecisions: Array<{ paymentGroupId: string | null; paymentId: string | null; wasTransferred: boolean }>; refundNow: Array<{ originalPaymentId: string; amount: number; method: 'CASH' | 'UPI' | 'BANK' | 'OTHER'; reference?: string }>; refundPending: Array<{ originalPaymentId: string; amount: number }>; refundDate?: string }): Promise<boolean> => {
     if (!authSession) {
       showToast('Sign in before cancelling a purchase.', 'error');
       return false;
@@ -1396,19 +1416,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       showToast('Purchase invoice was not found.', 'error');
       return false;
     }
-    if (purchase.amountPaid && purchase.amountPaid > 0) {
-      showToast('Only unpaid purchases can be cancelled.', 'error');
-      return false;
-    }
+    let result;
     try {
-      await cancelPurchaseRequest(authSession.token, id);
+      result = await cancelPurchaseRequest(authSession.token, id, input);
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'The purchase could not be cancelled.', 'error');
       return false;
     }
 
-    setPurchases((previous) => previous.map((entry) => entry.id === id ? { ...entry, status: 'CANCELLED' } : entry));
-    setSupplierLedger((previous) => previous.filter((entry) => entry.invoiceNumber !== purchase.invoiceNumber));
+    const refund = result.cancellation?.refund;
+    const cancellation = result.cancellation ? {
+      reason: result.cancellation.reason,
+      cancelledAt: result.cancellation.cancelledAt,
+      refund: refund ? {
+        amount: Number(refund.amount) || 0,
+        settled: Number(refund.settled) || 0,
+        pending: Number(refund.pending) || 0,
+        status: refund.status,
+      } : undefined,
+    } : undefined;
+    setPurchases((previous) => previous.map((entry) => entry.id === id ? { ...entry, status: 'CANCELLED', outstandingBalance: 0, cancellation } : entry));
+    setSupplierLedger((previous) => previous.map((entry) => entry.invoiceNumber === purchase.invoiceNumber ? { ...entry, outstandingBalance: 0 } : entry));
     try {
       const refreshedProducts = await getProducts(authSession.token);
       setProducts(refreshedProducts.map(mapProduct));
@@ -1418,8 +1446,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return reversedQty ? { ...product, quantity: Math.max(0, product.quantity - reversedQty) } : product;
       }));
     }
-    showToast(`Purchase invoice ${purchase.invoiceNumber} cancelled and stock reversed.`);
+    showToast(`Purchase invoice ${purchase.invoiceNumber} cancelled. Stock and payment history were recorded.`);
     return true;
+  };
+
+  const settleSupplierRefund = async (id: string, input: { idempotencyKey: string; settledAt?: string; refunds: Array<{ originalPaymentId: string; amount: number; method: 'CASH' | 'UPI' | 'BANK' | 'OTHER'; reference?: string }> }): Promise<boolean> => {
+    if (!authSession) {
+      showToast('Sign in before recording a supplier refund.', 'error');
+      return false;
+    }
+    try {
+      await settleSupplierRefundRequest(authSession.token, id, input);
+      showToast('Supplier refund settlement recorded.');
+      return true;
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'The supplier refund could not be recorded.', 'error');
+      return false;
+    }
   };
 
   const recordSupplierPayment = async (invoiceNumber: string, partyName: string, amount: number, paymentDate: string, paymentMode: string, purchaseId: string, outstandingBalance: number, invoiceDate?: string): Promise<boolean> => {
@@ -1535,6 +1578,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         purchases,
         addPurchaseBill,
         cancelPurchaseBill,
+        settleSupplierRefund,
         customers,
         refreshCustomers,
         addCustomer,

@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { Building2, CreditCard, FileText, LoaderCircle, Package, Pencil, Plus, Printer, Wallet } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { AlertTriangle, Building2, CreditCard, FileText, LoaderCircle, Package, Pencil, Plus, Printer, Wallet } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { createSupplierPaymentRequest, getSupplierLedgerReport } from '../services/api';
 import { NumericTextInput } from '../components/ui/NumericTextInput';
@@ -14,7 +14,24 @@ type SupplierLedgerPurchase = {
   date: string;
   total: string | number;
   paid: string | number;
+  creditApplied: string | number;
   outstanding: string | number;
+  status: 'POSTED' | 'CANCELLED';
+  cancellationEligibility: { eligible: boolean; reasons: string[]; blockers?: Array<{ productId: string; productName: string; reason: string }> };
+  cancellation?: {
+    reason: string;
+    cancelledAt: string;
+    cancelledBy?: { id: string; name: string } | null;
+    refund?: {
+      id?: string;
+      amount: string | number;
+      settled: string | number;
+      pending: string | number;
+      status: 'NO_REFUND_REQUIRED' | 'REFUND_PENDING' | 'PARTIALLY_REFUNDED' | 'FULLY_REFUNDED';
+      allocations?: Array<{ originalPaymentId: string; paidAmount: string | number; settled: string | number; pending: string | number; method: string; receiptNumber?: string | null }>;
+      settlements?: Array<{ id: string; date: string; lines: Array<{ originalPaymentId: string; amount: string | number; method: string; reference?: string | null }> }>;
+    };
+  } | null;
   items: Array<{
     id: string;
     productName: string;
@@ -30,12 +47,23 @@ type SupplierLedgerPurchase = {
     method: string;
     date: string;
     receiptNumber?: string | null;
+    reversedAmount?: string | number;
+    reversalHistory?: Array<{ amount: string | number; reason: string; date: string }>;
+    transferDecisions?: Array<{ wasTransferred: boolean; cancellationPurchaseId: string; decidedAt: string }>;
   }>;
+};
+
+type CancellationPaymentGroup = {
+  key: string;
+  paymentGroupId: string | null;
+  paymentId: string | null;
+  allocations: Array<{ purchase: SupplierLedgerPurchase; payment: SupplierLedgerPurchase['payments'][number] }>;
+  wasPreviouslyDecided?: boolean;
 };
 
 type SupplierLedger = {
   supplier: { id: string; name: string; phone?: string | null };
-  totals: { billed: string | number; paid: string | number; outstanding: string | number };
+  totals: { billed: string | number; paid: string | number; creditApplied?: string | number; supplierCredit?: string | number; outstanding: string | number; refundReceivable?: string | number };
   purchases: SupplierLedgerPurchase[];
 };
 
@@ -52,6 +80,11 @@ const localToday = () => {
   const today = new Date();
   return new Date(today.getTime() - today.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 };
+const purchaseCancellationReasons = [
+  'Entered by mistake',
+  'Duplicate purchase',
+  'Incorrect purchase details',
+] as const;
 
 const escapeHtml = (value: string | number) => String(value)
   .replace(/&/g, '&amp;')
@@ -70,6 +103,8 @@ export const PartyLedgerManagementView: React.FC = () => {
     supplierError,
     authSession,
     showToast,
+    cancelPurchaseBill,
+    settleSupplierRefund,
   } = useApp();
   const [selectedSupplierId, setSelectedSupplierId] = useState('');
   const [ledger, setLedger] = useState<SupplierLedger | null>(null);
@@ -88,6 +123,20 @@ export const PartyLedgerManagementView: React.FC = () => {
   const [receiptNumber, setReceiptNumber] = useState('');
   const [savingPayment, setSavingPayment] = useState(false);
   const [purchasePage, setPurchasePage] = useState(1);
+  const [cancelTarget, setCancelTarget] = useState<SupplierLedgerPurchase | null>(null);
+  const [cancelReason, setCancelReason] = useState('');
+  const [paymentGroupDecisions, setPaymentGroupDecisions] = useState<Record<string, boolean | undefined>>({});
+  const [refundHandlingEnabled, setRefundHandlingEnabled] = useState(false);
+  const [cancelRefundInputs, setCancelRefundInputs] = useState<Record<string, { amount: string; pendingAmount: string; method: 'CASH' | 'UPI' | 'BANK' | 'OTHER'; reference: string }>>({});
+  const [cancelRefundDate, setCancelRefundDate] = useState(localToday);
+  const [cancellingPurchaseId, setCancellingPurchaseId] = useState<string | null>(null);
+  const cancellingPurchaseIdRef = useRef<string | null>(null);
+  const cancelIdempotencyKey = useRef(crypto.randomUUID());
+  const [settleTarget, setSettleTarget] = useState<SupplierLedgerPurchase | null>(null);
+  const [settlementInputs, setSettlementInputs] = useState<Record<string, { amount: string; method: 'CASH' | 'UPI' | 'BANK' | 'OTHER'; reference: string }>>({});
+  const [settlementDate, setSettlementDate] = useState(localToday);
+  const [savingRefundSettlement, setSavingRefundSettlement] = useState(false);
+  const settlementIdempotencyKey = useRef(crypto.randomUUID());
 
   const selectedSupplier = suppliers.find((supplier) => supplier.id === selectedSupplierId);
   const newestFirstPurchases = [...(ledger?.purchases || [])].sort((left, right) =>
@@ -97,6 +146,33 @@ export const PartyLedgerManagementView: React.FC = () => {
   const safePurchasePage = Math.min(purchasePage, purchasePageCount);
   const pageLedgerPurchases = getPageRecords(newestFirstPurchases, safePurchasePage);
   const purchaseRange = getPaginationRange(newestFirstPurchases.length, safePurchasePage);
+  const cancellationPaidAmount = cancelTarget?.payments.reduce((total, payment) => total + Math.max(0, (Number(payment.amount) || 0) - (Number(payment.reversedAmount) || 0)), 0) ?? 0;
+  const cancellationRefundNow = Object.values(cancelRefundInputs).reduce((total, entry) => total + (Number(entry.amount) || 0), 0);
+  const cancellationRefundPending = Object.values(cancelRefundInputs).reduce((total, entry) => total + (Number(entry.pendingAmount) || 0), 0);
+  const cancellationRefundInvalid = refundHandlingEnabled && (Boolean(cancelTarget?.payments.some((payment) =>
+    (Number(cancelRefundInputs[payment.id]?.amount) || 0) + (Number(cancelRefundInputs[payment.id]?.pendingAmount) || 0) > Math.max(0, (Number(payment.amount) || 0) - (Number(payment.reversedAmount) || 0)) + 0.000001,
+  )) || cancellationRefundNow + cancellationRefundPending > cancellationPaidAmount + 0.000001);
+  const cancellationPaymentGroups: CancellationPaymentGroup[] = (() => {
+    if (!cancelTarget) return [];
+    const allAllocations = (ledger?.purchases || []).flatMap((purchase) => purchase.payments.map((payment) => ({ purchase, payment })));
+    const groups = new Map<string, CancellationPaymentGroup>();
+    for (const targetPayment of cancelTarget.payments) {
+      const key = targetPayment.paymentGroupId ? `group:${targetPayment.paymentGroupId}` : `payment:${targetPayment.id}`;
+      if (groups.has(key)) continue;
+      const allocations = allAllocations.filter(({ payment }) => targetPayment.paymentGroupId
+        ? payment.paymentGroupId === targetPayment.paymentGroupId
+        : payment.id === targetPayment.id);
+      const decisions = allocations.flatMap(({ payment }) => payment.transferDecisions || []);
+      groups.set(key, {
+        key,
+        paymentGroupId: targetPayment.paymentGroupId || null,
+        paymentId: targetPayment.paymentGroupId ? null : targetPayment.id,
+        allocations,
+        wasPreviouslyDecided: decisions.length ? decisions[decisions.length - 1].wasTransferred : undefined,
+      });
+    }
+    return [...groups.values()];
+  })();
   useEffect(() => { setPurchasePage(1); }, [selectedSupplierId]);
   useEffect(() => { if (purchasePage > purchasePageCount) setPurchasePage(purchasePageCount); }, [purchasePage, purchasePageCount]);
   const paymentReceipts = new Map<string, SupplierPaymentReceipt>();
@@ -187,6 +263,134 @@ export const PartyLedgerManagementView: React.FC = () => {
     setLedger(data as SupplierLedger);
   };
 
+  const openPurchaseCancellation = (purchase: SupplierLedgerPurchase) => {
+    setCancelTarget(purchase);
+    setCancelReason('');
+    const decisions: Record<string, boolean | undefined> = {};
+    for (const payment of purchase.payments) {
+      const key = payment.paymentGroupId ? `group:${payment.paymentGroupId}` : `payment:${payment.id}`;
+      const related = (ledger?.purchases || []).flatMap((entry) => entry.payments)
+        .filter((entry) => payment.paymentGroupId ? entry.paymentGroupId === payment.paymentGroupId : entry.id === payment.id)
+        .flatMap((entry) => entry.transferDecisions || []);
+      decisions[key] = related.length ? related[related.length - 1].wasTransferred : undefined;
+    }
+    setPaymentGroupDecisions(decisions);
+    setRefundHandlingEnabled(false);
+    setCancelRefundDate(localToday());
+    cancelIdempotencyKey.current = crypto.randomUUID();
+    setCancelRefundInputs(Object.fromEntries(purchase.payments.map((payment) => [payment.id, {
+      amount: '0',
+      pendingAmount: '0',
+      method: (payment.method === 'UPI' ? 'UPI' : payment.method === 'BANK' ? 'BANK' : payment.method === 'OTHER' ? 'OTHER' : 'CASH') as 'CASH' | 'UPI' | 'BANK' | 'OTHER',
+      reference: '',
+    }])));
+  };
+
+  const submitPurchaseCancellation = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!cancelTarget || cancellingPurchaseIdRef.current === cancelTarget.id || !cancelReason.trim()) return;
+    if (cancellationPaymentGroups.some((group) => paymentGroupDecisions[group.key] === undefined)) {
+      showToast('Confirm whether each supplier payment group was actually transferred.', 'error');
+      return;
+    }
+    const paid = cancelTarget.payments.reduce((total, payment) => total + Math.max(0, (Number(payment.amount) || 0) - (Number(payment.reversedAmount) || 0)), 0);
+    const transferredTargetPayments = cancelTarget.payments.filter((payment) => paymentGroupDecisions[payment.paymentGroupId ? `group:${payment.paymentGroupId}` : `payment:${payment.id}`] === true);
+    const refundNow = refundHandlingEnabled ? transferredTargetPayments.flatMap((payment) => {
+      const entry = cancelRefundInputs[payment.id];
+      const amount = Number(entry?.amount) || 0;
+      return entry && amount > 0 ? [{ originalPaymentId: payment.id, amount, method: entry.method, reference: entry.reference.trim() || undefined }] : [];
+    }) : [];
+    const refundPending = refundHandlingEnabled ? transferredTargetPayments.flatMap((payment) => {
+      const amount = Number(cancelRefundInputs[payment.id]?.pendingAmount) || 0;
+      return amount > 0 ? [{ originalPaymentId: payment.id, amount }] : [];
+    }) : [];
+    const refundNowTotal = refundNow.reduce((total, refund) => total + refund.amount, 0);
+    const refundPendingTotal = refundPending.reduce((total, refund) => total + refund.amount, 0);
+    if (refundNowTotal + refundPendingTotal > paid + 0.000001) {
+      showToast('Refund now cannot exceed the amount paid on this purchase.', 'error');
+      return;
+    }
+    if (cancelTarget.payments.some((payment) => (Number(cancelRefundInputs[payment.id]?.amount) || 0) + (Number(cancelRefundInputs[payment.id]?.pendingAmount) || 0) > Math.max(0, (Number(payment.amount) || 0) - (Number(payment.reversedAmount) || 0)) + 0.000001)) {
+      showToast('A refund now amount cannot exceed its original payment allocation.', 'error');
+      return;
+    }
+    const purchaseId = cancelTarget.id;
+    cancellingPurchaseIdRef.current = purchaseId;
+    setCancellingPurchaseId(purchaseId);
+    setCancelTarget(null);
+    try {
+      const success = await cancelPurchaseBill(purchaseId, {
+        idempotencyKey: cancelIdempotencyKey.current,
+        reason: cancelReason.trim(),
+        paymentGroupDecisions: cancellationPaymentGroups.map((group) => ({ paymentGroupId: group.paymentGroupId, paymentId: group.paymentId, wasTransferred: paymentGroupDecisions[group.key]! })),
+        refundNow: refundHandlingEnabled ? refundNow : [],
+        refundPending,
+        refundDate: cancelRefundDate,
+      });
+      if (!success) return;
+      cancelIdempotencyKey.current = crypto.randomUUID();
+      try {
+        await reloadLedger();
+      } catch (error) {
+        setLedger((current) => current ? {
+          ...current,
+          purchases: current.purchases.map((purchase) => purchase.id === purchaseId ? { ...purchase, status: 'CANCELLED' } : purchase),
+        } : current);
+        showToast(error instanceof Error ? `Purchase cancelled, but the ledger could not refresh: ${error.message}` : 'Purchase cancelled, but the ledger could not refresh.', 'error');
+      }
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'The purchase could not be cancelled.', 'error');
+    } finally {
+      cancellingPurchaseIdRef.current = null;
+      setCancellingPurchaseId(null);
+    }
+  };
+
+  const openRefundSettlement = (purchase: SupplierLedgerPurchase) => {
+    setSettleTarget(purchase);
+    setSettlementDate(localToday());
+    settlementIdempotencyKey.current = crypto.randomUUID();
+    setSettlementInputs(Object.fromEntries((purchase.cancellation?.refund?.allocations || []).filter((allocation) => Number(allocation.pending) > 0).map((allocation) => [allocation.originalPaymentId, {
+      amount: '',
+      method: (allocation.method === 'UPI' ? 'UPI' : allocation.method === 'BANK' ? 'BANK' : allocation.method === 'OTHER' ? 'OTHER' : 'CASH') as 'CASH' | 'UPI' | 'BANK' | 'OTHER',
+      reference: '',
+    }])));
+  };
+
+  const submitSupplierRefundSettlement = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!settleTarget || savingRefundSettlement) return;
+    const lines = (settleTarget.cancellation?.refund?.allocations || []).flatMap((allocation) => {
+      const entry = settlementInputs[allocation.originalPaymentId];
+      const amount = Number(entry?.amount) || 0;
+      return entry && amount > 0 ? [{ originalPaymentId: allocation.originalPaymentId, amount, method: entry.method, reference: entry.reference.trim() || undefined }] : [];
+    });
+    if (!lines.length) {
+      showToast('Enter the amount received from the supplier.', 'error');
+      return;
+    }
+    const oversettled = lines.some((line) => {
+      const allocation = settleTarget.cancellation?.refund?.allocations?.find((row) => row.originalPaymentId === line.originalPaymentId);
+      return line.amount > (Number(allocation?.pending) || 0) + 0.000001;
+    });
+    if (oversettled) {
+      showToast('A refund amount cannot exceed its remaining payment allocation.', 'error');
+      return;
+    }
+    setSavingRefundSettlement(true);
+    const success = await settleSupplierRefund(settleTarget.id, {
+      idempotencyKey: settlementIdempotencyKey.current,
+      settledAt: settlementDate,
+      refunds: lines,
+    });
+    if (success) {
+      setSettleTarget(null);
+      settlementIdempotencyKey.current = crypto.randomUUID();
+      try { await reloadLedger(); } catch (error) { showToast(error instanceof Error ? error.message : 'Refund was recorded, but the ledger could not refresh.', 'error'); }
+    }
+    setSavingRefundSettlement(false);
+  };
+
   const printSupplierLedger = () => {
     if (!ledger) return;
     const printWindow = window.open('', '_blank', 'width=900,height=700');
@@ -207,11 +411,27 @@ export const PartyLedgerManagementView: React.FC = () => {
         date: String(payment.date).slice(0, 10),
         kind: 'Payment' as const,
         order: purchaseIndex + paymentIndex / 1000,
-        description: `Payment received · ${payment.method === 'CASH' ? 'Cash' : payment.method === 'UPI' ? 'UPI' : payment.method}${payment.receiptNumber ? ` · Receipt #${payment.receiptNumber}` : ''}`,
+        description: `Payment sent · ${payment.method === 'CASH' ? 'Cash' : payment.method === 'UPI' ? 'UPI' : payment.method}${payment.receiptNumber ? ` · Receipt #${payment.receiptNumber}` : ''}`,
         debit: 0,
         credit: Number(payment.amount) || 0,
       })),
-    ]).sort((left, right) => left.date.localeCompare(right.date) || Number(left.kind === 'Payment') - Number(right.kind === 'Payment') || left.order - right.order);
+      ...(purchase.cancellation ? [{
+        date: String(purchase.cancellation.cancelledAt).slice(0, 10),
+        kind: 'Cancellation' as const,
+        order: purchaseIndex + 0.8,
+        description: `Purchase cancelled · ${purchase.cancellation.reason}`,
+        debit: 0,
+        credit: Number(purchase.total) || 0,
+      }] : []),
+      ...(purchase.cancellation?.refund?.settlements?.flatMap((settlement, settlementIndex) => settlement.lines.map((line, lineIndex) => ({
+        date: String(settlement.date).slice(0, 10),
+        kind: 'Refund' as const,
+        order: purchaseIndex + 0.9 + settlementIndex / 100 + lineIndex / 10000,
+        description: `Supplier refund received · ${line.method}${line.reference ? ` · ${line.reference}` : ''}`,
+        debit: Number(line.amount) || 0,
+        credit: 0,
+      }))) || []),
+    ]).sort((left, right) => left.date.localeCompare(right.date) || left.order - right.order);
     let runningBalance = 0;
     const statementRows = transactions.length
       ? transactions.map((transaction) => {
@@ -248,7 +468,7 @@ export const PartyLedgerManagementView: React.FC = () => {
         .party-label, .summary-label { display: block; margin-bottom: 1.5mm; color: #60646c; font-size: 7.5pt; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
         .party-name { font-size: 13pt; font-weight: 700; }
         .party-phone { align-self: end; text-align: right; }
-        .summary { display: grid; grid-template-columns: repeat(3, 1fr); margin-bottom: 9mm; border: 1px solid #d9dce1; }
+        .summary { display: grid; grid-template-columns: repeat(4, 1fr); margin-bottom: 9mm; border: 1px solid #d9dce1; }
         .summary-card { padding: 4mm; }
         .summary-card + .summary-card { border-left: 1px solid #d9dce1; }
         .summary-value { font-size: 13pt; font-weight: 700; }
@@ -272,6 +492,7 @@ export const PartyLedgerManagementView: React.FC = () => {
           <div class="summary-card"><span class="summary-label">Total billed</span><strong class="summary-value">${escapeHtml(formatCurrency(Number(ledger.totals.billed)))}</strong></div>
           <div class="summary-card"><span class="summary-label">Total paid</span><strong class="summary-value">${escapeHtml(formatCurrency(Number(ledger.totals.paid)))}</strong></div>
           <div class="summary-card"><span class="summary-label">Balance due</span><strong class="summary-value">${escapeHtml(formatCurrency(Number(ledger.totals.outstanding)))}</strong></div>
+          <div class="summary-card"><span class="summary-label">Supplier refund due</span><strong class="summary-value">${escapeHtml(formatCurrency(Number(ledger.totals.refundReceivable || 0)))}</strong></div>
         </section>
         <h2>Account activity</h2>
         <table><thead><tr><th>Date</th><th>Transaction</th><th class="amount">Debit</th><th class="amount">Credit</th><th class="amount">Balance</th></tr></thead><tbody>${statementRows}</tbody></table>
@@ -410,31 +631,44 @@ export const PartyLedgerManagementView: React.FC = () => {
           {selectedSupplier && ledgerLoading && <div className="flex flex-col items-center justify-center gap-3 p-14 text-sm text-[#77736d]"><LoaderOne /><span>Loading supplier ledger…</span></div>}
           {selectedSupplier && !ledgerLoading && ledger && (
             <>
-              <div className="grid gap-3 p-4 sm:grid-cols-3">
+              <div className={`grid gap-3 p-4 ${Number(ledger.totals.refundReceivable || 0) > 0 ? 'sm:grid-cols-2 xl:grid-cols-5' : 'sm:grid-cols-2 xl:grid-cols-4'}`}>
                 {[
                   { label: 'Total billed', value: ledger.totals.billed, icon: FileText, tone: 'bg-[#fff8e7] text-[#9a6700]' },
                   { label: 'Total paid', value: ledger.totals.paid, icon: CreditCard, tone: 'bg-[#f4f7f2] text-[#4c6b45]' },
+                  { label: 'Supplier credit', value: ledger.totals.supplierCredit || 0, icon: Wallet, tone: 'bg-[#f4f7f2] text-[#4c6b45]' },
                   { label: 'Outstanding', value: ledger.totals.outstanding, icon: Wallet, tone: 'bg-[#fff2e9] text-[#a45520]' },
-                ].map(({ label, value, icon: Icon, tone }) => <div key={label} className="flex items-center gap-3 rounded-xl border border-[#eee8df] bg-[#fffdfa] p-4 shadow-[0_2px_8px_rgba(37,27,12,.04)]"><span className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl ${tone}`}><Icon size={20} /></span><div className="min-w-0"><div className="text-xs font-semibold uppercase tracking-wide text-[#77736d]">{label}</div><div className={`mt-1 truncate text-xl font-bold ${label === 'Outstanding' ? 'text-[#a86600]' : 'text-[#272727]'}`}>{formatCurrency(Number(value))}</div></div></div>)}
+                  ...(Number(ledger.totals.refundReceivable || 0) > 0 ? [{ label: 'Supplier refund due', value: ledger.totals.refundReceivable || 0, icon: Wallet, tone: 'bg-[#eef5ff] text-[#355b92]' }] : []),
+                ].map(({ label, value, icon: Icon, tone }) => <div key={label} className="flex items-center gap-3 rounded-xl border border-[#eee8df] bg-[#fffdfa] p-4 shadow-[0_2px_8px_rgba(37,27,12,.04)]"><span className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl ${tone}`}><Icon size={20} /></span><div className="min-w-0"><div className="text-xs font-semibold uppercase tracking-wide text-[#77736d]">{label}</div><div className={`mt-1 truncate text-xl font-bold ${label === 'Outstanding' || label === 'Supplier refund due' ? 'text-[#a86600]' : 'text-[#272727]'}`}>{formatCurrency(Number(value))}</div></div></div>)}
               </div>
-              <div className="flex items-center justify-between border-y border-[#efede8] px-5 py-3"><div className="flex items-center gap-2"><Package size={17} className="text-[#a86600]" /><h3 className="font-semibold text-[#272727]">Purchase history</h3></div><span className="rounded-full bg-[#f6f5f2] px-2.5 py-1 text-xs font-semibold text-[#77736d]">{ledger.purchases.length} bills</span></div>
+              <div className="flex items-center justify-between gap-3 border-y border-[#efede8] px-5 py-3"><div className="flex min-w-0 items-start gap-2"><Package size={17} className="mt-0.5 shrink-0 text-[#a86600]" /><div className="min-w-0"><h3 className="font-semibold text-[#272727]">Purchase history</h3><p className="mt-0.5 text-xs text-[#77736d]">Supplier payments may be allocated across older outstanding bills.</p></div></div><span className="shrink-0 rounded-full bg-[#f6f5f2] px-2.5 py-1 text-xs font-semibold text-[#77736d]">{ledger.purchases.length} bills</span></div>
               <div className="overflow-x-auto">
-                <table className="w-full min-w-[720px] border-collapse text-left">
-                  <thead><tr className="h-11 bg-[#f8f7f4] text-xs font-bold uppercase tracking-wide text-[#6d685f]">{['Purchase / date', 'Total (₹)', 'Paid (₹)', 'Outstanding (₹)', 'Payments'].map((heading) => <th key={heading} className="px-3 py-2">{heading}</th>)}</tr></thead>
+                <table className="w-full min-w-[920px] border-collapse text-left">
+                  <thead><tr className="h-11 bg-[#f8f7f4] text-xs font-bold uppercase tracking-wide text-[#6d685f]">{['Purchase / date', 'Purchase total (₹)', 'Payment allocated (₹)', 'Supplier credit applied (₹)', 'Remaining balance (₹)', 'Payment details', 'Actions'].map((heading) => <th key={heading} className="px-3 py-2">{heading}</th>)}</tr></thead>
                   <tbody className="divide-y divide-[#efede8] text-sm text-[#272727]">
                     {pageLedgerPurchases.map((purchase) => (
-                      <tr key={purchase.id} className="align-top transition-colors hover:bg-[#fffdf8]">
-                        <td className="px-3 py-3"><span className="block font-semibold text-[#a86600]">{purchase.supplierInvoiceNumber || purchase.purchaseNumber}</span><span className="mt-1 block text-xs text-[#77736d]">{String(purchase.date).slice(0, 10)}</span></td>
+                      <tr key={purchase.id} className={`align-top transition-colors hover:bg-[#fffdf8] ${purchase.status === 'CANCELLED' ? 'bg-[#faf9f7] text-[#77736d]' : ''}`}>
+                        <td className="px-3 py-3"><span className={`block font-semibold ${purchase.status === 'CANCELLED' ? 'text-[#77736d]' : 'text-[#a86600]'}`}>{purchase.supplierInvoiceNumber || purchase.purchaseNumber}</span><span className="mt-1 block text-xs text-[#77736d]">{String(purchase.date).slice(0, 10)}</span>{purchase.status === 'CANCELLED' && <span className="mt-1 inline-flex rounded-full bg-[#ecebe8] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[#625f59]">Cancelled</span>}</td>
                         <td className="px-3 py-3 font-semibold">{formatCurrency(Number(purchase.total))}</td>
                         <td className="px-3 py-3">{formatCurrency(Number(purchase.paid))}</td>
+                        <td className="px-3 py-3">{formatCurrency(Number(purchase.creditApplied || 0))}</td>
                         <td className={`px-3 py-3 font-semibold ${Number(purchase.outstanding) > 0 ? 'text-[#a86600]' : 'text-[#77736d]'}`}>{formatCurrency(Number(purchase.outstanding))}</td>
                         <td className="min-w-[170px] px-3 py-3">{purchase.payments.length ? purchase.payments.map((payment) => {
                           const receipt = paymentReceipts.get(payment.paymentGroupId || payment.id);
-                          return <div key={payment.id} className="mb-1 flex items-center gap-1.5 text-xs text-[#68645e] last:mb-0"><span>{String(payment.date).slice(0, 10)} · {payment.method} · {formatCurrency(Number(payment.amount))}{payment.receiptNumber ? <span className="block font-medium text-[#765000]">Receipt # {payment.receiptNumber}</span> : null}</span>{receipt && receipt.firstPaymentId === payment.id && <button type="button" onClick={() => printSupplierPaymentReceipt(payment)} aria-label={`Print payment receipt for ${formatCurrency(receipt.amount)}`} title="Print payment receipt" className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[#765000] hover:bg-[#fff1c9] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c58a00]"><Printer size={14} /></button>}</div>;
+                          return <div key={payment.id} className="mb-1 flex items-center gap-1.5 text-xs text-[#68645e] last:mb-0"><span>{String(payment.date).slice(0, 10)} · {payment.method} · {formatCurrency(Number(payment.amount))}{payment.receiptNumber ? <span className="block font-medium text-[#765000]">Receipt # {payment.receiptNumber}</span> : null}{Number(payment.reversedAmount || 0) > 0 && <span className="block font-medium text-[#77736d]">Allocation reversed: {formatCurrency(Number(payment.reversedAmount))}</span>}</span>{receipt && receipt.firstPaymentId === payment.id && <button type="button" onClick={() => printSupplierPaymentReceipt(payment)} aria-label={`Print payment receipt for ${formatCurrency(receipt.amount)}`} title="Print payment receipt" className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[#765000] hover:bg-[#fff1c9] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c58a00]"><Printer size={14} /></button>}</div>;
                         }) : <span className="text-[#77736d]">—</span>}</td>
+                        <td className="px-3 py-3">
+                          {purchase.status === 'CANCELLED' ? <div className="flex min-w-[150px] flex-col items-start gap-1.5">
+                            <span className="text-xs font-semibold text-[#625f59]">{purchase.cancellation?.refund?.status === 'NO_REFUND_REQUIRED' ? 'No refund required' : purchase.cancellation?.refund?.status === 'FULLY_REFUNDED' ? 'Fully refunded' : purchase.cancellation?.refund?.status === 'PARTIALLY_REFUNDED' ? `Partially refunded · ${formatCurrency(Number(purchase.cancellation.refund.settled))}` : `Refund pending · ${formatCurrency(Number(purchase.cancellation?.refund?.pending || 0))}`}</span>
+                            {Number(purchase.cancellation?.refund?.pending || 0) > 0 && authSession?.user.role === 'ADMIN' && <button type="button" onClick={() => openRefundSettlement(purchase)} className="rounded-md border border-[#e4d6b7] bg-white px-2.5 py-1 text-xs font-semibold text-[#765000] hover:bg-[#fff8e7]">Record refund</button>}
+                            <span className="max-w-[190px] text-[11px] text-[#77736d]">{purchase.cancellation?.reason}</span>
+                          </div> : <div className="flex min-w-[155px] flex-col items-start gap-1.5">
+                            {authSession?.user.role === 'ADMIN' ? cancellingPurchaseId === purchase.id ? <span role="status" className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-xs font-semibold text-red-700"><LoaderCircle size={13} className="animate-spin" />Cancelling...</span> : <button type="button" disabled={!purchase.cancellationEligibility?.eligible} title={purchase.cancellationEligibility?.reasons.join(' ') || undefined} onClick={() => openPurchaseCancellation(purchase)} className="rounded-md border border-red-200 bg-white px-2.5 py-1 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50">Cancel purchase</button> : <span className="text-xs text-[#77736d]">Admin action</span>}
+                            {!purchase.cancellationEligibility?.eligible && <span className="max-w-[200px] text-[11px] leading-snug text-red-700">{purchase.cancellationEligibility?.reasons.join(' ') || 'Eligibility could not be verified.'}</span>}
+                          </div>}
+                        </td>
                       </tr>
                     ))}
-                    {ledger.purchases.length === 0 && <tr><td colSpan={5} className="px-4 py-12 text-center text-sm text-[#77736d]">No purchase or payment records for this supplier.</td></tr>}
+                    {ledger.purchases.length === 0 && <tr><td colSpan={7} className="px-4 py-12 text-center text-sm text-[#77736d]">No purchase or payment records for this supplier.</td></tr>}
                   </tbody>
                 </table>
               </div>
@@ -495,6 +729,105 @@ export const PartyLedgerManagementView: React.FC = () => {
             </div>
             <div className="mt-5 flex justify-end gap-2 border-t border-[#efede8] pt-3"><button type="button" disabled={savingPayment} onClick={() => setPaymentOpen(false)} className="h-10 rounded-lg border border-[#e9e3d9] px-4 text-sm font-semibold text-[#555]">Cancel</button><button type="button" disabled={savingPayment} onClick={() => void submitPayment()} className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#ffe4a0] px-4 text-sm font-semibold text-[#493819] shadow-sm disabled:opacity-60">{savingPayment && <LoaderCircle size={15} className="animate-spin" />}{savingPayment ? 'Saving…' : 'Save payment'}</button></div>
           </div>
+        </div>
+      )}
+      {cancelTarget && selectedSupplier && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/45 p-4" onMouseDown={(event) => { if (event.target === event.currentTarget) setCancelTarget(null); }}>
+          <form role="dialog" aria-modal="true" aria-labelledby="cancel-purchase-title" onSubmit={submitPurchaseCancellation} onMouseDown={(event) => event.stopPropagation()} className="flex max-h-[85vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+            <div className="flex shrink-0 items-start gap-3 border-b border-[#efede8] px-5 py-4">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-red-50 text-red-700"><AlertTriangle size={18} /></span>
+              <div className="min-w-0 flex-1"><h2 id="cancel-purchase-title" className="text-lg font-bold text-[#272727]">Cancel purchase?</h2><p className="mt-0.5 truncate text-sm text-[#77736d]">{cancelTarget.supplierInvoiceNumber || cancelTarget.purchaseNumber} · {selectedSupplier.name} · {String(cancelTarget.date).slice(0, 10)}</p></div>
+              <button type="button" onClick={() => setCancelTarget(null)} aria-label="Close" className="rounded-lg px-2 py-1 text-[#77736d] hover:bg-[#f6f5f2]">×</button>
+            </div>
+            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
+              <div className="rounded-xl bg-[#f8f7f4] px-3 py-2.5"><div className="text-xs font-medium text-[#77736d]">Purchase total</div><div className="mt-0.5 text-lg font-bold text-[#272727]">{formatCurrency(Number(cancelTarget.total))}</div></div>
+
+              <section>
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-semibold text-[#272727]">Stock to remove</h3><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${cancelTarget.cancellationEligibility?.eligible ? 'bg-green-50 text-green-800' : 'bg-red-50 text-red-700'}`}>{cancelTarget.cancellationEligibility?.eligible ? 'Stock eligible for cancellation' : 'Stock is not eligible for cancellation'}</span></div>
+                <div className="divide-y divide-[#efede8] rounded-lg border border-[#eee8df]">
+                  {cancelTarget.items.map((item) => <div key={item.id} className="flex items-center justify-between gap-3 px-3 py-2 text-sm"><span className="min-w-0 truncate font-medium text-[#272727]">{item.productName}</span><span className="shrink-0 text-[#68645e]">{item.quantity} {item.unitName || ''}</span></div>)}
+                </div>
+              </section>
+
+              {cancellationPaymentGroups.length === 0 ? <p className="rounded-lg bg-[#f8f7f4] px-3 py-2 text-sm font-medium text-[#555]">No supplier payment was recorded. No refund or supplier credit will be created.</p> : <section className="space-y-3 border-t border-[#efede8] pt-3">
+                <h3 className="text-sm font-semibold text-[#272727]">Was this supplier payment actually transferred?</h3>
+                {cancellationPaymentGroups.map((group) => {
+                  const selected = paymentGroupDecisions[group.key];
+                  const groupAmount = group.allocations.reduce((total, allocation) => total + Math.max(0, Number(allocation.payment.amount) - Number(allocation.payment.reversedAmount || 0)), 0);
+                  const groupPayment = group.allocations[0]?.payment;
+                  const affectedPurchases = group.allocations.map(({ purchase, payment }) => {
+                    const allocated = Math.max(0, Number(payment.amount) - Number(payment.reversedAmount || 0));
+                    const paidAfter = Math.max(0, Number(purchase.paid) - allocated);
+                    return { purchase, allocated, paidAfter, outstandingAfter: Math.max(0, Number(purchase.total) - paidAfter - Number(purchase.creditApplied || 0)) };
+                  }).filter(({ purchase }) => purchase.status === 'POSTED' && purchase.id !== cancelTarget.id);
+                  return <div key={group.key} className="space-y-2 rounded-xl border border-[#eee8df] p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-sm"><span className="font-semibold text-[#272727]">{groupPayment?.method || 'Payment'} · {formatCurrency(groupAmount)}</span><span className="text-xs text-[#77736d]">{groupPayment?.receiptNumber ? `Receipt ${groupPayment.receiptNumber} · ` : ''}{String(groupPayment?.date || '').slice(0, 10)}</span></div>
+                    <div className="space-y-1 text-xs text-[#68645e]">{group.allocations.map(({ purchase, payment }) => <div key={payment.id} className="flex justify-between gap-3"><span>{purchase.supplierInvoiceNumber || purchase.purchaseNumber}</span><span>{formatCurrency(Math.max(0, Number(payment.amount) - Number(payment.reversedAmount || 0)))}</span></div>)}</div>
+                    {group.wasPreviouslyDecided !== undefined && <p className="text-xs font-medium text-[#765000]">Previously confirmed: {group.wasPreviouslyDecided ? 'Actually transferred' : 'Not transferred'}.</p>}
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <button type="button" aria-pressed={selected === false} disabled={group.wasPreviouslyDecided !== undefined} onClick={() => { setPaymentGroupDecisions((previous) => ({ ...previous, [group.key]: false })); setRefundHandlingEnabled(false); }} className={`rounded-lg border px-3 py-2 text-left text-sm font-medium disabled:cursor-not-allowed disabled:opacity-70 ${selected === false ? 'border-[#c58a00] bg-[#fff8e7] text-[#765000]' : 'border-[#e8e4dd] bg-white text-[#555]'}`}>No — entered by mistake</button>
+                      <button type="button" aria-pressed={selected === true} disabled={group.wasPreviouslyDecided !== undefined} onClick={() => setPaymentGroupDecisions((previous) => ({ ...previous, [group.key]: true }))} className={`rounded-lg border px-3 py-2 text-left text-sm font-medium disabled:cursor-not-allowed disabled:opacity-70 ${selected === true ? 'border-[#c58a00] bg-[#fff8e7] text-[#765000]' : 'border-[#e8e4dd] bg-white text-[#555]'}`}>Yes — money was transferred</button>
+                    </div>
+                    {selected === false && <div className="space-y-1 rounded-lg bg-[#f8f7f4] px-3 py-2 text-xs text-[#555]"><p className="font-semibold">No refund or supplier credit will be created.</p>{affectedPurchases.length > 0 && <><p>Other bills after reversing this payment:</p>{affectedPurchases.map(({ purchase, allocated, paidAfter, outstandingAfter }) => <p key={purchase.id}>{purchase.supplierInvoiceNumber || purchase.purchaseNumber}: paid {formatCurrency(paidAfter)} (was {formatCurrency(Number(purchase.paid))}), due {formatCurrency(outstandingAfter)} (was {formatCurrency(Number(purchase.outstanding))}). Allocation removed: {formatCurrency(allocated)}.</p>)}</>}</div>}
+                    {selected === true && <p className="rounded-lg bg-[#f8f7f4] px-3 py-2 text-xs text-[#555]">Other bill allocations stay as recorded. Any unrefunded amount allocated to this cancelled purchase will remain as supplier credit and may be applied to future bills.</p>}
+                  </div>;
+                })}
+                {cancellationPaymentGroups.some((group) => paymentGroupDecisions[group.key] === true) && <>
+                  <label className="flex cursor-pointer items-start gap-2 text-sm text-[#555]"><input type="checkbox" checked={refundHandlingEnabled} onChange={(event) => setRefundHandlingEnabled(event.target.checked)} className="mt-0.5 accent-[#c58a00]" />A refund was received or is still owed by the supplier</label>
+                  {refundHandlingEnabled && <div className="space-y-3 rounded-lg bg-[#f8f7f4] p-3">
+                    <div className="divide-y divide-[#efede8]">{cancelTarget.payments.filter((payment) => paymentGroupDecisions[payment.paymentGroupId ? `group:${payment.paymentGroupId}` : `payment:${payment.id}`] === true).map((payment) => {
+                      const input = cancelRefundInputs[payment.id] || { amount: '0', pendingAmount: '0', method: 'CASH' as const, reference: '' };
+                      return <div key={payment.id} className="grid gap-2 py-2 first:pt-0 sm:grid-cols-2">
+                        <div className="sm:col-span-2 text-xs font-medium text-[#555]">{payment.method} · {formatCurrency(Math.max(0, Number(payment.amount) - Number(payment.reversedAmount || 0)))}{payment.receiptNumber ? ` · Receipt ${payment.receiptNumber}` : ''}</div>
+                        <label className="flex flex-col gap-1 text-xs font-medium text-[#68645e]">Refund received now (₹)<NumericTextInput maxDecimals={2} value={input.amount} onValueChange={(amount) => setCancelRefundInputs((previous) => ({ ...previous, [payment.id]: { ...input, amount } }))} className="h-9 rounded-md border border-[#e8e4dd] bg-white px-2 text-sm text-[#272727] outline-none focus:border-[#c58a00]" /></label>
+                        <label className="flex flex-col gap-1 text-xs font-medium text-[#68645e]">Refund still owed (₹)<NumericTextInput maxDecimals={2} value={input.pendingAmount} onValueChange={(pendingAmount) => setCancelRefundInputs((previous) => ({ ...previous, [payment.id]: { ...input, pendingAmount } }))} className="h-9 rounded-md border border-[#e8e4dd] bg-white px-2 text-sm text-[#272727] outline-none focus:border-[#c58a00]" /></label>
+                        {Number(input.amount) > 0 && <><label className="flex flex-col gap-1 text-xs font-medium text-[#68645e]">Received by<select value={input.method} onChange={(event) => setCancelRefundInputs((previous) => ({ ...previous, [payment.id]: { ...input, method: event.target.value as typeof input.method } }))} className="h-9 rounded-md border border-[#e8e4dd] bg-white px-2 text-sm text-[#272727] outline-none focus:border-[#c58a00]"><option value="CASH">Cash</option><option value="UPI">UPI</option><option value="BANK">Bank</option><option value="OTHER">Other</option></select></label><label className="flex flex-col gap-1 text-xs font-medium text-[#68645e]">Reference (optional)<input maxLength={120} value={input.reference} onChange={(event) => setCancelRefundInputs((previous) => ({ ...previous, [payment.id]: { ...input, reference: event.target.value } }))} className="h-9 rounded-md border border-[#e8e4dd] bg-white px-2 text-sm text-[#272727] outline-none focus:border-[#c58a00]" /></label></>}
+                      </div>;
+                    })}</div>
+                    <label className="flex max-w-[220px] flex-col gap-1 text-xs font-medium text-[#68645e]">Refund date<input type="date" value={cancelRefundDate} onChange={(event) => setCancelRefundDate(event.target.value)} className="h-9 rounded-md border border-[#e8e4dd] bg-white px-2 text-sm text-[#272727] outline-none focus:border-[#c58a00]" /></label>
+                    <div className="flex flex-wrap justify-between gap-2 text-xs text-[#68645e]"><span>Refund received now: <strong>{formatCurrency(cancellationRefundNow)}</strong></span><span>Refund still owed: <strong>{formatCurrency(cancellationRefundPending)}</strong></span></div>
+                  </div>}
+                </>}
+                {cancellationRefundInvalid && <p role="alert" className="text-xs font-medium text-red-700">Refund amounts cannot exceed the recorded payment for each bill.</p>}
+              </section>}
+
+              <section className="border-t border-[#efede8] pt-3">
+                <h3 className="mb-2 text-sm font-semibold text-[#272727]">Cancellation reason <span className="text-red-600">*</span></h3>
+                <div className="mb-2 flex flex-wrap gap-2">
+                  {purchaseCancellationReasons.map((reason) => {
+                    const selected = cancelReason === reason;
+                    return <button key={reason} type="button" aria-pressed={selected} onClick={() => setCancelReason(reason)} className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition ${selected ? 'border-[#c58a00] bg-[#fff1c9] text-[#765000]' : 'border-[#e8e4dd] bg-white text-[#68645e] hover:border-[#c58a00] hover:bg-[#fffaf0]'}`}>{reason}</button>;
+                  })}
+                </div>
+                <textarea required maxLength={500} value={cancelReason} onChange={(event) => setCancelReason(event.target.value)} rows={2} className="w-full resize-y rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 py-2 text-sm text-[#272727] outline-none focus:border-[#c58a00] focus:bg-white" placeholder="Choose a reason or enter details" />
+              </section>
+            </div>
+            <div className="flex shrink-0 flex-col-reverse gap-2 border-t border-[#efede8] bg-[#fffdfa] px-5 py-3 sm:flex-row sm:justify-end">
+              <button type="button" onClick={() => setCancelTarget(null)} className="h-10 rounded-lg border border-[#e9e3d9] bg-white px-4 text-sm font-semibold text-[#555]">Keep purchase</button>
+              <button type="submit" disabled={!cancelReason.trim() || cancellationRefundInvalid || cancellationPaymentGroups.some((group) => paymentGroupDecisions[group.key] === undefined)} className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-red-700 px-4 text-sm font-semibold text-white hover:bg-red-800 disabled:cursor-not-allowed disabled:opacity-55">Confirm cancellation</button>
+            </div>
+          </form>
+        </div>
+      )}
+      {settleTarget && settleTarget.cancellation?.refund && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/45 p-4" onMouseDown={(event) => { if (event.target === event.currentTarget && !savingRefundSettlement) setSettleTarget(null); }}>
+          <form role="dialog" aria-modal="true" aria-labelledby="supplier-refund-title" onSubmit={submitSupplierRefundSettlement} onMouseDown={(event) => event.stopPropagation()} className="w-full max-w-lg overflow-hidden rounded-2xl border border-[#e9e3d9] bg-white shadow-2xl">
+            <div className="border-b border-[#efede8] px-5 py-4"><h2 id="supplier-refund-title" className="text-lg font-bold text-[#272727]">Record supplier refund</h2><p className="mt-1 text-sm text-[#77736d]">{settleTarget.supplierInvoiceNumber || settleTarget.purchaseNumber} · Pending {formatCurrency(Number(settleTarget.cancellation.refund.pending))}</p></div>
+            <div className="max-h-[65vh] space-y-3 overflow-y-auto p-5">
+              {(settleTarget.cancellation.refund.allocations || []).filter((allocation) => Number(allocation.pending) > 0).map((allocation) => {
+                const input = settlementInputs[allocation.originalPaymentId] || { amount: '', method: 'CASH' as const, reference: '' };
+                return <div key={allocation.originalPaymentId} className="grid grid-cols-2 gap-2 rounded-xl border border-[#eee8df] p-3">
+                  <div className="col-span-2 text-xs font-semibold text-[#555]">Original {allocation.method} payment · {formatCurrency(Number(allocation.paidAmount))} · Remaining {formatCurrency(Number(allocation.pending))}{allocation.receiptNumber ? ` · Receipt #${allocation.receiptNumber}` : ''}</div>
+                  <label className="flex flex-col gap-1 text-xs font-medium text-[#77736d]">Amount received (₹)<NumericTextInput maxDecimals={2} value={input.amount} onValueChange={(amount) => setSettlementInputs((previous) => ({ ...previous, [allocation.originalPaymentId]: { ...input, amount } }))} className="h-10 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-sm text-[#272727] outline-none focus:border-[#c58a00]" /></label>
+                  <label className="flex flex-col gap-1 text-xs font-medium text-[#77736d]">Received by<select value={input.method} onChange={(event) => setSettlementInputs((previous) => ({ ...previous, [allocation.originalPaymentId]: { ...input, method: event.target.value as typeof input.method } }))} className="h-10 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-sm text-[#272727] outline-none focus:border-[#c58a00]"><option value="CASH">Cash</option><option value="UPI">UPI</option><option value="BANK">Bank</option><option value="OTHER">Other</option></select></label>
+                  <label className="col-span-2 flex flex-col gap-1 text-xs font-medium text-[#77736d]">Reference (optional)<input maxLength={120} value={input.reference} onChange={(event) => setSettlementInputs((previous) => ({ ...previous, [allocation.originalPaymentId]: { ...input, reference: event.target.value } }))} className="h-10 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-sm text-[#272727] outline-none focus:border-[#c58a00]" /></label>
+                </div>;
+              })}
+              <label className="block max-w-[220px] text-xs font-medium text-[#77736d]">Date received<input type="date" value={settlementDate} onChange={(event) => setSettlementDate(event.target.value)} className="mt-1 h-10 w-full rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-sm text-[#272727] outline-none focus:border-[#c58a00]" /></label>
+              <p className="text-xs text-[#77736d]">Only the amount entered as received will be recorded as money in. Any remaining amount stays pending.</p>
+            </div>
+            <div className="flex justify-end gap-2 border-t border-[#efede8] bg-[#fffdfa] px-5 py-3"><button type="button" disabled={savingRefundSettlement} onClick={() => setSettleTarget(null)} className="h-10 rounded-lg border border-[#e9e3d9] bg-white px-4 text-sm font-semibold text-[#555]">Cancel</button><button type="submit" disabled={savingRefundSettlement} className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#ffe4a0] px-4 text-sm font-semibold text-[#493819] disabled:opacity-55">{savingRefundSettlement && <LoaderCircle size={15} className="animate-spin" />}{savingRefundSettlement ? 'Saving…' : 'Record refund'}</button></div>
+          </form>
         </div>
       )}
     </div>

@@ -12,6 +12,7 @@ export type NavScreen =
 export interface InventoryBatchOption {
   id: string;
   label?: string | null;
+  purchaseRate: number;
   sellingRate: number;
   remainingQuantity: number;
   receivedAt: string;
@@ -171,7 +172,18 @@ export interface PurchaseBill {
   totalAmount: number;
   remarks?: string;
   amountPaid?: number;
+  supplierCreditApplied?: number;
   outstandingBalance?: number;
+  cancellation?: {
+    reason: string;
+    cancelledAt: string;
+    refund?: {
+      amount: number;
+      settled: number;
+      pending: number;
+      status: 'NO_REFUND_REQUIRED' | 'REFUND_PENDING' | 'PARTIALLY_REFUNDED' | 'FULLY_REFUNDED';
+    };
+  };
 }
 
 export interface PartyLedgerEntry {
@@ -183,7 +195,7 @@ export interface PartyLedgerEntry {
   paymentDate: string;
   amountPaid: number;
   outstandingBalance: number;
-  transactionType: 'INVOICES' | 'PAYMENTS';
+  transactionType: 'INVOICES' | 'PAYMENTS' | 'CANCELLATIONS';
   paymentMode?: string;
   partyType: 'customer' | 'supplier';
 }

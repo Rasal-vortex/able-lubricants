@@ -3,7 +3,7 @@ import { motion } from "motion/react";
 import { useApp } from "../context/AppContext";
 import { PurchaseLineItem } from "../types";
 import { formatCurrency } from "../utils/currency";
-import { PaymentMethod } from "../services/api";
+import { getSupplierLedgerReport, PaymentMethod } from "../services/api";
 import { UnitEditorModal } from "../components/UnitEditorModal";
 import { isUnitQuantityInputValid, isUnitQuantityValid, quantityStep } from "../utils/unitQuantity";
 import { DEFAULT_PAGE_SIZE, getPageRecords, getPaginationRange, PaginationControls } from "../components/PaginationControls";
@@ -27,12 +27,17 @@ export const PurchaseBillEntryView: React.FC = () => {
     addProduct,
     addPurchaseBill,
     showToast,
+    authSession,
   } = useApp();
   const [partyName, setPartyName] = useState(suppliers[0]?.name || "");
   const [billNumber, setBillNumber] = useState(makeNumber);
   const [invoiceDate, setInvoiceDate] = useState(localIso);
   const [remarks, setRemarks] = useState("");
   const [amountPaid, setAmountPaid] = useState("");
+  const [supplierCreditInfo, setSupplierCreditInfo] = useState<{ supplierId: string; available: number; existingOutstanding: number } | null>(null);
+  const [supplierCreditLoading, setSupplierCreditLoading] = useState(false);
+  const [supplierCreditError, setSupplierCreditError] = useState("");
+  const [supplierCreditRefresh, setSupplierCreditRefresh] = useState(0);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("CASH");
   const [saving, setSaving] = useState(false);
   const purchaseRequestKey = useRef(crypto.randomUUID());
@@ -97,13 +102,47 @@ export const PurchaseBillEntryView: React.FC = () => {
   const [catalogModal, setCatalogModal] = useState<"brand" | null>(null);
   const [catalogName, setCatalogName] = useState("");
   const [catalogSaving, setCatalogSaving] = useState(false);
+  const selectedSupplier = suppliers.find((supplier) => supplier.name === partyName);
+  useEffect(() => {
+    if (!authSession || !selectedSupplier) {
+      setSupplierCreditInfo(null);
+      setSupplierCreditLoading(false);
+      setSupplierCreditError("");
+      return;
+    }
+    let active = true;
+    setSupplierCreditInfo(null);
+    setSupplierCreditLoading(true);
+    setSupplierCreditError("");
+    getSupplierLedgerReport(authSession.token, selectedSupplier.id)
+      .then((ledger) => {
+        if (active) setSupplierCreditInfo({
+          supplierId: selectedSupplier.id,
+          available: Number(ledger.totals?.supplierCredit) || 0,
+          existingOutstanding: (ledger.purchases || []).filter((purchase: { status?: string }) => purchase.status === "POSTED")
+            .reduce((sum: number, purchase: { outstanding?: string | number }) => sum + (Number(purchase.outstanding) || 0), 0),
+        });
+      })
+      .catch((error) => {
+        if (active) setSupplierCreditError(error instanceof Error ? error.message : "Could not check supplier credit.");
+      })
+      .finally(() => { if (active) setSupplierCreditLoading(false); });
+    return () => { active = false; };
+  }, [authSession, selectedSupplier?.id, supplierCreditRefresh]);
   const [unitEditorOpen, setUnitEditorOpen] = useState(false);
   const subtotal = items.reduce(
     (sum, item) => sum + item.quantity * item.purchaseRate,
     0,
   );
   const totalAmount = subtotal;
-  const paid = Math.min(totalAmount, Math.max(0, Number(amountPaid) || 0));
+  const supplierCreditReady = Boolean(selectedSupplier && supplierCreditInfo?.supplierId === selectedSupplier.id && !supplierCreditLoading && !supplierCreditError);
+  const supplierCreditAvailable = supplierCreditReady ? supplierCreditInfo?.available || 0 : 0;
+  const supplierCreditRemainingAfterOlderBills = Math.max(0, supplierCreditAvailable - (supplierCreditInfo?.existingOutstanding || 0));
+  const supplierCreditApplied = Math.min(totalAmount, supplierCreditRemainingAfterOlderBills);
+  const dueAfterSupplierCredit = Math.max(0, totalAmount - supplierCreditApplied);
+  const enteredAmountPaid = Number(amountPaid);
+  const paymentExceedsTotal = amountPaid !== "" && Number.isFinite(enteredAmountPaid) && enteredAmountPaid > dueAfterSupplierCredit;
+  const paid = Math.min(dueAfterSupplierCredit, Math.max(0, Number(amountPaid) || 0));
 
   const updateProduct = (id: string, productId: string) => {
     const product = products.find((p) => p.id === productId);
@@ -258,6 +297,10 @@ export const PurchaseBillEntryView: React.FC = () => {
       showToast("Add a supplier before recording a purchase.", "error");
       return;
     }
+    if (!supplierCreditReady) {
+      showToast(supplierCreditError || "Wait for the supplier credit check before saving.", "error");
+      return;
+    }
     const invalidQuantityDraft = items.some((item) => {
       const draft = quantityDrafts[item.id];
       const allowsDecimals = products.find((product) => product.id === item.productId)?.unitAllowsDecimals ?? false;
@@ -265,6 +308,10 @@ export const PurchaseBillEntryView: React.FC = () => {
     });
     if (invalidQuantityDraft) {
       showToast("Review purchase quantities; use whole numbers for package units and up to 3 decimals for measured units.", "error");
+      return;
+    }
+    if (paymentExceedsTotal) {
+      showToast(`Amount paid is greater than the remaining bill after supplier credit (${formatCurrency(dueAfterSupplierCredit)}). Reduce it before saving.`, "error");
       return;
     }
     const invalidPurchaseRateDraft = items.some((item) => {
@@ -275,7 +322,7 @@ export const PurchaseBillEntryView: React.FC = () => {
       const draft = sellingRateDrafts[item.id];
       return draft !== undefined && (!/^\d+(?:\.\d{1,2})?$/.test(draft) || !Number.isFinite(Number(draft)) || Number(draft) <= 0);
     });
-    if (invalidPurchaseRateDraft || invalidSellingRateDraft || (amountPaid !== "" && (!/^\d*(?:\.\d{1,2})?$/.test(amountPaid) || Number(amountPaid) > totalAmount))) {
+    if (invalidPurchaseRateDraft || invalidSellingRateDraft || (amountPaid !== "" && !/^\d*(?:\.\d{1,2})?$/.test(amountPaid))) {
       showToast("Enter valid amounts using digits and up to two decimal places.", "error");
       return;
     }
@@ -309,7 +356,7 @@ export const PurchaseBillEntryView: React.FC = () => {
           taxShipping: 0,
           totalAmount,
           amountPaid: paid,
-          outstandingBalance: totalAmount - paid,
+          outstandingBalance: Math.max(0, totalAmount - supplierCreditApplied - paid),
           remarks: remarks.trim(),
         },
         paymentMethod,
@@ -487,7 +534,8 @@ export const PurchaseBillEntryView: React.FC = () => {
               <h2 className="mb-4 flex items-center gap-2 text-lg font-bold text-[#272727]"><span className="flex h-9 w-9 items-center justify-center text-[#9c6a00]"><span className="material-symbols-outlined">payments</span></span>Payment</h2>
               <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                 <label className="flex flex-col gap-1.5 text-sm font-semibold text-[#77736d]">Amount paid now
-                  <input type="text" inputMode="decimal" value={amountPaid} placeholder="Leave blank if unpaid" onPaste={blockInvalidPricePaste} onChange={(event) => updateDecimalPrice(event.target.value, setAmountPaid)} className="h-11 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-[#272727] outline-none transition focus:border-[#c58a00] focus:bg-white focus:ring-2 focus:ring-[#f5e7c3]" />
+                  <input type="text" inputMode="decimal" value={amountPaid} placeholder="Leave blank if unpaid" aria-invalid={paymentExceedsTotal} aria-describedby={paymentExceedsTotal ? "purchase-payment-error" : undefined} onPaste={blockInvalidPricePaste} onChange={(event) => updateDecimalPrice(event.target.value, setAmountPaid)} className={`h-11 rounded-lg border bg-[#f8f7f4] px-3 text-[#272727] outline-none transition focus:bg-white focus:ring-2 ${paymentExceedsTotal ? "border-red-500 focus:border-red-500 focus:ring-red-100" : "border-[#e8e4dd] focus:border-[#c58a00] focus:ring-[#f5e7c3]"}`} />
+                  {paymentExceedsTotal && <span id="purchase-payment-error" role="alert" className="text-xs font-medium text-red-600">Amount paid ({formatCurrency(enteredAmountPaid)}) is greater than the amount due after supplier credit ({formatCurrency(dueAfterSupplierCredit)}).</span>}
                 </label>
                 <label className="flex flex-col gap-1.5 text-sm font-semibold text-[#77736d]">Payment method
                   <select value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value as PaymentMethod)} className="h-11 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-[#272727] outline-none transition focus:border-[#c58a00] focus:bg-white focus:ring-2 focus:ring-[#f5e7c3]"><option value="CASH">Cash</option><option value="UPI">UPI</option><option value="BANK_TRANSFER">Bank transfer</option><option value="CHEQUE">Cheque</option></select>
@@ -496,14 +544,18 @@ export const PurchaseBillEntryView: React.FC = () => {
                   <input value={remarks} onChange={(e) => setRemarks(e.target.value)} className="h-11 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-[#272727] outline-none transition focus:border-[#c58a00] focus:bg-white focus:ring-2 focus:ring-[#f5e7c3]" placeholder="Supplier note" />
                 </label>
               </div>
+              {supplierCreditLoading && <p className="text-xs text-[#77736d]">Checking supplier credit…</p>}
+              {supplierCreditError && <p role="alert" className="text-xs text-red-700">Could not check supplier credit. <button type="button" onClick={() => setSupplierCreditRefresh((value) => value + 1)} className="font-semibold underline">Try again</button></p>}
+              {supplierCreditAvailable > 0 && <p className="rounded-lg bg-[#f4f7f2] px-3 py-2 text-xs text-[#4c6b45]">Available supplier credit: <strong>{formatCurrency(supplierCreditAvailable)}</strong>. It is applied to older unpaid purchases first; this invoice is estimated to receive <strong>{formatCurrency(supplierCreditApplied)}</strong>.</p>}
             </section>
 
             <section className="flex flex-col rounded-2xl border border-[#f0dfb4] bg-[#fff9ec] p-4 shadow-[0_3px_12px_rgba(37,27,12,.06)] md:p-5">
               <h2 className="mb-4 flex h-9 items-center gap-2 text-lg font-bold text-[#272727]"><span className="flex w-9 items-center justify-center text-[#9c6a00]"><span className="material-symbols-outlined">receipt_long</span></span>Summary</h2>
               <div className="flex justify-between py-1 text-sm text-[#514a3d]"><span>Invoice total</span><strong className="text-[#272727]">{formatCurrency(totalAmount)}</strong></div>
+              {supplierCreditApplied > 0 && <div className="flex justify-between py-1 text-sm text-[#4c6b45]"><span>Supplier credit applied</span><strong>{formatCurrency(supplierCreditApplied)}</strong></div>}
               <div className="flex justify-between py-1 text-sm text-[#514a3d]"><span>Amount paid</span><strong className="text-[#272727]">{formatCurrency(paid)}</strong></div>
-              <div className="mt-2 flex justify-between border-t border-[#eadfc4] py-3 text-base font-bold"><span className="text-[#9c6a00]">Balance due</span><strong className="text-[#9c6a00]">{formatCurrency(Math.max(0, totalAmount - paid))}</strong></div>
-              <button type="submit" disabled={saving} className="mt-auto flex h-12 w-full items-center justify-center gap-2 rounded-lg bg-[#ffe078] px-5 font-bold text-[#332711] shadow-sm transition hover:bg-[#ffd64d] focus:outline-none focus:ring-2 focus:ring-[#e8c64e] disabled:cursor-not-allowed disabled:opacity-60"><span className="material-symbols-outlined">save</span>{saving ? "Saving purchase…" : "Save purchase"}</button>
+              <div className="mt-2 flex justify-between border-t border-[#eadfc4] py-3 text-base font-bold"><span className="text-[#9c6a00]">Balance due</span><strong className="text-[#9c6a00]">{formatCurrency(Math.max(0, dueAfterSupplierCredit - paid))}</strong></div>
+              <button type="submit" disabled={saving || paymentExceedsTotal || !supplierCreditReady} className="mt-auto flex h-12 w-full items-center justify-center gap-2 rounded-lg bg-[#ffe078] px-5 font-bold text-[#332711] shadow-sm transition hover:bg-[#ffd64d] focus:outline-none focus:ring-2 focus:ring-[#e8c64e] disabled:cursor-not-allowed disabled:opacity-60"><span className="material-symbols-outlined">save</span>{saving ? "Saving purchase…" : "Save purchase"}</button>
             </section>
           </div>
         </form>
@@ -520,6 +572,7 @@ export const PurchaseBillEntryView: React.FC = () => {
                     "Items",
                     "Total",
                     "Paid",
+                    "Credit applied",
                     "Balance",
                     "Status",
                   ].map((h) => (
@@ -554,17 +607,20 @@ export const PurchaseBillEntryView: React.FC = () => {
                       {formatCurrency(p.amountPaid || 0)}
                     </td>
                     <td className="px-4 py-3">
+                      {formatCurrency(p.supplierCreditApplied || 0)}
+                    </td>
+                    <td className="px-4 py-3">
                       {formatCurrency(p.outstandingBalance || 0)}
                     </td>
                     <td className="px-4 py-3">
-                      {p.status || "Recorded"}
+                      {p.status === 'CANCELLED' ? <div className="flex flex-col items-start gap-1"><span className="rounded-full bg-[#ecebe8] px-2.5 py-1 text-xs font-semibold text-[#625f59]">Cancelled</span>{p.cancellation?.refund?.status && <span className="text-xs text-[#77736d]">{p.cancellation.refund.status === 'NO_REFUND_REQUIRED' ? 'No refund required' : p.cancellation.refund.status === 'FULLY_REFUNDED' ? 'Fully refunded' : p.cancellation.refund.status === 'PARTIALLY_REFUNDED' ? `Partially refunded · ${formatCurrency(p.cancellation.refund.settled)}` : `Refund pending · ${formatCurrency(p.cancellation.refund.pending)}`}</span>}</div> : p.status || "Recorded"}
                     </td>
                   </tr>
                 ))}
                 {!filtered.length && (
                   <tr>
                     <td
-                      colSpan={8}
+                      colSpan={9}
                       className="px-4 py-12 text-center text-[#77736d]"
                     >
                       No purchases found.

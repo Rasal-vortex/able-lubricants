@@ -135,6 +135,7 @@ export const SalesBillEntryView: React.FC = () => {
 
   // Cart Items
   const [cartItems, setCartItems] = useState<CartItem[]>([]);
+  const [selectedSellingPriceByRow, setSelectedSellingPriceByRow] = useState<Record<string, string>>({});
   const [quantityDrafts, setQuantityDrafts] = useState<Record<string, string>>(
     {},
   );
@@ -252,6 +253,24 @@ export const SalesBillEntryView: React.FC = () => {
     setCartItems((previous) => [...previous, createBlankCartItem()]);
   };
 
+  type InventoryBatch = (typeof products)[number]["batches"][number];
+  const getBatchPriceGroups = (product: (typeof products)[number], rowId: string) => {
+    const groups = new Map<string, { key: string; sellingPrice: number; available: number; batches: Array<{ batch: InventoryBatch; available: number }> }>();
+    for (const batch of product.batches || []) {
+      const otherQuantity = cartItems
+        .filter((entry) => entry.id !== rowId && entry.inventoryBatchId === batch.id)
+        .reduce((sum, entry) => sum + entry.quantity, 0);
+      const available = Math.max(0, batch.remainingQuantity - otherQuantity);
+      if (available <= 0) continue;
+      const key = String(Number(batch.sellingRate));
+      const group = groups.get(key) || { key, sellingPrice: Number(batch.sellingRate), available: 0, batches: [] };
+      group.available += available;
+      group.batches.push({ batch, available });
+      groups.set(key, group);
+    }
+    return Array.from(groups.values()).sort((left, right) => left.sellingPrice - right.sellingPrice);
+  };
+
   const handleSelectCartProduct = (rowId: string, productId: string) => {
     const row = cartItems.find((item) => item.id === rowId);
     if (!productId) return;
@@ -269,8 +288,10 @@ export const SalesBillEntryView: React.FC = () => {
       showToast(message, "error");
       return;
     }
-    const availableBatches = (product.batches || []).filter((batch) => batch.remainingQuantity > 0);
+    const priceGroups = getBatchPriceGroups(product, rowId);
+    const availableBatches = priceGroups.flatMap((group) => group.batches.map(({ batch }) => batch));
     const selectedBatch = availableBatches.length === 1 ? availableBatches[0] : undefined;
+    const defaultPriceGroup = priceGroups.length === 1 ? priceGroups[0] : undefined;
     setLastCompletedReceipt(null);
     const selectedItem: CartItem = {
       id: row?.id || `cart-${Date.now()}-${Math.random()}`,
@@ -280,7 +301,7 @@ export const SalesBillEntryView: React.FC = () => {
       tax: 0,
       quantity: requestedQuantity,
       ...(selectedBatch ? { inventoryBatchId: selectedBatch.id } : {}),
-      price: selectedBatch?.sellingRate ?? 0,
+      price: selectedBatch?.sellingRate ?? defaultPriceGroup?.sellingPrice ?? 0,
     };
     setCartItems((previous) => {
       const nextItems = row
@@ -290,6 +311,7 @@ export const SalesBillEntryView: React.FC = () => {
         ? nextItems
         : [...nextItems, createBlankCartItem()];
     });
+    setSelectedSellingPriceByRow((previous) => ({ ...previous, [selectedItem.id]: defaultPriceGroup?.key || "" }));
     setQuantityDrafts((previous) => { const next = { ...previous }; delete next[rowId]; return next; });
     setPriceDrafts((previous) => { const next = { ...previous }; delete next[rowId]; return next; });
     setStockWarning("");
@@ -401,10 +423,27 @@ export const SalesBillEntryView: React.FC = () => {
     return Math.max(0, batch.remainingQuantity - otherQuantity);
   };
 
+  const handleSelectSellingPrice = (item: CartItem, priceKey: string) => {
+    const product = products.find((entry) => entry.id === item.productId);
+    const group = product ? getBatchPriceGroups(product, item.id).find((entry) => entry.key === priceKey) : undefined;
+    if (!group) return;
+    setSelectedSellingPriceByRow((previous) => ({ ...previous, [item.id]: group.key }));
+    setCartItems((previous) => previous.map((entry) => {
+      if (entry.id !== item.id) return entry;
+      const next = { ...entry, price: group.sellingPrice };
+      delete next.inventoryBatchId;
+      return next;
+    }));
+    setPriceDrafts((previous) => { const next = { ...previous }; delete next[item.id]; return next; });
+    setStockWarning("");
+  };
+
   const handleSelectCartBatch = (item: CartItem, batchId: string) => {
     const product = products.find((entry) => entry.id === item.productId);
     const batch = product?.batches.find((entry) => entry.id === batchId);
     if (!product || !batch) return;
+    const selectedPriceKey = selectedSellingPriceByRow[item.id];
+    if (selectedPriceKey && String(Number(batch.sellingRate)) !== selectedPriceKey) return;
     const available = getCartBatchAvailability(item, batch.id);
     if (item.quantity > available) {
       const message = `This batch has ${available} ${product.unitName || product.unit} available.`;
@@ -722,6 +761,7 @@ export const SalesBillEntryView: React.FC = () => {
         setBillNumber(`SB-${Date.now().toString().slice(-6)}`);
         setBillDate(new Date().toISOString().slice(0, 10));
         setCartItems([]);
+        setSelectedSellingPriceByRow({});
         setBillDiscount(0);
         setSplitAmounts({ cash: "", upi: "", coupon: "", credit: "", storeCredit: "" });
         setPriceDrafts({});
@@ -765,7 +805,7 @@ export const SalesBillEntryView: React.FC = () => {
               <h2 className="text-lg font-bold text-[#171717]">Invoice items</h2>
               <span className="rounded-full bg-[#fff7e7] px-3 py-1 font-mono text-xs font-semibold text-[#9a6700]">{cartItems.filter((item) => item.productId).length} items</span>
             </div>
-            <button type="button" disabled={cartItems.length === 0} className="inline-flex h-9 items-center gap-1 rounded-lg px-3 text-sm font-semibold text-[#a12626] transition hover:bg-red-50 disabled:opacity-40" onClick={() => { setCartItems([]); setLastCompletedReceipt(null); showToast("Cart cleared", "info"); }}>
+            <button type="button" disabled={cartItems.length === 0} className="inline-flex h-9 items-center gap-1 rounded-lg px-3 text-sm font-semibold text-[#a12626] transition hover:bg-red-50 disabled:opacity-40" onClick={() => { setCartItems([]); setSelectedSellingPriceByRow({}); setLastCompletedReceipt(null); showToast("Cart cleared", "info"); }}>
               <span className="material-symbols-outlined text-[17px]">delete_sweep</span>Clear cart
             </button>
           </div>
@@ -789,7 +829,10 @@ export const SalesBillEntryView: React.FC = () => {
                   const product = products.find(
                     (entry) => entry.id === item.productId,
                   );
-                  const availableBatches = (product?.batches || []).filter((batch) => batch.remainingQuantity > 0);
+                  const batchPriceGroups = product ? getBatchPriceGroups(product, item.id) : [];
+                  const availableBatches = batchPriceGroups.flatMap((group) => group.batches.map(({ batch }) => batch));
+                  const selectedPriceGroupKey = selectedSellingPriceByRow[item.id] ?? (batchPriceGroups.length === 1 ? batchPriceGroups[0].key : "");
+                  const selectedPriceGroup = batchPriceGroups.find((group) => group.key === selectedPriceGroupKey);
                   const selectedBatch = availableBatches.find((batch) => batch.id === item.inventoryBatchId);
                   const otherProductQuantity = cartItems
                     .filter((entry) => entry.id !== item.id && entry.productId === item.productId)
@@ -818,22 +861,43 @@ export const SalesBillEntryView: React.FC = () => {
                         <div className="space-y-1.5">
                           {renderProductSelector(item.id, item.productId)}
                           {product && availableBatches.length > 1 && (
-                            <select
-                              aria-label={`Stock batch for ${item.name}`}
-                              value={item.inventoryBatchId || ""}
-                              onChange={(event) => handleSelectCartBatch(item, event.target.value)}
-                              className="h-8 w-full rounded-md border border-[#dedbd6] bg-white px-2 text-xs text-[#37342f] outline-none focus:border-[#c58a00]"
-                            >
-                              <option value="" disabled>Select stock batch</option>
-                              {availableBatches.map((batch) => {
-                                const available = getCartBatchAvailability(item, batch.id);
-                                const source = batch.source === "OPENING" ? "Opening stock" : batch.source === "ADJUSTMENT" ? "Stock adjustment" : "Purchase";
-                                const receivedDate = new Date(batch.receivedAt).toLocaleDateString("en-IN");
-                                return <option key={batch.id} value={batch.id}>
-                                  {(batch.label || source)} · {receivedDate} · {formatCurrency(batch.sellingRate)} · {available} available
-                                </option>;
-                              })}
-                            </select>
+                            <div className="space-y-1.5">
+                              {batchPriceGroups.length > 1 ? (
+                                <select
+                                  aria-label={`Selling price group for ${item.name}`}
+                                  value={selectedPriceGroupKey}
+                                  onChange={(event) => handleSelectSellingPrice(item, event.target.value)}
+                                  className="h-8 w-full rounded-md border border-[#dedbd6] bg-white px-2 text-xs text-[#37342f] outline-none focus:border-[#c58a00]"
+                                >
+                                  <option value="">Select selling price</option>
+                                  {batchPriceGroups.map((group) => <option key={group.key} value={group.key}>
+                                    {formatCurrency(group.sellingPrice)} selling price · {group.available} available · {group.batches.length} purchase {group.batches.length === 1 ? "batch" : "batches"}
+                                  </option>)}
+                                </select>
+                              ) : selectedPriceGroup ? (
+                                <div className="rounded-md bg-[#fff8e7] px-2 py-1 text-xs text-[#765000]">
+                                  {formatCurrency(selectedPriceGroup.sellingPrice)} selling price · {selectedPriceGroup.available} available · {selectedPriceGroup.batches.length} purchase {selectedPriceGroup.batches.length === 1 ? "batch" : "batches"}
+                                </div>
+                              ) : null}
+                              {selectedPriceGroup && (
+                                <select
+                                  aria-label={`Purchase batch for ${item.name}`}
+                                  value={item.inventoryBatchId || ""}
+                                  onChange={(event) => handleSelectCartBatch(item, event.target.value)}
+                                  className="h-8 w-full rounded-md border border-[#dedbd6] bg-white px-2 text-xs text-[#37342f] outline-none focus:border-[#c58a00]"
+                                >
+                                  <option value="">Select purchase batch</option>
+                                  {selectedPriceGroup.batches.map(({ batch, available }) => {
+                                    const batchIndex = product.batches.findIndex((entry) => entry.id === batch.id) + 1;
+                                    const source = batch.source === "OPENING" ? "Opening stock" : batch.source === "ADJUSTMENT" ? "Stock adjustment" : "Purchase";
+                                    const receivedDate = new Date(batch.receivedAt).toLocaleDateString("en-IN");
+                                    return <option key={batch.id} value={batch.id}>
+                                      {batch.label || `Batch ${batchIndex}`} · {source} · {receivedDate} · Purchase cost {formatCurrency(batch.purchaseRate)} · {available} available
+                                    </option>;
+                                  })}
+                                </select>
+                              )}
+                            </div>
                           )}
                           {product && availableBatches.length === 0 && (
                             <span className="block text-xs text-[#a12626]">No available stock batches</span>
@@ -1046,9 +1110,10 @@ export const SalesBillEntryView: React.FC = () => {
                           type="button"
                           className="text-outline hover:text-error transition-colors p-1 rounded"
                           onClick={() =>
-                            setCartItems((prev) =>
-                              prev.filter((it) => it.id !== item.id),
-                            )
+                            {
+                              setCartItems((prev) => prev.filter((it) => it.id !== item.id));
+                              setSelectedSellingPriceByRow((previous) => { const next = { ...previous }; delete next[item.id]; return next; });
+                            }
                           }
                         >
                           <span className="material-symbols-outlined text-[18px]">
