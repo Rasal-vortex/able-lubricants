@@ -268,7 +268,15 @@ export const SalesBillEntryView: React.FC = () => {
       group.batches.push({ batch, available });
       groups.set(key, group);
     }
-    return Array.from(groups.values()).sort((left, right) => left.sellingPrice - right.sellingPrice);
+    return Array.from(groups.values())
+      .map((group) => ({
+        ...group,
+        batches: group.batches.sort((left, right) =>
+          new Date(left.batch.receivedAt).getTime() - new Date(right.batch.receivedAt).getTime()
+          || left.batch.id.localeCompare(right.batch.id),
+        ),
+      }))
+      .sort((left, right) => left.sellingPrice - right.sellingPrice);
   };
 
   const handleSelectCartProduct = (rowId: string, productId: string) => {
@@ -289,8 +297,6 @@ export const SalesBillEntryView: React.FC = () => {
       return;
     }
     const priceGroups = getBatchPriceGroups(product, rowId);
-    const availableBatches = priceGroups.flatMap((group) => group.batches.map(({ batch }) => batch));
-    const selectedBatch = availableBatches.length === 1 ? availableBatches[0] : undefined;
     const defaultPriceGroup = priceGroups.length === 1 ? priceGroups[0] : undefined;
     setLastCompletedReceipt(null);
     const selectedItem: CartItem = {
@@ -300,8 +306,7 @@ export const SalesBillEntryView: React.FC = () => {
       sku: product.sku,
       tax: 0,
       quantity: requestedQuantity,
-      ...(selectedBatch ? { inventoryBatchId: selectedBatch.id } : {}),
-      price: selectedBatch?.sellingRate ?? defaultPriceGroup?.sellingPrice ?? 0,
+      price: defaultPriceGroup?.sellingPrice ?? 0,
     };
     setCartItems((previous) => {
       const nextItems = row
@@ -333,6 +338,14 @@ export const SalesBillEntryView: React.FC = () => {
       width: Math.min(rect.width, window.innerWidth - 16),
       maxHeight,
     });
+  };
+
+  const openProductSelector = (rowId: string, input: HTMLInputElement) => {
+    activeProductInputRef.current = input;
+    setActiveProductRowId(rowId);
+    setProductSearchQuery("");
+    setActiveProductOptionIndex(-1);
+    updateProductDropdownPosition(input);
   };
 
   useEffect(() => {
@@ -376,7 +389,12 @@ export const SalesBillEntryView: React.FC = () => {
           autoComplete="off"
           value={isOpen ? productSearchQuery : selectedProduct?.name || ""}
           placeholder="Select or search product"
-          onFocus={(event) => { activeProductInputRef.current = event.currentTarget; setActiveProductRowId(rowId); setProductSearchQuery(""); setActiveProductOptionIndex(-1); updateProductDropdownPosition(event.currentTarget); }}
+          onFocus={(event) => openProductSelector(rowId, event.currentTarget)}
+          onClick={(event) => {
+            if (event.currentTarget.getAttribute("aria-expanded") !== "true") {
+              openProductSelector(rowId, event.currentTarget);
+            }
+          }}
           onChange={(event) => { setActiveProductRowId(rowId); setProductSearchQuery(event.target.value); setActiveProductOptionIndex(-1); }}
           onKeyDown={(event) => {
             if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -413,14 +431,26 @@ export const SalesBillEntryView: React.FC = () => {
     );
   };
 
-  const getCartBatchAvailability = (item: CartItem, batchId = item.inventoryBatchId) => {
+  const getCartBatchAvailability = (item: CartItem) => {
     const product = products.find((entry) => entry.id === item.productId);
-    const batch = product?.batches.find((entry) => entry.id === batchId);
-    if (!batch) return 0;
-    const otherQuantity = cartItems
-      .filter((entry) => entry.id !== item.id && entry.inventoryBatchId === batch.id)
-      .reduce((sum, entry) => sum + entry.quantity, 0);
-    return Math.max(0, batch.remainingQuantity - otherQuantity);
+    if (product) {
+      const groups = getBatchPriceGroups(product, item.id);
+      const selectedKey = selectedSellingPriceByRow[item.id] || (groups.length === 1 ? groups[0].key : "");
+      const group = groups.find((entry) => entry.key === selectedKey);
+      if (!group) return 0;
+      const otherQuantity = cartItems
+        .filter((entry) => entry.id !== item.id && entry.productId === product.id)
+        .filter((entry) => {
+          const otherKey = selectedSellingPriceByRow[entry.id]
+            || (entry.inventoryBatchId
+              ? String(Number(product.batches.find((batch) => batch.id === entry.inventoryBatchId)?.sellingRate))
+              : groups.length === 1 ? groups[0].key : "");
+          return otherKey === group.key;
+        })
+        .reduce((sum, entry) => sum + entry.quantity, 0);
+      return Math.max(0, group.available - otherQuantity);
+    }
+    return 0;
   };
 
   const handleSelectSellingPrice = (item: CartItem, priceKey: string) => {
@@ -434,26 +464,6 @@ export const SalesBillEntryView: React.FC = () => {
       delete next.inventoryBatchId;
       return next;
     }));
-    setPriceDrafts((previous) => { const next = { ...previous }; delete next[item.id]; return next; });
-    setStockWarning("");
-  };
-
-  const handleSelectCartBatch = (item: CartItem, batchId: string) => {
-    const product = products.find((entry) => entry.id === item.productId);
-    const batch = product?.batches.find((entry) => entry.id === batchId);
-    if (!product || !batch) return;
-    const selectedPriceKey = selectedSellingPriceByRow[item.id];
-    if (selectedPriceKey && String(Number(batch.sellingRate)) !== selectedPriceKey) return;
-    const available = getCartBatchAvailability(item, batch.id);
-    if (item.quantity > available) {
-      const message = `This batch has ${available} ${product.unitName || product.unit} available.`;
-      setStockWarning(message);
-      showToast(message, "error");
-      return;
-    }
-    setCartItems((previous) => previous.map((entry) => entry.id === item.id
-      ? { ...entry, inventoryBatchId: batch.id, price: batch.sellingRate }
-      : entry));
     setPriceDrafts((previous) => { const next = { ...previous }; delete next[item.id]; return next; });
     setStockWarning("");
   };
@@ -517,22 +527,49 @@ export const SalesBillEntryView: React.FC = () => {
       showToast("Cannot complete sale with an empty cart.", "error");
       return;
     }
-    if (selectedCartItems.some((item) => !item.inventoryBatchId)) {
-      showToast("Select a stock batch for each product line before completing the sale.", "error");
+    const unresolvedPriceItem = selectedCartItems.find((item) => {
+      const product = products.find((entry) => entry.id === item.productId);
+      const groups = product ? getBatchPriceGroups(product, item.id) : [];
+      const selectedKey = selectedSellingPriceByRow[item.id] || (groups.length === 1 ? groups[0].key : "");
+      return !groups.some((group) => group.key === selectedKey);
+    });
+    if (unresolvedPriceItem) {
+      showToast("Select a selling price for each product line before completing the sale.", "error");
       return;
     }
     const batchQuantities = new Map<string, number>();
+    const allocationsByRow = new Map<string, Array<{ batchId: string; quantity: number }>>();
     for (const item of selectedCartItems) {
-      const batchId = item.inventoryBatchId!;
-      batchQuantities.set(batchId, (batchQuantities.get(batchId) || 0) + item.quantity);
+      const product = products.find((entry) => entry.id === item.productId)!;
+      const groups = getBatchPriceGroups(product, item.id);
+      const selectedKey = selectedSellingPriceByRow[item.id] || (groups.length === 1 ? groups[0].key : "");
+      const group = groups.find((entry) => entry.key === selectedKey)!;
+      let remaining = item.quantity;
+      const allocations: Array<{ batchId: string; quantity: number }> = [];
+      for (const { batch, available } of group.batches) {
+        const remainingBatchQuantity = Math.max(0, batch.remainingQuantity - (batchQuantities.get(batch.id) || 0));
+        const allocation = Math.min(remaining, available, remainingBatchQuantity);
+        if (allocation > 0) {
+          batchQuantities.set(batch.id, (batchQuantities.get(batch.id) || 0) + allocation);
+          allocations.push({ batchId: batch.id, quantity: allocation });
+        }
+        remaining = Math.round((remaining - allocation) * 1000) / 1000;
+        if (remaining <= 0) break;
+      }
+      if (remaining > 0) {
+        showToast(`Only ${group.available} ${product.unit || "units"} of ${item.name} are available at ${formatCurrency(group.sellingPrice)}.`, "error");
+        return;
+      }
+      allocationsByRow.set(item.id, allocations);
     }
-    const overdrawnBatch = selectedCartItems.find((item) => {
-      const product = products.find((entry) => entry.id === item.productId);
-      const batch = product?.batches.find((entry) => entry.id === item.inventoryBatchId);
-      return !batch || (batchQuantities.get(batch.id) || 0) > batch.remainingQuantity;
-    });
-    if (overdrawnBatch) {
-      showToast(`The selected batch no longer has enough stock for ${overdrawnBatch.name}.`, "error");
+    const overdrawnBatchId = Array.from(batchQuantities.entries()).find(([batchId, quantity]) => {
+      const batch = products.flatMap((product) => product.batches).find((entry) => entry.id === batchId);
+      return !batch || quantity > batch.remainingQuantity;
+    })?.[0];
+    if (overdrawnBatchId) {
+      const batch = products.flatMap((product) => product.batches).find((entry) => entry.id === overdrawnBatchId);
+      const item = selectedCartItems.find((entry) => products.find((product) => product.id === entry.productId)?.batches.some((candidate) => candidate.id === overdrawnBatchId));
+      showToast(`Available stock changed while billing ${item?.name || batch?.label || "this product"}. Please review the quantity.`, "error");
       return;
     }
     const invalidPriceDraft = selectedCartItems.some((item) => {
@@ -716,20 +753,20 @@ export const SalesBillEntryView: React.FC = () => {
           (paymentMode === "Split" && Number(splitAmounts.credit || 0) > 0)
             ? creditDueDate
             : undefined,
-        lineItems: selectedCartItems.map((item) => {
+        lineItems: selectedCartItems.flatMap((item) => {
           const product = products.find(
             (entry) => entry.id === item.productId,
           )!;
-          return {
+          const line = (inventoryBatchId: string, quantity: number) => ({
             productId: product.id,
-            inventoryBatchId: item.inventoryBatchId!,
+            inventoryBatchId,
             name: product.name,
             sku: product.sku,
             unit: product.unit,
-            quantity: item.quantity,
+            quantity,
             ...(isKilogramProduct(product)
               ? {
-                  displayQuantity: Math.round(item.quantity * 1000),
+                  displayQuantity: Math.round(quantity * 1000),
                   displayUnitName: "Gram",
                   displayUnitSymbol: "g",
                 }
@@ -737,7 +774,8 @@ export const SalesBillEntryView: React.FC = () => {
             sellingPrice: item.price,
             purchaseRate: product.purchaseRate,
             tax: 0,
-          };
+          });
+          return (allocationsByRow.get(item.id) || []).map(({ batchId, quantity }) => line(batchId, quantity));
         }),
       });
 
@@ -830,16 +868,9 @@ export const SalesBillEntryView: React.FC = () => {
                     (entry) => entry.id === item.productId,
                   );
                   const batchPriceGroups = product ? getBatchPriceGroups(product, item.id) : [];
-                  const availableBatches = batchPriceGroups.flatMap((group) => group.batches.map(({ batch }) => batch));
                   const selectedPriceGroupKey = selectedSellingPriceByRow[item.id] ?? (batchPriceGroups.length === 1 ? batchPriceGroups[0].key : "");
                   const selectedPriceGroup = batchPriceGroups.find((group) => group.key === selectedPriceGroupKey);
-                  const selectedBatch = availableBatches.find((batch) => batch.id === item.inventoryBatchId);
-                  const otherProductQuantity = cartItems
-                    .filter((entry) => entry.id !== item.id && entry.productId === item.productId)
-                    .reduce((sum, entry) => sum + entry.quantity, 0);
-                  const maximumCartQuantity = selectedBatch
-                    ? getCartBatchAvailability(item, selectedBatch.id)
-                    : Math.max(0, Math.min(product?.quantity ?? 0, availableBatches.reduce((sum, batch) => sum + batch.remainingQuantity, 0)) - otherProductQuantity);
+                  const maximumCartQuantity = getCartBatchAvailability(item);
                   const allowsDecimals = product?.unitAllowsDecimals ?? false;
                   const gramEntry = isKilogramProduct(product);
                   const quantityScale = gramEntry ? 1000 : 1;
@@ -860,7 +891,7 @@ export const SalesBillEntryView: React.FC = () => {
                       <td className="py-2 px-space-md">
                         <div className="space-y-1.5">
                           {renderProductSelector(item.id, item.productId)}
-                          {product && availableBatches.length > 1 && (
+                          {product && batchPriceGroups.length > 0 && (
                             <div className="space-y-1.5">
                               {batchPriceGroups.length > 1 ? (
                                 <select
@@ -871,35 +902,17 @@ export const SalesBillEntryView: React.FC = () => {
                                 >
                                   <option value="">Select selling price</option>
                                   {batchPriceGroups.map((group) => <option key={group.key} value={group.key}>
-                                    {formatCurrency(group.sellingPrice)} selling price · {group.available} available · {group.batches.length} purchase {group.batches.length === 1 ? "batch" : "batches"}
+                                    {formatCurrency(group.sellingPrice)} selling price · {group.available} available
                                   </option>)}
                                 </select>
                               ) : selectedPriceGroup ? (
                                 <div className="rounded-md bg-[#fff8e7] px-2 py-1 text-xs text-[#765000]">
-                                  {formatCurrency(selectedPriceGroup.sellingPrice)} selling price · {selectedPriceGroup.available} available · {selectedPriceGroup.batches.length} purchase {selectedPriceGroup.batches.length === 1 ? "batch" : "batches"}
+                                  {formatCurrency(selectedPriceGroup.sellingPrice)} selling price · {selectedPriceGroup.available} available
                                 </div>
                               ) : null}
-                              {selectedPriceGroup && (
-                                <select
-                                  aria-label={`Purchase batch for ${item.name}`}
-                                  value={item.inventoryBatchId || ""}
-                                  onChange={(event) => handleSelectCartBatch(item, event.target.value)}
-                                  className="h-8 w-full rounded-md border border-[#dedbd6] bg-white px-2 text-xs text-[#37342f] outline-none focus:border-[#c58a00]"
-                                >
-                                  <option value="">Select purchase batch</option>
-                                  {selectedPriceGroup.batches.map(({ batch, available }) => {
-                                    const batchIndex = product.batches.findIndex((entry) => entry.id === batch.id) + 1;
-                                    const source = batch.source === "OPENING" ? "Opening stock" : batch.source === "ADJUSTMENT" ? "Stock adjustment" : "Purchase";
-                                    const receivedDate = new Date(batch.receivedAt).toLocaleDateString("en-IN");
-                                    return <option key={batch.id} value={batch.id}>
-                                      {batch.label || `Batch ${batchIndex}`} · {source} · {receivedDate} · Purchase cost {formatCurrency(batch.purchaseRate)} · {available} available
-                                    </option>;
-                                  })}
-                                </select>
-                              )}
                             </div>
                           )}
-                          {product && availableBatches.length === 0 && (
+                          {product && batchPriceGroups.length === 0 && (
                             <span className="block text-xs text-[#a12626]">No available stock batches</span>
                           )}
                         </div>
