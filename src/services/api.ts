@@ -237,11 +237,17 @@ export interface ApiProduct {
 }
 
 export interface CreateSalePayload {
+  idempotencyKey: string;
   customerId?: string;
   creditBill?: { billNumber: string; dueDate: string; term: string; priorBalance: number };
   discountAmount?: number;
   couponCode?: string;
   couponPrice?: number;
+  paymentAllocations: Array<{
+    method: 'CASH' | 'UPI' | 'COUPON' | 'STORE_CREDIT' | 'CREDIT';
+    amount: number;
+    notes?: string;
+  }>;
   items: Array<{
     productId: string;
     inventoryBatchId: string;
@@ -486,6 +492,7 @@ export type CustomerTenderMethod = 'CASH' | 'UPI' | 'COUPON' | 'STORE_CREDIT';
 export interface CustomerPaymentPayload {
   customerId?: string;
   saleId: string;
+  idempotencyKey?: string;
   amount: number;
   method: CustomerTenderMethod;
   notes?: string;

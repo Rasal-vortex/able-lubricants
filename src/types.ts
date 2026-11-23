@@ -90,7 +90,8 @@ export interface SaleRecord {
   itemsCount: number;
   itemsList: string;
   paymentMode: 'Cash' | 'Credit' | 'UPI' | 'Coupon' | 'Split';
-  paymentTenders?: Array<{ method: 'CASH' | 'UPI' | 'COUPON' | 'STORE_CREDIT'; amount: number; notes?: string }>;
+  paymentTenders?: Array<{ method: 'CASH' | 'UPI' | 'COUPON' | 'STORE_CREDIT' | 'CREDIT'; amount: number; notes?: string }>;
+  idempotencyKey?: string;
   upiRef?: string;
   amount: number;
   netSalesAmount?: number;

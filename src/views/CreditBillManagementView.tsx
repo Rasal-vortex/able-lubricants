@@ -84,8 +84,9 @@ export const CreditBillManagementView: React.FC = () => {
   const expectedBalance = priorDue + currentAmt;
   const cancellationPaymentMethods = ['CASH', 'UPI', 'BANK', 'OTHER'] as const;
   const actualReceivedAmount = cancellationPaymentMethods.reduce((total, method) => total + (Number(actualPaymentAmounts[method]) || 0), 0);
-  const recordedCollectedAmount = (cancelModalBill?.payments || []).reduce((total, payment) => payment.method === 'COUPON' ? total : total + Number(payment.amount || 0), 0);
-  const hasRecordedPayments = Boolean(cancelModalBill?.payments?.length);
+  const recordedCollectedAmount = (cancelModalBill?.payments || []).reduce((total, payment) => payment.method === 'CASH' || payment.method === 'UPI' ? total + Number(payment.amount || 0) : total, 0);
+  const recordedStoreCreditAmount = (cancelModalBill?.payments || []).reduce((total, payment) => payment.method === 'STORE_CREDIT' ? total + Number(payment.amount || 0) : total, 0);
+  const hasRecordedPayments = recordedCollectedAmount > 0;
 
   // Filter customer credit bills.
   const filteredBills = creditBills.filter((bill) => {
@@ -222,7 +223,7 @@ export const CreditBillManagementView: React.FC = () => {
   const openCancelSale = (bill: CreditBill) => {
     setCancelModalBill(bill);
     setCancellationReason('');
-    setActualReceivedConfirmed(!bill.payments?.length);
+    setActualReceivedConfirmed(!(bill.payments || []).some((payment) => payment.method === 'CASH' || payment.method === 'UPI'));
     setPaymentSectionOpen(false);
     // Recorded receipts are evidence to review, not proof that the customer paid.
     // Start at zero and require staff to confirm or correct the actual received amount.
@@ -989,7 +990,8 @@ export const CreditBillManagementView: React.FC = () => {
                 <div className="col-span-2 rounded-lg bg-surface-container-low px-3 py-2 sm:col-span-2"><div className="text-[11px] font-medium uppercase tracking-wide text-on-surface-variant">Invoice · Customer</div><strong className="block truncate text-sm text-on-surface">{cancelModalBill.invoiceReference || cancelModalBill.billNumber} · {cancelModalBill.partyName}</strong></div>
                 <div className="rounded-lg bg-surface-container-low px-3 py-2"><div className="text-[11px] font-medium uppercase tracking-wide text-on-surface-variant">Bill amount</div><strong className="text-sm text-on-surface">{formatCurrency(cancelModalBill.billAmount)}</strong></div>
                 <div className="rounded-lg bg-surface-container-low px-3 py-2"><div className="text-[11px] font-medium uppercase tracking-wide text-on-surface-variant">Credit to reverse</div><strong className="text-sm text-on-surface">{formatCurrency(cancelModalBill.netDue)}</strong></div>
-                <div className="col-span-2 flex items-center justify-between rounded-lg border border-outline-variant/20 px-3 py-2 text-sm sm:col-span-4"><span className="text-on-surface-variant">{hasRecordedPayments ? 'Refund required' : 'No payment recorded · Refund required'}</span><strong className="text-on-surface">{formatCurrency(actualReceivedAmount)}</strong></div>
+                <div className="col-span-2 flex items-center justify-between rounded-lg border border-outline-variant/20 px-3 py-2 text-sm sm:col-span-4"><span className="text-on-surface-variant">{hasRecordedPayments ? 'Refund required' : 'No cash or UPI recorded · Refund required'}</span><strong className="text-on-surface">{formatCurrency(actualReceivedAmount)}</strong></div>
+                {!hasRecordedPayments && recordedStoreCreditAmount > 0 && <div className="col-span-2 rounded-lg bg-primary/5 px-3 py-2 text-sm text-on-surface-variant sm:col-span-4">Store Credit used · {formatCurrency(recordedStoreCreditAmount)} will be restored when this sale is cancelled.</div>}
               </div>
               {hasRecordedPayments && (
                 <section className="overflow-hidden rounded-lg border border-outline-variant/25">

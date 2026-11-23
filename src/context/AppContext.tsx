@@ -879,15 +879,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       showToast('Select a valid registered customer before completing this sale.', 'error');
       return false;
     }
-    const initialTenderAmount = saleData.paymentMode === 'Split'
-      ? (saleData.paymentTenders || []).reduce((total, tender) => total + tender.amount, 0)
-      : saleData.paymentMode === 'Credit' ? 0 : saleData.amount;
-    const creditAmount = Math.max(0, saleData.amount - initialTenderAmount);
+    const tenderAllocations = saleData.paymentTenders !== undefined
+      ? saleData.paymentTenders
+      : saleData.paymentMode === 'Credit'
+        ? [{ method: 'CREDIT' as const, amount: saleData.amount }]
+        : saleData.paymentMode === 'Cash' || saleData.paymentMode === 'UPI' || saleData.paymentMode === 'Coupon'
+          ? [{ method: saleData.paymentMode.toUpperCase() as 'CASH' | 'UPI' | 'COUPON', amount: saleData.amount }]
+          : [];
+    const paymentOnlyTenders = tenderAllocations.filter((tender) => tender.method !== 'CREDIT');
+    const initialTenderAmount = paymentOnlyTenders.reduce((total, tender) => total + tender.amount, 0);
+    const declaredCreditAmount = tenderAllocations
+      .filter((tender) => tender.method === 'CREDIT')
+      .reduce((total, tender) => total + tender.amount, 0);
+    const creditAmount = tenderAllocations.some((tender) => tender.method === 'CREDIT')
+      ? declaredCreditAmount
+      : Math.max(0, saleData.amount - initialTenderAmount);
     if (creditAmount > 0 && !customer) {
       showToast('Select a registered customer for credit balances.', 'error');
       return false;
     }
     const payload: CreateSalePayload = {
+      idempotencyKey: saleData.idempotencyKey || crypto.randomUUID(),
       ...(customer ? { customerId: customer.id } : {}),
       ...(customer && creditAmount > 0 ? {
         creditBill: {
@@ -898,6 +910,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         },
       } : {}),
       discountAmount: saleData.billDiscountAmount || 0,
+      paymentAllocations: tenderAllocations.map((tender) => ({
+        method: tender.method,
+        amount: tender.amount,
+        ...(tender.notes ? { notes: tender.notes } : {}),
+      })),
       ...(saleData.couponCode && saleData.couponPrice !== undefined
         ? {
             couponCode: normalizeCouponCode(saleData.couponCode),
@@ -933,41 +950,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return false;
     }
 
-    const tenderPayments = saleData.paymentTenders?.length
-      ? saleData.paymentTenders
-      : saleData.paymentMode === 'Cash' || saleData.paymentMode === 'UPI' || saleData.paymentMode === 'Coupon'
-        ? [{ method: saleData.paymentMode.toUpperCase() as 'CASH' | 'UPI' | 'COUPON', amount: saleData.amount }]
-        : [];
-    let paymentRecordedAmount = 0;
-    let paymentWarning: string | undefined;
-    if (tenderPayments.length) {
-      try {
-        for (const tender of tenderPayments) {
-          if (tender.amount <= 0) continue;
-          await createCustomerPaymentRequest(authSession.token, {
-            ...(customer ? { customerId: customer.id } : {}),
-            saleId: apiSale.id,
-            amount: tender.amount,
-            method: tender.method,
-            ...(tender.notes ? { notes: tender.notes } : {}),
-          });
-          if (tender.method === 'STORE_CREDIT' && customer) {
-            setCustomers((previous) => previous.map((entry) => entry.id === customer.id
-              ? { ...entry, availableStoreCredit: Math.max(0, (entry.availableStoreCredit || 0) - tender.amount) }
-              : entry));
-          }
-          paymentRecordedAmount += tender.amount;
-        }
-      } catch (error) {
-        paymentWarning = error instanceof Error ? error.message : 'A payment could not be recorded.';
-      }
+    const paymentRecordedAmount = paymentOnlyTenders.reduce((total, tender) => total + tender.amount, 0);
+    const storeCreditUsed = paymentOnlyTenders
+      .filter((tender) => tender.method === 'STORE_CREDIT')
+      .reduce((total, tender) => total + tender.amount, 0);
+    if (customer && storeCreditUsed > 0) {
+      setCustomers((previous) => previous.map((entry) => entry.id === customer.id
+        ? { ...entry, availableStoreCredit: Math.max(0, (entry.availableStoreCredit || 0) - storeCreditUsed) }
+        : entry));
     }
 
     const newSale: SaleRecord = {
       ...saleData,
       id: apiSale.id,
       amount: Number(apiSale.totalAmount),
-      paymentTenders: tenderPayments,
+      paymentTenders: tenderAllocations,
       costOfGoodsSold: apiSale.items
         ? apiSale.items.reduce((sum, item) => sum + Number(item.historicalCostSnapshot || 0) * Number(item.quantity), 0)
         : requested.reduce((sum, item) => sum + item.quantity * item.purchaseRate, 0),
@@ -1016,14 +1013,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     }
 
-    if (paymentWarning) {
-      const followUp = saleData.paymentMode === 'Split' || saleData.paymentMode === 'Credit'
-        ? 'The unpaid amount remains on the customer credit balance.'
-        : 'Check the payment status before retrying.';
-      showToast(`Sale saved, but a payment was not recorded: ${paymentWarning}. ${followUp}`, 'error');
-    } else {
-      showToast(`Sale Bill ${newSale.billNumber} created successfully! (${formatCurrency(newSale.amount)})`);
-    }
+    showToast(`Sale Bill ${newSale.billNumber} created successfully! (${formatCurrency(newSale.amount)})`);
     return apiSale;
   };
 
@@ -1102,18 +1092,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     try {
       await cancelSaleCreditBillRequest(authSession.token, id, { reason, refundMode, actualPayments, refunds, actualReceivedConfirmed });
-      const [billResult, productResult] = await Promise.allSettled([
+      const [billResult, productResult, customerResult] = await Promise.allSettled([
         getCustomerCreditBillsRequest(authSession.token),
         getProducts(authSession.token),
+        getCustomers(authSession.token),
       ]);
       if (billResult.status === 'fulfilled') {
         setCreditBills(billResult.value.map(mapCreditBill));
         setCreditBillError(null);
       } else setCreditBillError('Sale was cancelled, but the bill history could not be refreshed.');
       if (productResult.status === 'fulfilled') setProducts(productResult.value.map(mapProduct));
-      showToast(billResult.status === 'fulfilled' && productResult.status === 'fulfilled'
+      if (customerResult.status === 'fulfilled') setCustomers(customerResult.value.map(mapCustomer).filter((customer) => customer.active !== false));
+      const refreshSucceeded = billResult.status === 'fulfilled' && productResult.status === 'fulfilled' && customerResult.status === 'fulfilled';
+      showToast(refreshSucceeded
         ? 'Sale cancelled. Original bill and receipts are preserved.'
-        : 'Sale cancelled. Refresh the page to reload all updated records.', billResult.status === 'fulfilled' ? 'success' : 'warning');
+        : 'Sale cancelled. Refresh the page to reload all updated records.', refreshSucceeded ? 'success' : 'warning');
       return true;
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'The sale could not be cancelled.', 'error');

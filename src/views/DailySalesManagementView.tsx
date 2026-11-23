@@ -1,9 +1,10 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   CalendarDays,
   Download,
   FileText,
+  LoaderCircle,
   Printer,
   Plus,
   RotateCcw,
@@ -21,7 +22,7 @@ import { SaleRecord } from '../types';
 import { DEFAULT_PAGE_SIZE, getPageRecords, getPaginationRange, PaginationControls } from '../components/PaginationControls';
 
 type RegisterTab = 'sales' | 'expenses';
-type PaymentMode = 'all' | 'Cash' | 'Credit' | 'UPI' | 'Coupon';
+type PaymentMode = 'all' | 'Cash' | 'Credit' | 'UPI' | 'Coupon' | 'Store Credit';
 type TransactionHistoryDetail = { id: string; group: string; label: string; amount: number; method?: string | null; reference?: string | null; date?: string };
 type TransactionHistoryEntry = {
   id: string;
@@ -69,6 +70,15 @@ const reportDate = (date: string) => new Intl.DateTimeFormat('en-IN', {
   year: 'numeric',
 }).format(new Date(`${date}T12:00:00`));
 
+const defaultReturnQuantities = (invoice: ApiSaleReturnDetail) => Object.fromEntries(
+  invoice.items.map((item) => {
+    const remaining = item.displayQuantity != null
+      ? Math.max(0, Number(item.displayQuantity) - Number(item.returnedDisplayQuantity || 0))
+      : Math.max(0, Number(item.remainingQuantity) || 0);
+    return [item.id, remaining === 1 ? '1' : ''];
+  }),
+);
+
 const csvCell = (value: string | number) => `"${String(value).replace(/"/g, '""')}"`;
 const escapeHtml = (value: string | number) => String(value)
   .replace(/&/g, '&amp;')
@@ -96,11 +106,13 @@ export const DailySalesManagementView: React.FC = () => {
   const [invoiceLoading, setInvoiceLoading] = useState(false);
   const [returnQuantities, setReturnQuantities] = useState<Record<string, string>>({});
   const [returnReason, setReturnReason] = useState('');
+  const [returnNotes, setReturnNotes] = useState('');
   const [returnReasonPreset, setReturnReasonPreset] = useState('');
   const [returnSettlement, setReturnSettlement] = useState<'REFUND' | 'CUSTOMER_CREDIT' | 'PENDING'>('PENDING');
   const [refundMethod, setRefundMethod] = useState<'CASH' | 'UPI' | 'BANK' | 'OTHER'>('CASH');
   const [refundReference, setRefundReference] = useState('');
   const [savingReturn, setSavingReturn] = useState(false);
+  const returnRequestInFlight = useRef(false);
   const [confirmReturnOpen, setConfirmReturnOpen] = useState(false);
   const [pendingSettlementId, setPendingSettlementId] = useState<string | null>(null);
   const [pendingSettlementAmount, setPendingSettlementAmount] = useState('');
@@ -145,7 +157,13 @@ export const DailySalesManagementView: React.FC = () => {
       for (const report of reports) for (const invoice of report.invoices || []) {
         const products = invoice.products || [];
         const payments = invoice.payments || [];
-        const totalCollected = payments.reduce((sum: number, payment: any) => sum + Number(payment.amount), 0);
+        const paymentsReceived = payments.reduce((total: number, payment: any) => {
+          const method = String(payment.method || '').toUpperCase();
+          return method === 'CASH' || method === 'UPI'
+            ? total + (Number(payment.amount) || 0)
+            : total;
+        }, 0);
+        const creditAmount = Number(invoice.creditAmount) || 0;
         const invoiceDiscountTotal = Math.max(
           0,
           Number(invoice.discountAmount ?? invoice.billDiscountAmount ?? 0) || 0,
@@ -161,8 +179,16 @@ export const DailySalesManagementView: React.FC = () => {
         );
         const isCreditSettlement =
           report.date > saleDate(undefined, String(invoice.billDate || ""));
-        const paymentBreakdown = payments.map((payment: any) => {
-          const method = payment.method === 'COUPON' ? 'Coupon' : payment.method === 'STORE_CREDIT' ? 'Store credit' : payment.method === 'UPI' ? 'UPI' : 'Cash';
+        const paymentTenders = [
+          ...payments.map((payment: any) => ({
+            method: payment.method,
+            amount: Number(payment.amount) || 0,
+            ...(payment.notes ? { notes: payment.notes } : {}),
+          })),
+          ...(!isCreditSettlement && creditAmount > 0 ? [{ method: 'CREDIT' as const, amount: creditAmount }] : []),
+        ];
+        const paymentBreakdown = paymentTenders.map((payment: any) => {
+          const method = payment.method === 'COUPON' ? 'Coupon' : payment.method === 'STORE_CREDIT' ? 'Store Credit' : payment.method === 'CREDIT' ? 'Credit' : payment.method === 'UPI' ? 'UPI' : 'Cash';
           const code = method === 'Coupon' ? payment.notes?.match(/^Coupon code: (.+)$/)?.[1] : undefined;
           return `${isCreditSettlement ? 'Credit settlement · ' : ''}${method}${code ? ` ${code}` : ''} ${formatPaymentAmount(Number(payment.amount))}`;
         }).join(' · ');
@@ -183,18 +209,14 @@ export const DailySalesManagementView: React.FC = () => {
           itemsCount: products.length,
           itemsList,
           paymentMode: paymentBreakdown as any,
-          paymentTenders: payments.map((payment: any) => ({
-            method: payment.method,
-            amount: Number(payment.amount) || 0,
-            ...(payment.notes ? { notes: payment.notes } : {}),
-          })),
-          amount: totalCollected,
+          paymentTenders,
+          amount: paymentsReceived,
           netSalesAmount: invoice.netSalesAmount != null
             ? Number(invoice.netSalesAmount)
             : Math.max(0, Number(invoice.totalAmount || 0) - (invoice.returns || []).reduce((total: number, salesReturn: any) => total + Number(salesReturn.amount || 0), 0)),
           billTotal: Number(invoice.totalAmount || 0),
           discountAmount,
-          subtotal: totalCollected,
+          subtotal: Number(invoice.lineRevenueTotal ?? invoice.subtotal ?? 0),
           lineItems: products.map((product: any) => ({
             saleItemId: product.saleItemId ? String(product.saleItemId) : undefined,
             productId: String(product.productId || product.id || ''),
@@ -233,10 +255,13 @@ export const DailySalesManagementView: React.FC = () => {
     setInvoiceDetail(null);
     setReturnQuantities({});
     setReturnReason('');
+    setReturnNotes('');
     setReturnReasonPreset('');
     setPendingSettlementId(null);
     try {
-      setInvoiceDetail(await getSaleForReturnRequest(authSession.token, saleId));
+      const invoice = await getSaleForReturnRequest(authSession.token, saleId);
+      setInvoiceDetail(invoice);
+      setReturnQuantities(defaultReturnQuantities(invoice));
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Invoice details could not be loaded.', 'error');
     } finally {
@@ -278,28 +303,54 @@ export const DailySalesManagementView: React.FC = () => {
   })();
 
   const submitSalesReturn = async () => {
-    if (!authSession || !invoiceDetail || savingReturn || !returnReason.trim() || !returnPreview.items.length) return;
+    if (!authSession || !invoiceDetail || savingReturn || returnRequestInFlight.current || !returnReason.trim() || !returnPreview.items.length) return;
     if (returnSettlement === 'CUSTOMER_CREDIT' && returnPreview.settlementAmount > 0 && !invoiceDetail.customer) {
       showToast('Customer credit requires a registered customer on this invoice.', 'error');
       return;
     }
+    returnRequestInFlight.current = true;
     setSavingReturn(true);
     try {
-      await createSalesReturnRequest(authSession.token, invoiceDetail.id, {
+      const saleId = invoiceDetail.id;
+      const submittedItems = returnPreview.items;
+      await createSalesReturnRequest(authSession.token, saleId, {
         idempotencyKey: crypto.randomUUID(),
-        reason: returnReason.trim(),
+        reason: [returnReason.trim(), returnNotes.trim()].filter(Boolean).join(' — '),
         settlementType: returnSettlement,
         items: returnPreview.items.map((item) => ({ saleItemId: item.saleItemId, quantity: item.quantity })),
         ...(returnSettlement === 'REFUND' && returnPreview.settlementAmount > 0 ? { refunds: [{ amount: returnPreview.settlementAmount, method: refundMethod, ...(refundReference.trim() ? { reference: refundReference.trim() } : {}) }] } : {}),
       });
       setConfirmReturnOpen(false);
-      setReturnQuantities({});
       setReturnReason('');
       setReturnReasonPreset('');
+      setReturnNotes('');
       void refreshCustomers();
       setRefreshRegister((value) => value + 1);
+      const optimisticItems = invoiceDetail.items.map((item) => {
+        const returned = submittedItems.find((entry) => entry.saleItemId === item.id);
+        if (!returned) return item;
+        return {
+          ...item,
+          returnedQuantity: Number(item.returnedQuantity) + returned.quantity,
+          returnedAmount: Number(item.returnedAmount) + returned.amount,
+          remainingQuantity: Math.max(0, Number(item.remainingQuantity) - returned.quantity),
+          ...(item.displayQuantity != null
+            ? { returnedDisplayQuantity: Number(item.returnedDisplayQuantity || 0) + returned.displayQuantity }
+            : {}),
+        };
+      });
+      const fullyReturned = optimisticItems.every((item) => Number(item.remainingQuantity) <= 0.0000001);
+      const optimisticInvoice = {
+        ...invoiceDetail,
+        items: optimisticItems,
+        returnStatus: fullyReturned ? 'FULLY_RETURNED' as const : 'PARTIALLY_RETURNED' as const,
+      };
+      setInvoiceDetail(optimisticInvoice);
+      setReturnQuantities(defaultReturnQuantities(optimisticInvoice));
       try {
-        setInvoiceDetail(await getSaleForReturnRequest(authSession.token, invoiceDetail.id));
+        const refreshedInvoice = await getSaleForReturnRequest(authSession.token, saleId);
+        setInvoiceDetail(refreshedInvoice);
+        setReturnQuantities(defaultReturnQuantities(refreshedInvoice));
       } catch {
         showToast('Sales return was recorded, but the invoice details could not be refreshed.', 'error');
       }
@@ -307,6 +358,7 @@ export const DailySalesManagementView: React.FC = () => {
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'The sales return could not be recorded.', 'error');
     } finally {
+      returnRequestInFlight.current = false;
       setSavingReturn(false);
     }
   };
@@ -393,7 +445,7 @@ export const DailySalesManagementView: React.FC = () => {
     .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   const filteredSales = rangeSales.filter((sale) => {
     const matchesMode = modeFilter === 'all' || sale.paymentMode === modeFilter || sale.paymentMode.includes(`${modeFilter} `);
-    const matchesSearch = !query || sale.billNumber.toLowerCase().includes(query) || sale.customerName.toLowerCase().includes(query) || sale.itemsList.toLowerCase().includes(query);
+    const matchesSearch = !query || sale.billNumber.toLowerCase().includes(query) || sale.customerName.toLowerCase().includes(query) || sale.itemsList.toLowerCase().includes(query) || sale.paymentMode.toLowerCase().includes(query);
     return matchesMode && matchesSearch;
   });
   const matchingExpenses = rangeExpenses.filter((expense) => !query || expense.description.toLowerCase().includes(query) || Boolean(expense.category?.toLowerCase().includes(query)) || Boolean(expense.notes?.toLowerCase().includes(query)));
@@ -409,6 +461,7 @@ export const DailySalesManagementView: React.FC = () => {
   const printSalesTotal = filteredSales.reduce((sum, sale) => sum + (sale.netSalesAmount ?? sale.amount), 0);
   const printPaymentsTotal = filteredSales.reduce((sum, sale) => sum + sale.amount, 0);
   const printExpensesTotal = matchingExpenses.reduce((sum, expense) => sum + expense.amount, 0);
+console.log(pageSales,"pageSales");
 
   useEffect(() => {
     setPage(1);
@@ -451,7 +504,7 @@ export const DailySalesManagementView: React.FC = () => {
 
     const lineItems = sale.lineItems || [];
     const tenders = sale.paymentTenders || [];
-    const paidAmount = tenders.reduce((sum, tender) => sum + Number(tender.amount || 0), 0);
+    const paidAmount = tenders.filter((tender) => tender.method !== 'CREDIT').reduce((sum, tender) => sum + Number(tender.amount || 0), 0);
     const billTotal = Number(sale.billTotal ?? sale.amount);
     const productRows = lineItems.length
       ? lineItems.map((item) => {
@@ -593,6 +646,7 @@ export const DailySalesManagementView: React.FC = () => {
               <option value="Credit">Credit</option>
               <option value="UPI">UPI</option>
               <option value="Coupon">Coupon</option>
+              <option value="Store Credit">Store Credit</option>
             </select>
           </label>}
         </div>
@@ -641,9 +695,25 @@ export const DailySalesManagementView: React.FC = () => {
                         </span>
                       )}
                     </td>
-                    <td className="px-4 py-2 text-center"><span className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-semibold ${item.paymentMode.includes('UPI') ? 'bg-[#eee9ff] text-[#5940a5]' : item.paymentMode.includes('Cash') ? 'bg-[#f0f0ed] text-[#45443f]' : 'bg-[#eaf0ff] text-[#34549b]'}`}>
-                      <span className="material-symbols-outlined text-[14px]">{item.paymentMode.includes('UPI') ? 'contactless' : item.paymentMode.includes('Cash') ? 'payments' : 'credit_card'}</span>{item.paymentMode}
-                    </span></td>
+                    <td className="px-4 py-2">
+                      <div className="flex max-w-[290px] flex-wrap justify-center gap-1.5">
+                        {(item.paymentTenders || []).map((tender, index) => {
+                          const method = tender.method === 'STORE_CREDIT' ? 'Store Credit'
+                            : tender.method === 'CREDIT' ? 'Credit'
+                              : tender.method === 'COUPON' ? 'Coupon'
+                                : tender.method === 'UPI' ? 'UPI' : 'Cash';
+                          const tone = tender.method === 'UPI' ? 'bg-[#eee9ff] text-[#5940a5]'
+                            : tender.method === 'CREDIT' ? 'bg-[#fff2d5] text-[#805600]'
+                              : tender.method === 'STORE_CREDIT' ? 'bg-[#eaf5ed] text-[#376449]'
+                                : tender.method === 'COUPON' ? 'bg-[#f1efff] text-[#5940a5]'
+                                  : 'bg-[#f0f0ed] text-[#45443f]';
+                          return <span key={`${tender.method}-${index}`} className={`inline-flex items-center rounded-md px-2 py-1 text-[11px] font-semibold ${tone}`}>
+                            {item.paymentMode.includes('Credit settlement') ? 'Credit settlement · ' : ''}{method} {formatCurrency(tender.amount)}
+                          </span>;
+                        })}
+                        {!(item.paymentTenders || []).length && <span className="text-xs text-[#77736d]">No payment recorded</span>}
+                      </div>
+                    </td>
                     <td className="px-4 py-2 text-center">
                       <button type="button" onClick={() => handlePrintSale(item)} title="Print or save receipt as PDF" aria-label={`Print receipt for ${item.billNumber}`} className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#e8e4dd] bg-white px-2.5 text-xs font-semibold text-[#493819] transition hover:bg-[#fff7e7]">
                         <Printer size={15} aria-hidden="true" /><span>Print / PDF</span>
@@ -673,7 +743,7 @@ export const DailySalesManagementView: React.FC = () => {
       </AnimatePresence>
       {activeTab === 'sales' && (
         <section className="mt-4 overflow-hidden rounded-xl border border-[#e9e3d9] bg-white shadow-sm" aria-label="Transaction History">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#eee8df] px-4 py-3"><div><h2 className="text-sm font-bold text-[#272727]">Transaction History</h2><p className="text-xs text-[#77736d]">Sales returns and billing credit cancellations, with their settlement status.</p></div><strong className="text-sm text-[#a86600]">{transactionHistory.length} transactions</strong></div>
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#eee8df] px-4 py-3"><div><h2 className="text-sm font-bold text-[#272727]">Sales Returns &amp; Billing Credit Cancellations</h2><p className="text-xs text-[#77736d]">Sales returns and billing credit cancellations, with their settlement status.</p></div><strong className="text-sm text-[#a86600]">{transactionHistory.length} transactions</strong></div>
           <div className="overflow-x-auto"><table className="w-full min-w-[1050px] border-collapse text-left text-sm"><thead><tr className="h-9 bg-[#f6f5f2] text-xs font-bold uppercase tracking-wide text-[#6d685f]"><th className="px-4 py-2">Date &amp; time</th><th className="px-4 py-2">Invoice</th><th className="px-4 py-2">Customer</th><th className="px-4 py-2">Transaction type</th><th className="px-4 py-2">Reason</th><th className="px-4 py-2 text-right">Amount</th><th className="px-4 py-2">Settlement status</th></tr></thead><tbody className="divide-y divide-[#efede8]">{pageTransactions.map((transaction) => <tr key={transaction.id} className="hover:bg-[#fcfbf9]"><td className="whitespace-nowrap px-4 py-2 text-xs text-[#68645e]">{formatSaleDateTime(transaction.date)}</td><td className="px-4 py-2"><button type="button" onClick={() => setSelectedTransaction(transaction)} title="Open transaction details" className="font-semibold text-[#a86600] hover:underline">{transaction.invoiceNumber}</button></td><td className="px-4 py-2">{transaction.customer}</td><td className="px-4 py-2"><span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${transaction.transactionType === 'Credit Cancellation' ? 'bg-[#fff0ed] text-[#a53c2c]' : 'bg-[#fff5d9] text-[#765000]'}`}>{transaction.transactionType}</span></td><td className="max-w-[230px] truncate px-4 py-2" title={transaction.reason}>{transaction.reason || '—'}</td><td className="whitespace-nowrap px-4 py-2 text-right font-semibold">{formatCurrency(transaction.amount)}</td><td className="px-4 py-2"><span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${transaction.settlementStatus.includes('Pending') ? 'bg-[#fff5d9] text-[#765000]' : transaction.settlementStatus === 'Refunded' ? 'bg-[#eaf5ed] text-[#2f6d3d]' : transaction.settlementStatus === 'Customer Credit' ? 'bg-[#edf3ff] text-[#375b9d]' : 'bg-[#f1f1ef] text-[#625d54]'}`}>{transaction.settlementStatus}</span></td></tr>)}{transactionHistory.length === 0 && <tr><td colSpan={7} className="px-4 py-8 text-center text-sm text-[#77736d]">No sales returns or credit cancellations in this date range.</td></tr>}</tbody></table></div>
           <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-[#eee8df] bg-[#f8f7f4] px-4 py-3"><span className="text-xs text-[#6b665c]">Showing <strong className="text-[#272727]">{transactionRange.start}-{transactionRange.end}</strong> of <strong className="text-[#272727]">{transactionHistory.length}</strong> transactions</span><PaginationControls totalRecords={transactionHistory.length} page={safeTransactionPage} pageSize={pageSize} onPageChange={setTransactionPage} /></footer>
         </section>
@@ -704,56 +774,65 @@ export const DailySalesManagementView: React.FC = () => {
       )}
 
       {(invoiceLoading || invoiceDetail) && (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/45 p-3 sm:p-5" onClick={() => { if (!savingReturn && !savingPendingSettlement) setInvoiceDetail(null); }}>
-          <section role="dialog" aria-modal="true" aria-labelledby="sales-return-title" onClick={(event) => event.stopPropagation()} className="max-h-[94vh] w-full max-w-4xl overflow-y-auto rounded-2xl bg-white shadow-2xl">
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-2 sm:p-3" onClick={() => { if (!savingReturn && !savingPendingSettlement) setInvoiceDetail(null); }}>
+          <section role="dialog" aria-modal="true" aria-labelledby="sales-return-title" onClick={(event) => event.stopPropagation()} className="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl">
             {invoiceLoading || !invoiceDetail ? (
               <div className="flex h-56 items-center justify-center"><LoaderOne /></div>
             ) : <>
-              <header className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-[#eee8df] bg-white px-5 py-4">
-                <div><h2 id="sales-return-title" className="text-lg font-bold text-[#272727]">Invoice {invoiceDetail.invoiceNumber}</h2><p className="mt-1 text-sm text-[#77736d]">{invoiceDetail.customer?.name || 'Walk-in customer'} · {String(invoiceDetail.billDate).slice(0, 10)}</p><p className="mt-1 text-xs font-semibold text-[#765000]">{invoiceDetail.returnStatus === 'FULLY_RETURNED' ? 'Fully returned' : invoiceDetail.returnStatus === 'PARTIALLY_RETURNED' ? 'Partially returned' : 'Original invoice preserved'}</p></div>
-                <button type="button" aria-label="Close invoice" disabled={savingReturn || savingPendingSettlement} onClick={() => setInvoiceDetail(null)} className="rounded-lg p-2 text-[#68645e] hover:bg-[#f6f5f2] disabled:opacity-50"><X size={18} /></button>
+              <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[#eee8df] bg-white px-4 py-3 sm:px-5">
+                <div className="min-w-0">
+                  <h2 id="sales-return-title" className="text-xl font-bold tracking-tight text-[#171717] sm:text-2xl">Sales Return</h2>
+                  <p className="mt-0.5 text-xs text-[#5e5b56] sm:text-sm">Invoice {invoiceDetail.invoiceNumber} <span className="mx-1 text-[#b5aea2]">·</span> {invoiceDetail.customer?.name || 'Walk-in customer'} <span className="mx-1 text-[#b5aea2]">·</span> {reportDate(String(invoiceDetail.billDate).slice(0, 10))}</p>
+                  <span className="mt-1 inline-flex rounded-full bg-[#fff1d0] px-2 py-0.5 text-[10px] font-semibold text-[#765000]">{invoiceDetail.returnStatus === 'FULLY_RETURNED' ? 'Fully returned' : invoiceDetail.returnStatus === 'PARTIALLY_RETURNED' ? 'Partially returned' : 'Original invoice preserved'}</span>
+                </div>
+                <button type="button" aria-label="Close sales return" disabled={savingReturn || savingPendingSettlement} onClick={() => setInvoiceDetail(null)} className="shrink-0 rounded-lg p-1.5 text-[#68645e] hover:bg-[#f6f5f2] disabled:opacity-50"><X size={18} /></button>
               </header>
 
-              <div className="space-y-5 p-5">
+              <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3 sm:px-5">
                 <section>
-                  <div className="mb-2 flex items-center justify-between"><h3 className="font-bold text-[#272727]">Invoice products</h3><span className="text-xs text-[#77736d]">Select one or more products and enter return quantities</span></div>
-                  <div className="overflow-x-auto rounded-xl border border-[#eee8df]"><table className="w-full min-w-[700px] text-left text-sm"><thead className="bg-[#f8f7f4] text-xs uppercase text-[#6d685f]"><tr><th className="px-3 py-2">Product</th><th className="px-3 py-2 text-right">Sold</th><th className="px-3 py-2 text-right">Previously returned</th><th className="px-3 py-2 text-right">Remaining</th><th className="px-3 py-2 text-right">Return qty</th><th className="px-3 py-2 text-right">Line value</th></tr></thead><tbody className="divide-y divide-[#efede8]">
+                  <div className="mb-2 flex items-center gap-2"><span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#ffedc2] text-xs font-bold text-[#684400]">1</span><h3 className="text-sm font-bold text-[#171717]">Select products to return</h3></div>
+                  <div className="overflow-x-auto rounded-lg border border-[#e8e4dd]"><table className="w-full min-w-[700px] text-left text-xs"><thead className="bg-[#f6f5f3] text-[10px] font-semibold uppercase tracking-wide text-[#5d5a55]"><tr><th className="px-3 py-2">Product</th><th className="px-2 py-2 text-right">Sold</th><th className="px-2 py-2 text-right">Returned</th><th className="px-2 py-2 text-right">Remaining</th><th className="px-2 py-2 text-right">Return Qty</th><th className="px-3 py-2 text-right">Line Value</th></tr></thead><tbody className="divide-y divide-[#eeeae4]">
                     {invoiceDetail.items.map((item) => {
                       const unit = item.displayUnitSymbol || item.displayUnitName || item.unitSymbol || item.unitName;
                       const sold = item.displayQuantity != null ? Number(item.displayQuantity) : Number(item.quantity);
                       const returned = item.displayQuantity != null ? Number(item.returnedDisplayQuantity || 0) : Number(item.returnedQuantity);
-                      const remaining = item.displayQuantity != null ? Math.max(0, sold - returned) : Number(item.remainingQuantity);
-                      return <tr key={item.id}><td className="px-3 py-3 font-semibold">{item.productName}</td><td className="px-3 py-3 text-right">{sold.toLocaleString('en-IN')} {unit}</td><td className="px-3 py-3 text-right">{returned.toLocaleString('en-IN')} {unit}</td><td className="px-3 py-3 text-right">{remaining.toLocaleString('en-IN')} {unit}</td><td className="px-3 py-2 text-right"><NumericTextInput min="0" max={remaining} maxDecimals={item.displayQuantity != null ? 0 : item.unitAllowsDecimals ? 3 : 0} value={returnQuantities[item.id] || ''} onValueChange={(value) => setReturnQuantities((previous) => ({ ...previous, [item.id]: value }))} disabled={remaining <= 0 || savingReturn} className="h-9 w-28 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-2 text-right outline-none focus:border-[#c58a00] disabled:opacity-50" aria-label={`Return quantity for ${item.productName}`} /></td><td className="px-3 py-3 text-right">{formatCurrency(Number(item.lineTotal))}</td></tr>;
+                      const remaining = item.displayQuantity != null ? Math.max(0, sold - returned) : Math.max(0, Number(item.remainingQuantity));
+                      const lineReturnAmount = returnPreview.items.find((entry) => entry.saleItemId === item.id)?.amount || 0;
+                      return <tr key={item.id} className="bg-white"><td className="px-3 py-2 font-semibold text-[#171717]">{item.productName}</td><td className="whitespace-nowrap px-2 py-2 text-right text-[#282828]">{sold.toLocaleString('en-IN')} {unit}</td><td className="whitespace-nowrap px-2 py-2 text-right text-[#282828]">{returned.toLocaleString('en-IN')} {unit}</td><td className="whitespace-nowrap px-2 py-2 text-right text-[#282828]">{remaining.toLocaleString('en-IN')} {unit}</td><td className="px-2 py-1.5 text-right"><NumericTextInput min="0" max={remaining} maxDecimals={item.displayQuantity != null ? 0 : item.unitAllowsDecimals ? 3 : 0} value={returnQuantities[item.id] || ''} onValueChange={(value) => setReturnQuantities((previous) => ({ ...previous, [item.id]: value }))} disabled={remaining <= 0 || savingReturn} className="h-8 w-24 rounded-md border border-[#e1d9cb] bg-white px-2 text-right text-sm font-medium text-[#171717] outline-none focus:border-[#c58a00] disabled:bg-[#f5f4f2] disabled:text-[#a5a19a]" aria-label={`Return quantity for ${item.productName}`} /></td><td className="whitespace-nowrap px-3 py-2 text-right font-semibold text-[#171717]">{formatCurrency(lineReturnAmount)}</td></tr>;
                     })}
                   </tbody></table></div>
                 </section>
 
-                <section className="grid gap-4 lg:grid-cols-[1fr_1fr]">
-                  <div className="space-y-3">
-                    <div className="space-y-2"><div className="text-sm font-semibold text-[#555047]">Return reason <span className="text-xs font-normal text-[#77736d]">Required</span></div><div className="flex flex-wrap gap-2" aria-label="Quick return reasons">{SALES_RETURN_REASON_PRESETS.filter((preset) => preset !== "Other").map((preset) => <button key={preset} type="button" disabled={savingReturn} onClick={() => { setReturnReasonPreset(preset); setReturnReason(preset); }} className={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 ${returnReasonPreset === preset ? "border-[#c58a00] bg-[#fff3d3] text-[#765000]" : "border-[#e8e4dd] bg-white text-[#625d54] hover:border-[#c58a00] hover:bg-[#fffaf0]"}`}>{preset}</button>)}</div><textarea aria-label="Return reason" required maxLength={1000} value={returnReason} onChange={(event) => handleReturnReasonChange(event.target.value)} rows={3} disabled={savingReturn} className="w-full rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] p-3 text-sm font-normal outline-none focus:border-[#c58a00]" placeholder="Choose a quick reason or enter another reason" /></div>
-                    <div className="rounded-xl bg-[#fffaf0] p-3 text-sm"><div className="flex justify-between"><span className="text-[#77736d]">Calculated return amount</span><strong>{formatCurrency(returnPreview.amount)}</strong></div>{returnPreview.creditApplied > 0 && <div className="mt-1 flex justify-between text-xs"><span className="text-[#77736d]">Applied to invoice balance</span><span>{formatCurrency(returnPreview.creditApplied)}</span></div>}<div className="mt-2 flex justify-between border-t border-[#eadfc8] pt-2"><span className="font-semibold text-[#493819]">Amount to settle</span><strong className="text-[#a86600]">{formatCurrency(returnPreview.settlementAmount)}</strong></div></div>
+                <section className="grid gap-3 border-y border-[#eee8df] py-3 lg:grid-cols-2 lg:gap-4">
+                  <div className="space-y-2 lg:border-r lg:border-[#eee8df] lg:pr-4">
+                    <div className="flex items-center gap-2"><span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#ffedc2] text-xs font-bold text-[#684400]">2</span><h3 className="text-sm font-bold text-[#171717]">Return reason <span className="ml-1 text-xs font-medium text-[#6a665f]">Required</span></h3></div>
+                    <div className="flex flex-wrap gap-1.5" aria-label="Quick return reasons">{SALES_RETURN_REASON_PRESETS.filter((preset) => preset !== 'Other').map((preset) => <button key={preset} type="button" disabled={savingReturn} aria-pressed={returnReasonPreset === preset} onClick={() => { setReturnReasonPreset(preset); setReturnReason(preset); }} className={`rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors disabled:opacity-50 ${returnReasonPreset === preset ? 'border-[#c58a00] bg-[#fff3d3] text-[#684400]' : 'border-[#e5e1da] bg-white text-[#35322e] hover:border-[#c58a00] hover:bg-[#fffaf0]'}`}>{preset}{returnReasonPreset === preset && <span className="ml-1 font-bold">✓</span>}</button>)}</div>
+                    <label className="block text-xs font-medium text-[#35322e]">Reason details <span className="text-[#a65d00">*</span><textarea aria-label="Return reason" required maxLength={1000} value={returnReason} onChange={(event) => handleReturnReasonChange(event.target.value)} rows={2} disabled={savingReturn} className="mt-1 w-full rounded-lg border border-[#e5e1da] bg-[#f8f7f5] p-2 text-xs outline-none focus:border-[#c58a00]" placeholder="Choose a quick reason or enter another reason" /></label>
+                    <label className="block text-xs font-medium text-[#35322e]">Additional notes <span className="font-normal text-[#77736d]">(optional)</span><textarea aria-label="Additional return notes" maxLength={Math.max(0, 1000 - returnReason.trim().length - 3)} value={returnNotes} onChange={(event) => setReturnNotes(event.target.value)} rows={2} disabled={savingReturn} className="mt-1 w-full rounded-lg border border-[#e5e1da] bg-[#f8f7f5] p-2 text-xs outline-none focus:border-[#c58a00]" placeholder="Add any useful details" /></label>
                   </div>
+
                   <div className="space-y-2">
-                    <p className="text-sm font-semibold text-[#555047]">Return settlement</p>
-                    {[{ value: 'REFUND' as const, label: 'Refund Now', detail: 'Record money paid back to the customer.' }, { value: 'CUSTOMER_CREDIT' as const, label: 'Customer Credit', detail: `Add to ${invoiceDetail.customer?.name || 'a registered customer'}’s available store credit.` }, { value: 'PENDING' as const, label: 'Refund Pending', detail: 'Record an amount payable and settle it later.' }].map((option) => <label key={option.value} className={`flex cursor-pointer gap-3 rounded-xl border p-3 ${returnSettlement === option.value ? 'border-[#c58a00] bg-[#fffaf0]' : 'border-[#eee8df]'}`}><input type="radio" name="sales-return-settlement" value={option.value} checked={returnSettlement === option.value} onChange={() => setReturnSettlement(option.value)} className="mt-1 accent-[#c58a00]" /><span><span className="block text-sm font-bold text-[#272727]">{option.label}</span><span className="text-xs text-[#77736d]">{option.detail}</span></span></label>)}
-                    {returnSettlement === 'CUSTOMER_CREDIT' && <p className="text-xs text-[#77736d]">Available store credit: {formatCurrency(Number(invoiceDetail.customer?.availableStoreCredit || 0))}</p>}
-                    {returnSettlement === 'REFUND' && returnPreview.settlementAmount > 0 && <div className="grid grid-cols-2 gap-2"><label className="flex flex-col gap-1 text-xs font-semibold text-[#68645e]">Refund method<select value={refundMethod} onChange={(event) => setRefundMethod(event.target.value as typeof refundMethod)} className="h-10 rounded-lg border border-[#e8e4dd] bg-white px-2 text-sm"><option value="CASH">Cash</option><option value="UPI">UPI</option><option value="BANK">Bank</option><option value="OTHER">Other</option></select></label><label className="flex flex-col gap-1 text-xs font-semibold text-[#68645e]">Reference (optional)<input value={refundReference} onChange={(event) => setRefundReference(event.target.value)} maxLength={120} className="h-10 rounded-lg border border-[#e8e4dd] bg-white px-2 text-sm" /></label></div>}
+                    <div className="flex items-center gap-2"><span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#ffedc2] text-xs font-bold text-[#684400]">3</span><h3 className="text-sm font-bold text-[#171717]">Choose settlement</h3></div>
+                    {[{ value: "REFUND" as const, label: "Refund Now", detail: "Record money paid back to the customer." }, { value: "CUSTOMER_CREDIT" as const, label: "Customer Credit", detail: `Add ${formatCurrency(returnPreview.settlementAmount)} to ${invoiceDetail.customer?.name || "the customer"} store credit.` }, { value: "PENDING" as const, label: "Refund Pending", detail: "Record an amount payable and settle it later." }].map((option) => <label key={option.value} className={`flex cursor-pointer items-start gap-2 rounded-lg border px-3 py-2 transition-colors ${returnSettlement === option.value ? "border-[#c58a00] bg-[#fff8e9]" : "border-[#e5e1da] bg-white hover:bg-[#fcfbf9]"}`}><input type="radio" name="sales-return-settlement" value={option.value} checked={returnSettlement === option.value} onChange={() => setReturnSettlement(option.value)} className="mt-0.5 h-3.5 w-3.5 accent-[#b47a00]" /><span><span className="block text-sm font-semibold text-[#171717]">{option.label}</span><span className="block text-xs text-[#5e5b56]">{option.detail}</span></span></label>)}
+                    {returnSettlement === 'CUSTOMER_CREDIT' && <p className="text-xs text-[#77736d]">Available Store Credit: {formatCurrency(Number(invoiceDetail.customer?.availableStoreCredit || 0))}</p>}
+                    {returnSettlement === 'REFUND' && returnPreview.settlementAmount > 0 && <div className="grid grid-cols-2 gap-2"><label className="flex flex-col gap-1 text-xs font-semibold text-[#68645e]">Refund method<select value={refundMethod} onChange={(event) => setRefundMethod(event.target.value as typeof refundMethod)} className="h-8 rounded-md border border-[#e8e4dd] bg-white px-2 text-xs"><option value="CASH">Cash</option><option value="UPI">UPI</option><option value="BANK">Bank</option><option value="OTHER">Other</option></select></label><label className="flex flex-col gap-1 text-xs font-semibold text-[#68645e]">Reference (optional)<input value={refundReference} onChange={(event) => setRefundReference(event.target.value)} maxLength={120} className="h-8 rounded-md border border-[#e8e4dd] bg-white px-2 text-xs" /></label></div>}
+                    <div className="rounded-lg bg-[#fff8e9] px-3 py-2 text-xs"><div className="flex justify-between text-[#5e5b56]"><span>Total return amount</span><strong className="text-[#171717]">{formatCurrency(returnPreview.amount)}</strong></div>{returnPreview.creditApplied > 0 && <div className="mt-1 flex justify-between text-xs text-[#6c665b]"><span>Applied to invoice balance</span><span>{formatCurrency(returnPreview.creditApplied)}</span></div>}<div className="mt-1 flex justify-between border-t border-[#eadfc8] pt-1.5 font-semibold text-[#684400]"><span>Amount to settle</span><strong>{formatCurrency(returnPreview.settlementAmount)}</strong></div></div>
                   </div>
                 </section>
 
-                <div className="flex justify-end border-t border-[#eee8df] pt-4"><button type="button" disabled={savingReturn || !returnReason.trim() || !returnPreview.items.length} onClick={() => setConfirmReturnOpen(true)} className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#c58a00] px-4 text-sm font-bold text-white shadow-sm hover:bg-[#a97000] disabled:cursor-not-allowed disabled:opacity-50">Confirm Sales Return</button></div>
-
-                {invoiceDetail.returns.length > 0 && <section><h3 className="mb-2 font-bold text-[#272727]">Return history</h3><div className="space-y-2">{invoiceDetail.returns.map((salesReturn) => <div key={salesReturn.id} className="rounded-xl border border-[#eee8df] p-3"><div className="flex flex-wrap items-start justify-between gap-2"><div><p className="text-sm font-semibold text-[#272727]">{String(salesReturn.returnedAt).slice(0, 16).replace('T', ' ')} · {salesReturn.reason}</p><p className="mt-1 text-xs text-[#77736d]">{salesReturn.returnedBy?.name || 'Staff'} · {salesReturn.items.map((item) => `${item.productName} × ${item.quantity}`).join(', ')}</p></div><div className="text-right"><strong className="text-sm text-[#a86600]">{formatCurrency(Number(salesReturn.amount))}</strong><p className="text-[11px] text-[#77736d]">{salesReturn.settlementType === 'BALANCE_OFFSET' ? 'Applied to invoice balance' : salesReturn.settlementType === 'CUSTOMER_CREDIT' ? 'Customer credit' : salesReturn.settlementType === 'PENDING' ? 'Refund pending' : 'Refunded now'}</p></div></div>
-                    {Number(salesReturn.pendingRefundPayable) > 0 && <div className="mt-3 border-t border-[#eee8df] pt-3"><div className="flex flex-wrap items-center justify-between gap-2"><span className="text-xs font-semibold text-[#8b4b25]">Pending payable {formatCurrency(Number(salesReturn.pendingRefundPayable))}</span><button type="button" onClick={() => { setPendingSettlementId(salesReturn.id); setPendingSettlementAmount(String(Number(salesReturn.pendingRefundPayable))); }} className="rounded-lg border border-[#eadfc8] px-3 py-1.5 text-xs font-semibold text-[#765000] hover:bg-[#fffaf0]">Settle pending</button></div>{pendingSettlementId === salesReturn.id && <div className="mt-3 grid gap-2 sm:grid-cols-4"><input type="number" min="0.01" max={Number(salesReturn.pendingRefundPayable)} step="0.01" value={pendingSettlementAmount} onChange={(event) => setPendingSettlementAmount(event.target.value)} aria-label="Amount to settle" className="h-9 rounded-lg border border-[#e8e4dd] px-2 text-sm" /><select value={pendingSettlementMethod} onChange={(event) => setPendingSettlementMethod(event.target.value as typeof pendingSettlementMethod)} aria-label="Settlement method" className="h-9 rounded-lg border border-[#e8e4dd] bg-white px-2 text-sm"><option value="CASH">Cash</option><option value="UPI">UPI</option><option value="BANK">Bank</option><option value="OTHER">Other</option></select><input value={pendingSettlementReference} onChange={(event) => setPendingSettlementReference(event.target.value)} placeholder="Reference (optional)" maxLength={120} className="h-9 rounded-lg border border-[#e8e4dd] px-2 text-sm" /><button type="button" disabled={savingPendingSettlement || !Number(pendingSettlementAmount)} onClick={() => void settlePendingRefund(salesReturn.id)} className="h-9 rounded-lg bg-[#ffe4a0] px-3 text-sm font-semibold text-[#493819] disabled:opacity-50">{savingPendingSettlement ? 'Saving…' : 'Record settlement'}</button></div>}</div>}
-                  </div>)}</div></section>}
+                {invoiceDetail.returns.length > 0 && <details className="rounded-lg border border-[#eee8df] bg-white"><summary className="cursor-pointer px-3 py-2 text-xs font-semibold text-[#272727]">Return history ({invoiceDetail.returns.length})</summary><div className="space-y-1.5 border-t border-[#eee8df] p-2">{invoiceDetail.returns.map((salesReturn) => <div key={salesReturn.id} className="rounded-md border border-[#eee8df] p-2"><div className="flex flex-wrap items-start justify-between gap-2"><div><p className="text-sm font-semibold text-[#272727]">{String(salesReturn.returnedAt).slice(0, 16).replace('T', ' ')} · {salesReturn.reason}</p><p className="mt-1 text-xs text-[#77736d]">{salesReturn.returnedBy?.name || 'Staff'} · {salesReturn.items.map((item) => `${item.productName} × ${item.quantity}`).join(', ')}</p></div><div className="text-right"><strong className="text-sm text-[#a86600]">{formatCurrency(Number(salesReturn.amount))}</strong><p className="text-[11px] text-[#77736d]">{salesReturn.settlementType === 'BALANCE_OFFSET' ? 'Applied to invoice balance' : salesReturn.settlementType === 'CUSTOMER_CREDIT' ? 'Customer credit' : salesReturn.settlementType === 'PENDING' ? 'Refund pending' : 'Refunded now'}</p></div></div>{Number(salesReturn.pendingRefundPayable) > 0 && <div className="mt-3 border-t border-[#eee8df] pt-3"><div className="flex flex-wrap items-center justify-between gap-2"><span className="text-xs font-semibold text-[#8b4b25]">Pending payable {formatCurrency(Number(salesReturn.pendingRefundPayable))}</span><button type="button" onClick={() => { setPendingSettlementId(salesReturn.id); setPendingSettlementAmount(String(Number(salesReturn.pendingRefundPayable))); }} className="rounded-lg border border-[#eadfc8] px-3 py-1.5 text-xs font-semibold text-[#765000] hover:bg-[#fffaf0]">Settle pending</button></div>{pendingSettlementId === salesReturn.id && <div className="mt-3 grid gap-2 sm:grid-cols-4"><input type="number" min="0.01" max={Number(salesReturn.pendingRefundPayable)} step="0.01" value={pendingSettlementAmount} onChange={(event) => setPendingSettlementAmount(event.target.value)} aria-label="Amount to settle" className="h-9 rounded-lg border border-[#e8e4dd] px-2 text-sm" /><select value={pendingSettlementMethod} onChange={(event) => setPendingSettlementMethod(event.target.value as typeof pendingSettlementMethod)} aria-label="Settlement method" className="h-9 rounded-lg border border-[#e8e4dd] bg-white px-2 text-sm"><option value="CASH">Cash</option><option value="UPI">UPI</option><option value="BANK">Bank</option><option value="OTHER">Other</option></select><input value={pendingSettlementReference} onChange={(event) => setPendingSettlementReference(event.target.value)} placeholder="Reference (optional)" maxLength={120} className="h-9 rounded-lg border border-[#e8e4dd] px-2 text-sm" /><button type="button" disabled={savingPendingSettlement || !Number(pendingSettlementAmount)} onClick={() => void settlePendingRefund(salesReturn.id)} className="h-9 rounded-lg bg-[#ffe4a0] px-3 text-sm font-semibold text-[#493819] disabled:opacity-50">{savingPendingSettlement ? 'Saving…' : 'Record settlement'}</button></div>}</div>}</div>)}</div></details>}
               </div>
-              {confirmReturnOpen && <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/45 p-4" onClick={() => !savingReturn && setConfirmReturnOpen(false)}><section role="alertdialog" aria-modal="true" aria-labelledby="confirm-sales-return-title" onClick={(event) => event.stopPropagation()} className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl"><h3 id="confirm-sales-return-title" className="text-lg font-bold text-[#272727]">Confirm sales return</h3><p className="mt-2 text-sm text-[#68645e]">Return these {returnPreview.items.length} product line(s) for <strong className="text-[#272727]">{formatCurrency(returnPreview.amount)}</strong>?</p><div className="mt-3 max-h-40 space-y-2 overflow-y-auto rounded-xl border border-[#eee8df] p-3">{returnPreview.items.map((item) => <div key={item.saleItemId} className="flex items-start justify-between gap-3 text-sm"><span className="font-medium text-[#272727]">{item.productName}<span className="ml-2 text-[#77736d]">× {item.displayQuantity.toLocaleString('en-IN')} {item.unitLabel}</span></span><strong className="shrink-0 text-[#493819]">{formatCurrency(item.amount)}</strong></div>)}</div><div className="mt-3 rounded-xl bg-[#fffaf0] p-3 text-sm"><p className="font-semibold text-[#493819]">{returnPreview.settlementAmount <= 0 ? 'Applied to invoice balance' : returnSettlement === 'REFUND' ? `Refund ${formatCurrency(returnPreview.settlementAmount)} now` : returnSettlement === 'CUSTOMER_CREDIT' ? `Add ${formatCurrency(returnPreview.settlementAmount)} to customer credit` : `${formatCurrency(returnPreview.settlementAmount)} refund pending`}</p><p className="mt-1 text-[#77736d]">Reason: {returnReason.trim()}</p></div><div className="mt-5 flex justify-end gap-2"><button type="button" disabled={savingReturn} onClick={() => setConfirmReturnOpen(false)} className="h-10 rounded-lg border border-[#e8e4dd] px-4 text-sm font-semibold text-[#625d54] hover:bg-[#f8f7f4] disabled:opacity-50">Go back</button><button type="button" disabled={savingReturn} onClick={() => void submitSalesReturn()} className="h-10 rounded-lg bg-[#c58a00] px-4 text-sm font-bold text-white hover:bg-[#a97000] disabled:opacity-50">{savingReturn ? 'Recording…' : 'Confirm return'}</button></div></section></div>}
+
+              <footer className="flex shrink-0 flex-col gap-2 border-t border-[#eee8df] bg-white px-4 py-2 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+                <div className="flex min-w-0 flex-1 items-center justify-between gap-3 rounded-lg bg-[#fff7e5] px-3 py-2 sm:max-w-[48%]"><span className="text-xs font-semibold text-[#272727]">Total return amount</span><strong className="text-lg font-bold text-[#9a6200]">{formatCurrency(returnPreview.amount)}</strong></div>
+                <div className="flex shrink-0 justify-end gap-2"><button type="button" disabled={savingReturn || savingPendingSettlement} onClick={() => setInvoiceDetail(null)} className="h-9 rounded-lg border border-[#e1dcd4] px-3 text-xs font-semibold text-[#4e4b46] hover:bg-[#f8f7f4] disabled:opacity-50">Cancel</button><button type="button" disabled={savingReturn || !returnReason.trim() || !returnPreview.items.length} onClick={() => setConfirmReturnOpen(true)} className="h-9 rounded-lg bg-[#b77700] px-4 text-xs font-semibold text-white shadow-sm hover:bg-[#965f00] disabled:cursor-not-allowed disabled:opacity-50">Confirm Sales Return</button></div>
+              </footer>
+
+              {confirmReturnOpen && <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/45 p-4" onClick={() => !savingReturn && setConfirmReturnOpen(false)}><section role="alertdialog" aria-modal="true" aria-labelledby="confirm-sales-return-title" onClick={(event) => event.stopPropagation()} className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl"><h3 id="confirm-sales-return-title" className="text-lg font-bold text-[#272727]">Confirm sales return</h3><p className="mt-2 text-sm text-[#68645e]">Return these {returnPreview.items.length} product line(s) for <strong className="text-[#272727]">{formatCurrency(returnPreview.amount)}</strong>?</p><div className="mt-3 max-h-40 space-y-2 overflow-y-auto rounded-xl border border-[#eee8df] p-3">{returnPreview.items.map((item) => <div key={item.saleItemId} className="flex items-start justify-between gap-3 text-sm"><span className="font-medium text-[#272727]">{item.productName}<span className="ml-2 text-[#77736d]">× {item.displayQuantity.toLocaleString('en-IN')} {item.unitLabel}</span></span><strong className="shrink-0 text-[#493819]">{formatCurrency(item.amount)}</strong></div>)}</div><div className="mt-3 rounded-xl bg-[#fffaf0] p-3 text-sm"><p className="font-semibold text-[#493819]">{returnPreview.settlementAmount <= 0 ? 'Applied to invoice balance' : returnSettlement === 'REFUND' ? `Refund ${formatCurrency(returnPreview.settlementAmount)} now` : returnSettlement === 'CUSTOMER_CREDIT' ? `Add ${formatCurrency(returnPreview.settlementAmount)} to customer credit` : `${formatCurrency(returnPreview.settlementAmount)} refund pending`}</p><p className="mt-1 text-[#77736d]">Reason: {returnReason.trim()}{returnNotes.trim() ? ` · ${returnNotes.trim()}` : ''}</p></div><div className="mt-5 flex justify-end gap-2"><button type="button" disabled={savingReturn} onClick={() => setConfirmReturnOpen(false)} className="h-10 rounded-lg border border-[#e8e4dd] px-4 text-sm font-semibold text-[#625d54] hover:bg-[#f8f7f4] disabled:opacity-50">Go back</button><button type="button" disabled={savingReturn} onClick={() => void submitSalesReturn()} className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-[#b77700] px-4 text-sm font-bold text-white hover:bg-[#965f00] disabled:opacity-50">{savingReturn && <LoaderCircle size={16} className="animate-spin" aria-hidden="true" />}{savingReturn ? 'Returning...' : 'Confirm return'}</button></div></section></div>}
             </>}
           </section>
         </div>
-      )}
-
-      <article className="daily-register-print-only" aria-label="Printable daily register">
+      )}      <article className="daily-register-print-only" aria-label="Printable daily register">
         <div className="register-print-heading">
           <div>
             <p className="register-print-brand">ABLE LUBES</p>

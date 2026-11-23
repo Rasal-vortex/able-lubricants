@@ -165,28 +165,38 @@ export const SalesBillEntryView: React.FC = () => {
     return due.toISOString().slice(0, 10);
   });
   const [savingSale, setSavingSale] = useState(false);
+  const saleIdempotencyKey = useRef(crypto.randomUUID());
   const [lastCompletedReceipt, setLastCompletedReceipt] = useState<ThermalReceipt | null>(null);
   const selectedCartItems = cartItems.filter((item) => item.productId);
   const selectedCustomer = customers.find((customer) => customer.name === customerName);
 
+  useEffect(() => {
+    if (selectedCustomer && Number(selectedCustomer.availableStoreCredit) > 0) return;
+    setSplitAmounts((current) => current.storeCredit ? { ...current, storeCredit: "" } : current);
+  }, [selectedCustomer?.id, selectedCustomer?.availableStoreCredit]);
+
   // Recalculations
-  const grossSubtotal = cartItems.reduce(
-    (acc, item) => acc + item.quantity * item.price,
+  const grossSubtotal = selectedCartItems.reduce(
+    (acc, item) => acc + Math.round((item.quantity * item.price + Number.EPSILON) * 100) / 100,
     0,
   );
 
   const remainingBeforeCoupon = Math.max(0, grossSubtotal - billDiscount);
   const enteredCouponPrice = couponPrice.trim() ? Number(couponPrice) : 0;
-  const couponDiscount = Number.isFinite(enteredCouponPrice)
+  const couponDiscount = couponEnabled && Number.isFinite(enteredCouponPrice)
     ? enteredCouponPrice
     : 0;
-  const finalTotal = Math.max(0, remainingBeforeCoupon - couponDiscount);
-  const splitTenderTotal =
+  const finalTotal = Math.round(Math.max(0, remainingBeforeCoupon - couponDiscount) * 100) / 100;
+  const splitTenderTotal = Math.round((
     Number(splitAmounts.cash || 0) +
     Number(splitAmounts.upi || 0) +
     Number(splitAmounts.coupon || 0) +
     Number(splitAmounts.credit || 0) +
-    Number(splitAmounts.storeCredit || 0);
+    Number(splitAmounts.storeCredit || 0)
+  ) * 100) / 100;
+  const splitTenderDifference = Math.round((splitTenderTotal - finalTotal) * 100) / 100;
+  const splitTenderValid = paymentMode !== "Split" || splitTenderDifference === 0;
+  const manualDiscountInvalid = billDiscount < 0 || billDiscount > grossSubtotal;
   const quantityTotals = cartItems.reduce((totals, item) => {
     if (!item.productId) return totals;
     const product = products.find((entry) => entry.id === item.productId);
@@ -481,6 +491,7 @@ export const SalesBillEntryView: React.FC = () => {
       });
       setCustomerName(cleanName);
       setCustomerType("registered");
+      setSplitAmounts((current) => ({ ...current, storeCredit: "" }));
       setCustomerModalOpen(false);
       setNewCustomerName("");
       setNewCustomerPhone("");
@@ -523,6 +534,10 @@ export const SalesBillEntryView: React.FC = () => {
 
   const handleCompleteSale = async () => {
     if (savingSale) return;
+    if (manualDiscountInvalid) {
+      showToast("Discount cannot exceed the product subtotal.", "error");
+      return;
+    }
     if (selectedCartItems.length === 0) {
       showToast("Cannot complete sale with an empty cart.", "error");
       return;
@@ -646,6 +661,40 @@ export const SalesBillEntryView: React.FC = () => {
       );
       return;
     }
+    if (!splitTenderValid) {
+      showToast(
+        splitTenderDifference < 0
+          ? `Payment is short by ${formatCurrency(Math.abs(splitTenderDifference))}.`
+          : `Payment exceeds the bill by ${formatCurrency(splitTenderDifference)}.`,
+        "error",
+      );
+      return;
+    }
+    const storeCreditAmount = Number(splitAmounts.storeCredit || 0);
+    if (!Number.isFinite(storeCreditAmount) || storeCreditAmount < 0 || !Number.isInteger(storeCreditAmount)) {
+      showToast("Store credit must be a whole rupee amount of zero or more.", "error");
+      return;
+    }
+    if (storeCreditAmount > (selectedCustomer?.availableStoreCredit || 0)) {
+      showToast("Store credit entered exceeds the customer's available balance.", "error");
+      return;
+    }
+    if (storeCreditAmount > 0 && !selectedCustomer) {
+      showToast("Select a customer to use store credit.", "error");
+      return;
+    }
+    if (paymentMode === "Split" && storeCreditAmount > 0) {
+      const otherTenderTotal =
+        Number(splitAmounts.cash || 0) +
+        Number(splitAmounts.upi || 0) +
+        Number(splitAmounts.coupon || 0) +
+        Number(splitAmounts.credit || 0);
+      const remainingAfterOtherTenders = Math.max(0, finalTotal - otherTenderTotal);
+      if (storeCreditAmount > remainingAfterOtherTenders) {
+        showToast("Store credit cannot exceed the bill amount left after the other payment methods.", "error");
+        return;
+      }
+    }
     if (
       paymentMode === "Split" &&
       Math.abs(splitTenderTotal - finalTotal) > 0.01
@@ -654,14 +703,6 @@ export const SalesBillEntryView: React.FC = () => {
         "The split payment amounts must add up to the bill total.",
         "error",
       );
-      return;
-    }
-    if (Number(splitAmounts.storeCredit || 0) > (selectedCustomer?.availableStoreCredit || 0)) {
-      showToast("Store credit entered exceeds the customer's available balance.", "error");
-      return;
-    }
-    if (Number(splitAmounts.storeCredit || 0) > 0 && !selectedCustomer) {
-      showToast("Select a customer to use store credit.", "error");
       return;
     }
     const splitCouponAmount = Number(splitAmounts.coupon || 0);
@@ -684,6 +725,21 @@ export const SalesBillEntryView: React.FC = () => {
           { method: "Store credit", amount: Number(splitAmounts.storeCredit || 0) },
         ].filter((payment) => payment.amount > 0)
       : paymentMode === "Credit" ? [] : [{ method: paymentMode, amount: finalTotal }];
+    const paymentTenders = paymentMode === "Split"
+      ? [
+          { method: "CASH" as const, amount: Number(splitAmounts.cash || 0) },
+          { method: "UPI" as const, amount: Number(splitAmounts.upi || 0), ...(upiRef.trim() ? { notes: `UPI reference: ${upiRef.trim()}` } : {}) },
+          { method: "COUPON" as const, amount: Number(splitAmounts.coupon || 0) },
+          { method: "STORE_CREDIT" as const, amount: Number(splitAmounts.storeCredit || 0) },
+          { method: "CREDIT" as const, amount: Number(splitAmounts.credit || 0) },
+        ].filter((tender) => tender.amount > 0)
+      : paymentMode === "Credit"
+        ? [{ method: "CREDIT" as const, amount: finalTotal }]
+        : [{
+            method: paymentMode.toUpperCase() as "CASH" | "UPI",
+            amount: finalTotal,
+            ...(paymentMode === "UPI" && upiRef.trim() ? { notes: `UPI reference: ${upiRef.trim()}` } : {}),
+          }];
     const receiptItems = selectedCartItems.map((item) => {
       const product = products.find((entry) => entry.id === item.productId);
       const gramEntry = isKilogramProduct(product);
@@ -700,6 +756,7 @@ export const SalesBillEntryView: React.FC = () => {
     setSavingSale(true);
     try {
       const savedSale = await addSale({
+        idempotencyKey: saleIdempotencyKey.current,
         billNumber,
         date: billDate,
         dateTime: `${billDate} ${saleTime}`,
@@ -708,31 +765,7 @@ export const SalesBillEntryView: React.FC = () => {
         itemsCount: selectedCartItems.length,
         itemsList: itemNames,
         paymentMode,
-        ...(paymentMode === "Split"
-          ? {
-              paymentTenders: [
-                {
-                  method: "CASH" as const,
-                  amount: Number(splitAmounts.cash || 0),
-                },
-                {
-                  method: "UPI" as const,
-                  amount: Number(splitAmounts.upi || 0),
-                },
-                ...(Number(splitAmounts.coupon || 0) > 0
-                  ? [
-                      {
-                        method: "COUPON" as const,
-                        amount: Number(splitAmounts.coupon),
-                      },
-                    ]
-                  : []),
-                ...(Number(splitAmounts.storeCredit || 0) > 0
-                  ? [{ method: "STORE_CREDIT" as const, amount: Number(splitAmounts.storeCredit) }]
-                  : []),
-              ].filter((tender) => tender.amount > 0),
-            }
-          : {}),
+        paymentTenders,
         upiRef:
           paymentMode === "UPI" && upiRef.trim() ? upiRef.trim() : undefined,
         amount: finalTotal,
@@ -791,7 +824,7 @@ export const SalesBillEntryView: React.FC = () => {
           subtotal: grossSubtotal,
           billDiscount,
           couponCode: couponCodeProvided ? normalizedCouponCode : undefined,
-          couponDiscount: paymentMode === "Split" ? 0 : couponDiscount,
+          couponDiscount,
           total: receiptTotal,
           payments: receiptPayments,
           balanceDue: Math.max(0, receiptTotal - paidAmount),
@@ -807,6 +840,7 @@ export const SalesBillEntryView: React.FC = () => {
         setCouponPrice("");
         setCouponEnabled(false);
         setUpiRef("");
+        saleIdempotencyKey.current = crypto.randomUUID();
       }
     } finally {
       setSavingSale(false);
@@ -820,7 +854,7 @@ export const SalesBillEntryView: React.FC = () => {
           <div className="min-w-0">
             <label htmlFor="customer-search" className="mb-1 block text-sm font-semibold text-[#272727]">Customer</label>
             <div className="flex min-w-0 gap-2">
-              <select id="customer-search" className="h-11 min-w-0 flex-1 rounded-lg border border-[#dedbd6] bg-[#faf9f7] px-3 text-sm text-[#272727] outline-none focus:border-[#c58a00]" value={customerName} onChange={(event) => { setCustomerName(event.target.value); setCustomerType(event.target.value ? "registered" : "walkin"); }}>
+              <select id="customer-search" className="h-11 min-w-0 flex-1 rounded-lg border border-[#dedbd6] bg-[#faf9f7] px-3 text-sm text-[#272727] outline-none focus:border-[#c58a00]" value={customerName} onChange={(event) => { setCustomerName(event.target.value); setCustomerType(event.target.value ? "registered" : "walkin"); setSplitAmounts((current) => ({ ...current, storeCredit: "" })); }}>
                 <option value="">Walk-in / no customer</option>
                 {customers.map((customer) => <option key={customer.id} value={customer.name}>{customer.name}{customer.phone ? ` · ${customer.phone}` : ""}</option>)}
               </select>
@@ -1368,12 +1402,12 @@ export const SalesBillEntryView: React.FC = () => {
 
           {paymentMode === "Split" && (
             <div className="grid grid-cols-2 gap-2 rounded-lg border border-outline-variant/20 bg-surface-container-low p-3">
-              {(["cash", "upi", "coupon", "credit", "storeCredit"] as const).map((mode) => (
+              {(["cash", "upi", "coupon", "credit"] as const).map((mode) => (
                 <label
                   key={mode}
                   className="text-xs font-semibold text-on-surface-variant"
                 >
-                  {mode === "coupon" ? "Coupon amount (₹)" : mode === "storeCredit" ? `Store credit (₹) · available ${formatCurrency(selectedCustomer?.availableStoreCredit || 0)}` : `${mode.toUpperCase()} amount (₹)`}
+                  {mode === "coupon" ? "Coupon amount (₹)" : `${mode.toUpperCase()} amount (₹)`}
                   <NumericTextInput
                     maxDecimals={0}
                     value={splitAmounts[mode]}
@@ -1382,6 +1416,18 @@ export const SalesBillEntryView: React.FC = () => {
                   />
                 </label>
               ))}
+              {selectedCustomer && Number(selectedCustomer.availableStoreCredit) > 0 && (
+                <label className="text-xs font-semibold text-on-surface-variant">
+                  Store Credit · Available {formatCurrency(Number(selectedCustomer.availableStoreCredit))} (₹)
+                  <NumericTextInput
+                    min={0}
+                    maxDecimals={0}
+                    value={splitAmounts.storeCredit}
+                    onValueChange={(value) => setSplitAmounts((current) => ({ ...current, storeCredit: value }))}
+                    className="mt-1 h-11 w-full rounded border border-outline-variant/30 bg-white px-2 text-right text-lg font-semibold text-on-surface"
+                  />
+                </label>
+              )}
               {Number(splitAmounts.credit || 0) > 0 &&
                 (customerType !== "registered" || !customerName) && (
                 <p className="col-span-2 text-xs text-on-surface-variant">
@@ -1393,8 +1439,9 @@ export const SalesBillEntryView: React.FC = () => {
                 (customerType !== "registered" || !selectedCustomer) && (
                   <p className="col-span-2 text-xs text-red-700">Select a registered customer to use store credit.</p>
                 )}
-              <p className="col-span-2 text-sm text-on-surface-variant">
-                Entered: <span className="text-base font-semibold text-on-surface">{formatCurrency(splitTenderTotal)} / {formatCurrency(finalTotal)}</span>
+              <p className={`col-span-2 text-sm ${splitTenderValid ? "text-on-surface-variant" : "text-red-700"}`} role={splitTenderValid ? undefined : "alert"}>
+                Entered: <span className="text-base font-semibold">{formatCurrency(splitTenderTotal)} / {formatCurrency(finalTotal)}</span>
+                {!splitTenderValid && <span className="ml-2 font-semibold">{splitTenderDifference < 0 ? `Remaining ${formatCurrency(Math.abs(splitTenderDifference))}` : `Over by ${formatCurrency(splitTenderDifference)}`}</span>}
               </p>
             </div>
           )}
@@ -1451,7 +1498,7 @@ export const SalesBillEntryView: React.FC = () => {
               </button>
             <button
               type="button"
-              disabled={savingSale || selectedCartItems.length === 0}
+              disabled={savingSale || selectedCartItems.length === 0 || manualDiscountInvalid || !splitTenderValid}
               className="flex min-h-12 flex-1 items-center justify-center gap-2 rounded-xl bg-[#ffc21a] text-base font-bold text-[#171717] shadow-sm transition hover:bg-[#ffb900] disabled:cursor-not-allowed disabled:opacity-50"
               onClick={handleCompleteSale}
             >
