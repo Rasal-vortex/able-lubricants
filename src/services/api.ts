@@ -188,8 +188,35 @@ export interface ProductPayload {
   active?: boolean;
 }
 
+export interface ProductBatchInput {
+  clientKey?: string;
+  label?: string | null;
+  quantity: number;
+  purchaseRate: number;
+  sellingRate: number;
+  mrp?: number | null;
+  isDefaultSellingRate?: boolean;
+}
+
+export interface ProductBatchPricingUpdate {
+  updates: Array<{
+    id: string;
+    label?: string | null;
+    remainingQuantity: number;
+    sellingRate: number;
+    mrp?: number | null;
+  }>;
+  additions: ProductBatchInput[];
+  defaultBatchKey: string | null;
+}
+
+export type UpdateProductPayload = Partial<ProductPayload> & {
+  batchPricing?: ProductBatchPricingUpdate;
+};
+
 export interface CreateProductPayload extends ProductPayload {
   qty?: number;
+  batches?: Array<ProductBatchInput & { isDefaultSellingRate: boolean }>;
 }
 
 export interface ApiBrand {
@@ -228,6 +255,9 @@ export interface ApiProduct {
     label?: string | null;
     purchaseRate: string | number;
     sellingRate: string | number;
+    mrp?: string | number | null;
+    isDefaultSellingRate?: boolean;
+    receivedQuantity?: string | number;
     remainingQuantity: string | number;
     receivedAt: string;
     source: 'PURCHASE' | 'OPENING' | 'ADJUSTMENT';
@@ -452,7 +482,9 @@ export interface ApiPurchase {
       label?: string | null;
       purchaseRate: string | number;
       sellingRate: string | number;
-      receivedQuantity: string | number;
+      mrp?: string | number | null;
+      isDefaultSellingRate?: boolean;
+      receivedQuantity?: string | number;
       remainingQuantity: string | number;
       receivedAt: string;
       source: 'PURCHASE' | 'OPENING' | 'ADJUSTMENT';
@@ -635,7 +667,7 @@ export const updateSupplierRequest = (token: string, id: string, payload: Partia
 export const createProductRequest = (token: string, payload: CreateProductPayload) =>
   apiRequest<ApiProduct>('/products', { method: 'POST', body: JSON.stringify(payload) }, token);
 
-export const updateProductRequest = (token: string, id: string, payload: Partial<ProductPayload>) =>
+export const updateProductRequest = (token: string, id: string, payload: UpdateProductPayload) =>
   apiRequest<ApiProduct>(`/products/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(payload) }, token);
 
 export const createStockAdjustmentRequest = (token: string, payload: StockAdjustmentPayload) =>

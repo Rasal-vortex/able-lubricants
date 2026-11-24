@@ -56,7 +56,7 @@ import {
   getUnits,
   loginRequest,
   logoutRequest,
-  ProductPayload,
+  UpdateProductPayload,
   CreateSalePayload,
   CreateCreditBillPayload,
   CreatePurchasePayload,
@@ -156,6 +156,9 @@ const mapProduct = (product: ApiProduct): Product => ({
     label: batch.label,
     purchaseRate: Number(batch.purchaseRate),
     sellingRate: Number(batch.sellingRate),
+    mrp: batch.mrp == null ? null : Number(batch.mrp),
+    isDefaultSellingRate: Boolean(batch.isDefaultSellingRate),
+    receivedQuantity: Number(batch.receivedQuantity ?? batch.remainingQuantity),
     remainingQuantity: Number(batch.remainingQuantity),
     receivedAt: batch.receivedAt,
     source: batch.source,
@@ -219,7 +222,7 @@ interface AppContextType {
   createUnit: (name: string, symbol: string | null, allowsDecimals: boolean) => Promise<ApiUnit>;
   updateUnit: (id: string, payload: { name: string; symbol: string | null; allowsDecimals: boolean }) => Promise<ApiUnit>;
   addProduct: (product: CreateProductPayload) => Promise<Product>;
-  updateProduct: (id: string, updates: Partial<ProductPayload>) => Promise<void>;
+  updateProduct: (id: string, updates: UpdateProductPayload) => Promise<void>;
   adjustProductStock: (
     id: string,
     quantity: number,
@@ -652,20 +655,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return newProduct;
   };
 
-  const updateProduct = async (id: string, updates: Partial<ProductPayload>) => {
+  const updateProduct = async (id: string, updates: UpdateProductPayload) => {
     if (!authSession) throw new Error('Sign in to update products.');
-    await updateProductRequest(authSession.token, id, updates);
-    setProducts((prev) => prev.map((product) => product.id === id ? {
-      ...product,
-      ...updates,
-      mrp: updates.mrp === null ? 0 : updates.mrp ?? product.mrp,
-      brand: updates.brandId ? brands.find((brand) => brand.id === updates.brandId)?.name || product.brand : product.brand,
-      unit: updates.unitId ? (() => {
-        const unit = units.find((candidate) => candidate.id === updates.unitId);
-        return unit?.symbol || unit?.name || product.unit;
-      })() : product.unit,
-      unitAllowsDecimals: updates.unitId ? units.find((candidate) => candidate.id === updates.unitId)?.allowsDecimals ?? false : product.unitAllowsDecimals,
-    } : product));
+    const updated = await updateProductRequest(authSession.token, id, updates);
+    const mapped = mapProduct(updated);
+    setProducts((prev) => prev.map((product) => product.id === id ? mapped : product));
     showToast(`Product details updated successfully.`);
   };
 
@@ -1348,6 +1342,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             label: item.inventoryBatch!.label,
             purchaseRate: Number(item.inventoryBatch!.purchaseRate),
             sellingRate: Number(item.inventoryBatch!.sellingRate),
+            mrp: item.inventoryBatch!.mrp == null ? null : Number(item.inventoryBatch!.mrp),
+            isDefaultSellingRate: Boolean(item.inventoryBatch!.isDefaultSellingRate),
+            receivedQuantity: Number(item.inventoryBatch!.receivedQuantity ?? item.inventoryBatch!.remainingQuantity),
             remainingQuantity: Number(item.inventoryBatch!.remainingQuantity),
             receivedAt: item.inventoryBatch!.receivedAt,
             source: item.inventoryBatch!.source,

@@ -7,7 +7,6 @@ import {
   LoaderCircle,
   Printer,
   Plus,
-  RotateCcw,
   Search,
   ShoppingCart,
   X,
@@ -102,13 +101,14 @@ export const DailySalesManagementView: React.FC = () => {
   const [apiSalesReturns, setApiSalesReturns] = useState<Array<{ id: string; date: string; invoiceNumber: string; customer: string; reason: string; amount: number; creditAppliedAmount: number; settlementType: string; returnedBy?: string | null; settlements: Array<{ id: string; type: string; amount: number; method?: string | null; reference?: string | null; date: string }> }>>([]);
   const [apiCreditCancellations, setApiCreditCancellations] = useState<Array<{ id: string; date: string; invoiceNumber: string; customer: string; reason: string; amount: number; actualReceivedAmount: number; pendingRefundAmount: number; cancelledBy?: string | null; recordedPayments: Array<{ id: string; method: string; amount: number }>; actualPayments: Array<{ method: string; amount: number }>; paymentCorrections: Array<{ id: string; type: string; method: string; amount: number; date: string }>; refunds: Array<{ id: string; amount: number; method: string; reference?: string | null; date: string }> }>>([]);
   const [invoiceDetail, setInvoiceDetail] = useState<ApiSaleReturnDetail | null>(null);
+  const [returnDetailsOnly, setReturnDetailsOnly] = useState(false);
   const [selectedTransaction, setSelectedTransaction] = useState<TransactionHistoryEntry | null>(null);
   const [invoiceLoading, setInvoiceLoading] = useState(false);
   const [returnQuantities, setReturnQuantities] = useState<Record<string, string>>({});
   const [returnReason, setReturnReason] = useState('');
   const [returnNotes, setReturnNotes] = useState('');
   const [returnReasonPreset, setReturnReasonPreset] = useState('');
-  const [returnSettlement, setReturnSettlement] = useState<'REFUND' | 'CUSTOMER_CREDIT' | 'PENDING'>('PENDING');
+  const [returnSettlement, setReturnSettlement] = useState<'REFUND' | 'CUSTOMER_CREDIT' | 'PENDING'>('REFUND');
   const [refundMethod, setRefundMethod] = useState<'CASH' | 'UPI' | 'BANK' | 'OTHER'>('CASH');
   const [refundReference, setRefundReference] = useState('');
   const [savingReturn, setSavingReturn] = useState(false);
@@ -249,18 +249,21 @@ export const DailySalesManagementView: React.FC = () => {
     return () => { cancelled = true; };
   }, [authSession, fromDate, toDate, showToast, refreshRegister]);
 
-  const openInvoice = async (saleId: string) => {
+  const openInvoice = async (saleId: string, fromReturnButton = false) => {
     if (!authSession) return;
     setInvoiceLoading(true);
     setInvoiceDetail(null);
+    setReturnDetailsOnly(false);
     setReturnQuantities({});
     setReturnReason('');
     setReturnNotes('');
     setReturnReasonPreset('');
+    setReturnSettlement('REFUND');
     setPendingSettlementId(null);
     try {
       const invoice = await getSaleForReturnRequest(authSession.token, saleId);
       setInvoiceDetail(invoice);
+      setReturnDetailsOnly(fromReturnButton && invoice.returns.length > 0);
       setReturnQuantities(defaultReturnQuantities(invoice));
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Invoice details could not be loaded.', 'error');
@@ -660,19 +663,19 @@ console.log(pageSales,"pageSales");
       {activeTab === 'sales' ? (
         <motion.section key="sales-panel" initial={{ opacity: 0, y: 7 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.2, ease: 'easeOut' }} className="overflow-hidden rounded-xl border border-[#e9e3d9] bg-white shadow-sm" role="tabpanel" aria-label="Sales records">
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[850px] border-collapse text-left">
+            <table className="w-full min-w-[950px] border-collapse text-left">
               <thead><tr className="h-10 bg-[#f6f5f2] text-xs font-bold uppercase tracking-wide text-[#6d685f]">
-                <th className="px-4 py-2">Date &amp; time</th><th className="px-4 py-2">Bill number</th><th className="px-4 py-2">Product name</th><th className="px-4 py-2 text-right">Payments received (₹)</th><th className="px-4 py-2 text-center">Mode of payment</th><th className="px-4 py-2 text-center">Receipt</th>
+                <th className="px-4 py-2">Date &amp; time</th><th className="px-4 py-2">Bill number</th><th className="px-4 py-2">Product name</th><th className="px-4 py-2 text-right">Payments received (₹)</th><th className="px-4 py-2 text-center">Mode of payment</th><th className="px-4 py-2 text-center">Return</th><th className="px-4 py-2 text-center">Receipt</th>
               </tr></thead>
               <tbody className="divide-y divide-[#efede8] text-sm text-[#272727]">
                 {apiLoading ? (
-                  <tr><td colSpan={6} className="px-4 py-14 text-center"><LoaderOne /></td></tr>
+                  <tr><td colSpan={7} className="px-4 py-14 text-center"><LoaderOne /></td></tr>
                 ) : pageSales.map((item) => (
                   <tr key={item.id} className="h-11 transition hover:bg-[#fffdf8]">
                     <td className="whitespace-nowrap px-4 py-2 text-xs text-[#68645e]">{formatSaleDateTime(item.dateTime)}</td>
                     <td className="whitespace-nowrap px-4 py-2 font-semibold text-[#a86600]">
-                      {item.saleId ? <button type="button" onClick={() => void openInvoice(item.saleId!)} className="inline-flex items-center gap-1.5 underline decoration-[#dfbd7b] underline-offset-2 hover:text-[#765000]"><RotateCcw size={13} />{item.billNumber}</button> : item.billNumber}
-                      {item.returnStatus && item.returnStatus !== 'NONE' && <span className="mt-1 block rounded-full bg-[#fff1c9] px-2 py-0.5 text-[10px] font-bold text-[#765000]">{item.returnStatus === 'FULLY_RETURNED' ? 'Fully Returned' : 'Partially Returned'}</span>}
+                      {item.billNumber}
+                      {item.returnStatus && item.returnStatus !== 'NONE' && <span className={`mt-1 block rounded-full px-2 py-0.5 text-[10px] font-bold ${item.returnStatus === 'FULLY_RETURNED' ? 'bg-[#FEE2E2] text-[#991B1B]' : 'bg-[#FFEDD5] text-[#9A3412]'}`}>{item.returnStatus === 'FULLY_RETURNED' ? 'Fully Returned' : 'Partially Returned'}</span>}
                     </td>
                     <td className="max-w-[440px] px-4 py-2">
                       <div className="space-y-1" title={item.itemsList}>
@@ -715,13 +718,16 @@ console.log(pageSales,"pageSales");
                       </div>
                     </td>
                     <td className="px-4 py-2 text-center">
+                      <button type="button" disabled={!item.saleId} onClick={() => item.saleId && void openInvoice(item.saleId, true)} className="h-8 rounded-md border border-[#e8e4dd] bg-white px-3 text-xs font-semibold text-[#493819] transition hover:bg-[#fff7e7] disabled:cursor-not-allowed disabled:opacity-50">Return</button>
+                    </td>
+                    <td className="px-4 py-2 text-center">
                       <button type="button" onClick={() => handlePrintSale(item)} title="Print or save receipt as PDF" aria-label={`Print receipt for ${item.billNumber}`} className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#e8e4dd] bg-white px-2.5 text-xs font-semibold text-[#493819] transition hover:bg-[#fff7e7]">
                         <Printer size={15} aria-hidden="true" /><span>Print / PDF</span>
                       </button>
                     </td>
                   </tr>
                 ))}
-                {!apiLoading && filteredSales.length === 0 && <tr><td colSpan={6} className="px-4 py-12 text-center text-sm text-[#77736d]">No sales match this date range and filter.</td></tr>}
+                {!apiLoading && filteredSales.length === 0 && <tr><td colSpan={7} className="px-4 py-12 text-center text-sm text-[#77736d]">No sales match this date range and filter.</td></tr>}
               </tbody>
             </table>
           </div>
@@ -773,8 +779,8 @@ console.log(pageSales,"pageSales");
         </div>
       )}
 
-      {(invoiceLoading || invoiceDetail) && (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-2 sm:p-3" onClick={() => { if (!savingReturn && !savingPendingSettlement) setInvoiceDetail(null); }}>
+      {(invoiceLoading || (invoiceDetail && !returnDetailsOnly)) && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-2 sm:p-3" onClick={() => { if (!savingReturn && !savingPendingSettlement) { setInvoiceDetail(null); setReturnDetailsOnly(false); } }}>
           <section role="dialog" aria-modal="true" aria-labelledby="sales-return-title" onClick={(event) => event.stopPropagation()} className="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl">
             {invoiceLoading || !invoiceDetail ? (
               <div className="flex h-56 items-center justify-center"><LoaderOne /></div>
@@ -783,9 +789,9 @@ console.log(pageSales,"pageSales");
                 <div className="min-w-0">
                   <h2 id="sales-return-title" className="text-xl font-bold tracking-tight text-[#171717] sm:text-2xl">Sales Return</h2>
                   <p className="mt-0.5 text-xs text-[#5e5b56] sm:text-sm">Invoice {invoiceDetail.invoiceNumber} <span className="mx-1 text-[#b5aea2]">·</span> {invoiceDetail.customer?.name || 'Walk-in customer'} <span className="mx-1 text-[#b5aea2]">·</span> {reportDate(String(invoiceDetail.billDate).slice(0, 10))}</p>
-                  <span className="mt-1 inline-flex rounded-full bg-[#fff1d0] px-2 py-0.5 text-[10px] font-semibold text-[#765000]">{invoiceDetail.returnStatus === 'FULLY_RETURNED' ? 'Fully returned' : invoiceDetail.returnStatus === 'PARTIALLY_RETURNED' ? 'Partially returned' : 'Original invoice preserved'}</span>
+                  <span className={`mt-1 inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ${invoiceDetail.returnStatus === 'FULLY_RETURNED' ? 'bg-[#FEE2E2] text-[#991B1B]' : invoiceDetail.returnStatus === 'PARTIALLY_RETURNED' ? 'bg-[#FFEDD5] text-[#9A3412]' : 'bg-[#fff1d0] text-[#765000]'}`}>{invoiceDetail.returnStatus === 'FULLY_RETURNED' ? 'Fully returned' : invoiceDetail.returnStatus === 'PARTIALLY_RETURNED' ? 'Partially returned' : 'Original invoice preserved'}</span>
                 </div>
-                <button type="button" aria-label="Close sales return" disabled={savingReturn || savingPendingSettlement} onClick={() => setInvoiceDetail(null)} className="shrink-0 rounded-lg p-1.5 text-[#68645e] hover:bg-[#f6f5f2] disabled:opacity-50"><X size={18} /></button>
+                <button type="button" aria-label="Close sales return" disabled={savingReturn || savingPendingSettlement} onClick={() => { setInvoiceDetail(null); setReturnDetailsOnly(false); }} className="shrink-0 rounded-lg p-1.5 text-[#68645e] hover:bg-[#f6f5f2] disabled:opacity-50"><X size={18} /></button>
               </header>
 
               <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3 sm:px-5">
@@ -825,14 +831,51 @@ console.log(pageSales,"pageSales");
 
               <footer className="flex shrink-0 flex-col gap-2 border-t border-[#eee8df] bg-white px-4 py-2 sm:flex-row sm:items-center sm:justify-between sm:px-5">
                 <div className="flex min-w-0 flex-1 items-center justify-between gap-3 rounded-lg bg-[#fff7e5] px-3 py-2 sm:max-w-[48%]"><span className="text-xs font-semibold text-[#272727]">Total return amount</span><strong className="text-lg font-bold text-[#9a6200]">{formatCurrency(returnPreview.amount)}</strong></div>
-                <div className="flex shrink-0 justify-end gap-2"><button type="button" disabled={savingReturn || savingPendingSettlement} onClick={() => setInvoiceDetail(null)} className="h-9 rounded-lg border border-[#e1dcd4] px-3 text-xs font-semibold text-[#4e4b46] hover:bg-[#f8f7f4] disabled:opacity-50">Cancel</button><button type="button" disabled={savingReturn || !returnReason.trim() || !returnPreview.items.length} onClick={() => setConfirmReturnOpen(true)} className="h-9 rounded-lg bg-[#b77700] px-4 text-xs font-semibold text-white shadow-sm hover:bg-[#965f00] disabled:cursor-not-allowed disabled:opacity-50">Confirm Sales Return</button></div>
+                <div className="flex shrink-0 justify-end gap-2"><button type="button" disabled={savingReturn || savingPendingSettlement} onClick={() => { setInvoiceDetail(null); setReturnDetailsOnly(false); }} className="h-9 rounded-lg border border-[#e1dcd4] px-3 text-xs font-semibold text-[#4e4b46] hover:bg-[#f8f7f4] disabled:opacity-50">Cancel</button><button type="button" disabled={savingReturn || !returnReason.trim() || !returnPreview.items.length} onClick={() => setConfirmReturnOpen(true)} className="h-9 rounded-lg bg-[#b77700] px-4 text-xs font-semibold text-white shadow-sm hover:bg-[#965f00] disabled:cursor-not-allowed disabled:opacity-50">Confirm Sales Return</button></div>
               </footer>
 
               {confirmReturnOpen && <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/45 p-4" onClick={() => !savingReturn && setConfirmReturnOpen(false)}><section role="alertdialog" aria-modal="true" aria-labelledby="confirm-sales-return-title" onClick={(event) => event.stopPropagation()} className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl"><h3 id="confirm-sales-return-title" className="text-lg font-bold text-[#272727]">Confirm sales return</h3><p className="mt-2 text-sm text-[#68645e]">Return these {returnPreview.items.length} product line(s) for <strong className="text-[#272727]">{formatCurrency(returnPreview.amount)}</strong>?</p><div className="mt-3 max-h-40 space-y-2 overflow-y-auto rounded-xl border border-[#eee8df] p-3">{returnPreview.items.map((item) => <div key={item.saleItemId} className="flex items-start justify-between gap-3 text-sm"><span className="font-medium text-[#272727]">{item.productName}<span className="ml-2 text-[#77736d]">× {item.displayQuantity.toLocaleString('en-IN')} {item.unitLabel}</span></span><strong className="shrink-0 text-[#493819]">{formatCurrency(item.amount)}</strong></div>)}</div><div className="mt-3 rounded-xl bg-[#fffaf0] p-3 text-sm"><p className="font-semibold text-[#493819]">{returnPreview.settlementAmount <= 0 ? 'Applied to invoice balance' : returnSettlement === 'REFUND' ? `Refund ${formatCurrency(returnPreview.settlementAmount)} now` : returnSettlement === 'CUSTOMER_CREDIT' ? `Add ${formatCurrency(returnPreview.settlementAmount)} to customer credit` : `${formatCurrency(returnPreview.settlementAmount)} refund pending`}</p><p className="mt-1 text-[#77736d]">Reason: {returnReason.trim()}{returnNotes.trim() ? ` · ${returnNotes.trim()}` : ''}</p></div><div className="mt-5 flex justify-end gap-2"><button type="button" disabled={savingReturn} onClick={() => setConfirmReturnOpen(false)} className="h-10 rounded-lg border border-[#e8e4dd] px-4 text-sm font-semibold text-[#625d54] hover:bg-[#f8f7f4] disabled:opacity-50">Go back</button><button type="button" disabled={savingReturn} onClick={() => void submitSalesReturn()} className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-[#b77700] px-4 text-sm font-bold text-white hover:bg-[#965f00] disabled:opacity-50">{savingReturn && <LoaderCircle size={16} className="animate-spin" aria-hidden="true" />}{savingReturn ? 'Returning...' : 'Confirm return'}</button></div></section></div>}
             </>}
           </section>
         </div>
-      )}      <article className="daily-register-print-only" aria-label="Printable daily register">
+      )}
+      {invoiceDetail && returnDetailsOnly && !invoiceLoading && (() => {
+        const invoiceFullyReturned = invoiceDetail.items.length > 0 && invoiceDetail.items.every((item) => Number(item.remainingQuantity) <= 0.0000001);
+        return <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-3" onMouseDown={(event) => { if (event.target === event.currentTarget) { setInvoiceDetail(null); setReturnDetailsOnly(false); } }}>
+          <section role="dialog" aria-modal="true" aria-labelledby="return-details-title" className="flex max-h-[88vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl">
+            <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[#eee8df] px-4 py-3 sm:px-5">
+              <div><h2 id="return-details-title" className="text-lg font-bold text-[#272727]">Return details</h2><p className="mt-1 text-xs text-[#77736d]">Invoice {invoiceDetail.invoiceNumber} · {invoiceDetail.customer?.name || 'Walk-in customer'}</p>{invoiceFullyReturned && <span className="mt-2 inline-flex rounded-full bg-[#FEE2E2] px-2.5 py-1 text-xs font-semibold text-[#991B1B]">All products fully returned</span>}</div>
+              <button type="button" aria-label="Close return details" onClick={() => { setInvoiceDetail(null); setReturnDetailsOnly(false); }} className="rounded-lg p-1.5 text-[#68645e] hover:bg-[#f6f5f2]"><X size={18} /></button>
+            </header>
+            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4 sm:p-5">
+              <section><h3 className="mb-2 text-sm font-bold text-[#272727]">Returned products</h3><div className="divide-y divide-[#efede8] rounded-lg border border-[#eee8df]">
+                {invoiceDetail.items.filter((item) => Number(item.returnedQuantity) > 0).map((item) => {
+                  const fullyReturned = Number(item.remainingQuantity) <= 0.0000001;
+                  const soldQuantity = item.displayQuantity != null ? Number(item.displayQuantity) : Number(item.quantity);
+                  const returnedQuantity = item.displayQuantity != null ? Number(item.returnedDisplayQuantity || 0) : Number(item.returnedQuantity);
+                  return <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5"><div><p className="text-sm font-semibold text-[#272727]">{item.productName}</p><p className="text-xs text-[#77736d]">Returned {returnedQuantity.toLocaleString('en-IN')} of {soldQuantity.toLocaleString('en-IN')} {item.displayUnitSymbol || item.unitSymbol || item.unitName}</p></div><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${fullyReturned ? 'bg-[#FEE2E2] text-[#991B1B]' : 'bg-[#FFEDD5] text-[#9A3412]'}`}>{fullyReturned ? 'Fully returned' : 'Partially returned'}</span></div>;
+                })}
+              </div></section>
+              <section><h3 className="mb-2 text-sm font-bold text-[#272727]">Return and settlement history</h3><div className="space-y-2">
+                {invoiceDetail.returns.map((salesReturn) => {
+                  const refundSettlements = salesReturn.settlements.filter((settlement) => settlement.type === 'REFUND');
+                  const customerCredits = salesReturn.settlements.filter((settlement) => settlement.type === 'CUSTOMER_CREDIT');
+                  const pendingAmount = Number(salesReturn.pendingRefundPayable) || 0;
+                  return <article key={salesReturn.id} className="rounded-lg border border-[#eee8df] p-3">
+                    <div className="flex flex-wrap items-start justify-between gap-2"><div><p className="text-sm font-semibold text-[#272727]">{String(salesReturn.returnedAt).slice(0, 16).replace('T', ' ')} · {salesReturn.reason}</p><p className="mt-1 text-xs text-[#77736d]">{salesReturn.returnedBy?.name || 'Staff'} · {salesReturn.items.map((item) => `${item.productName} × ${Number(item.quantity).toLocaleString('en-IN')}`).join(', ')}</p></div><strong className="text-sm text-[#493819]">{formatCurrency(Number(salesReturn.amount))}</strong></div>
+                    {Number(salesReturn.creditAppliedAmount) > 0 && <p className="mt-2 text-xs text-[#375b9d]">Applied to invoice balance: {formatCurrency(Number(salesReturn.creditAppliedAmount))}</p>}
+                    {customerCredits.map((settlement) => <p key={settlement.id} className="mt-2 text-xs text-[#375b9d]">Customer credit recorded: {formatCurrency(Number(settlement.amount))} · {formatSaleDateTime(settlement.createdAt)}</p>)}
+                    {refundSettlements.map((settlement) => <div key={settlement.id} className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-md bg-[#eaf5ed] px-2.5 py-2 text-xs text-[#2f6d3d]"><span><strong>Refund settled · {settlement.method || 'Payment'}</strong>{settlement.reference && <span> · Ref: {settlement.reference}</span>}<span> · {formatSaleDateTime(settlement.createdAt)}</span></span><strong>{formatCurrency(Number(settlement.amount))}</strong></div>)}
+                    {pendingAmount > 0 && <p className="mt-2 rounded-md bg-[#fff5d9] px-2.5 py-2 text-xs font-semibold text-[#765000]">{refundSettlements.length ? 'Partially settled · refund still pending' : 'Refund pending'}: {formatCurrency(pendingAmount)}</p>}
+                  </article>;
+                })}
+              </div></section>
+            </div>
+            <footer className="flex justify-end border-t border-[#eee8df] px-4 py-3 sm:px-5"><button type="button" onClick={() => { setInvoiceDetail(null); setReturnDetailsOnly(false); }} className="h-9 rounded-lg border border-[#e1dcd4] px-4 text-sm font-semibold text-[#4e4b46] hover:bg-[#f8f7f4]">Close</button></footer>
+          </section>
+        </div>;
+      })()}
+      <article className="daily-register-print-only" aria-label="Printable daily register">
         <div className="register-print-heading">
           <div>
             <p className="register-print-brand">ABLE LUBES</p>

@@ -12,6 +12,90 @@ const isUuid = (value: string) =>
     value,
   );
 
+type BatchDraft = {
+  key: string;
+  id?: string;
+  label: string;
+  quantity: string;
+  purchaseRate: string;
+  sellingRate: string;
+  mrp: string;
+  isNew: boolean;
+};
+
+const createBatchDraft = (): BatchDraft => ({
+  key: crypto.randomUUID(),
+  label: "",
+  quantity: "",
+  purchaseRate: "",
+  sellingRate: "",
+  mrp: "",
+  isNew: true,
+});
+
+const getDistinctBatchPriceCount = (product: Product) => {
+  return getBatchPriceGroups(product).length;
+};
+
+const getBatchPriceGroups = (product: Product) => {
+  const groups = new Map<
+    string,
+    { purchaseRate: number; sellingRate: number; batches: Product["batches"] }
+  >();
+
+  product.batches
+    .filter((batch) => batch.remainingQuantity > 0)
+    .forEach((batch) => {
+      const key = `${batch.purchaseRate.toFixed(2)}:${batch.sellingRate.toFixed(2)}`;
+      const group = groups.get(key) ?? {
+        purchaseRate: batch.purchaseRate,
+        sellingRate: batch.sellingRate,
+        batches: [],
+      };
+      group.batches.push(batch);
+      groups.set(key, group);
+    });
+
+  return Array.from(groups.values())
+    .map((group) => {
+      const receivedDates = group.batches
+        .map((batch) => new Date(batch.receivedAt))
+        .filter((date) => Number.isFinite(date.getTime()))
+        .sort((a, b) => a.getTime() - b.getTime());
+      const dateLabel = (date: Date) =>
+        date.toLocaleDateString("en-US", {
+          month: "short",
+          day: "numeric",
+          year: "numeric",
+        });
+      const dateRangeLabel = (start: Date, end: Date) => {
+        if (start.toDateString() === end.toDateString()) return dateLabel(start);
+        if (start.getFullYear() === end.getFullYear() && start.getMonth() === end.getMonth()) {
+          const month = start.toLocaleDateString("en-US", { month: "short" });
+          return `${month} ${start.getDate()} – ${end.getDate()}, ${start.getFullYear()}`;
+        }
+        if (start.getFullYear() === end.getFullYear()) {
+          const startLabel = start.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+          const endLabel = end.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+          return `${startLabel} – ${endLabel}, ${start.getFullYear()}`;
+        }
+        return `${dateLabel(start)} – ${dateLabel(end)}`;
+      };
+      const firstDate = receivedDates[0];
+      const lastDate = receivedDates[receivedDates.length - 1];
+
+      return {
+        ...group,
+        quantity: group.batches.reduce((total, batch) => total + batch.remainingQuantity, 0),
+        purchaseDate: firstDate
+          ? dateRangeLabel(firstDate, lastDate ?? firstDate)
+          : "—",
+        firstReceivedAt: firstDate?.getTime() ?? Number.MAX_SAFE_INTEGER,
+      };
+    })
+    .sort((a, b) => a.firstReceivedAt - b.firstReceivedAt);
+};
+
 export const ProductEntryView: React.FC = () => {
   const {
     authSession,
@@ -23,7 +107,6 @@ export const ProductEntryView: React.FC = () => {
     updateUnit,
     addProduct,
     updateProduct,
-    adjustProductStock,
     deleteProduct,
     masterDataLoading,
     masterDataError,
@@ -40,6 +123,7 @@ export const ProductEntryView: React.FC = () => {
     () => new Set(),
   );
   const deletingProductIdsRef = useRef(new Set<string>());
+  const [priceViewProduct, setPriceViewProduct] = useState<Product | null>(null);
 
   // Drawer state
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -50,14 +134,8 @@ export const ProductEntryView: React.FC = () => {
   const [formName, setFormName] = useState("");
   const [formBrandId, setFormBrandId] = useState("");
   const [formUnitId, setFormUnitId] = useState("");
-  const [formQty, setFormQty] = useState("0");
-  const [stockAdjustmentReason, setStockAdjustmentReason] = useState("");
-  const [stockAdjustmentBatchId, setStockAdjustmentBatchId] = useState("");
-  const [stockAdjustmentPurchaseRate, setStockAdjustmentPurchaseRate] = useState("");
-  const [stockAdjustmentSellingRate, setStockAdjustmentSellingRate] = useState("");
-  const [formPurchaseRate, setFormPurchaseRate] = useState("");
-  const [formSellingPrice, setFormSellingPrice] = useState("");
-  const [formMRP, setFormMRP] = useState("");
+  const [batchDrafts, setBatchDrafts] = useState<BatchDraft[]>([]);
+  const [defaultBatchKey, setDefaultBatchKey] = useState("");
   const [formSaving, setFormSaving] = useState(false);
   const [catalogModal, setCatalogModal] = useState<"brand" | null>(null);
   const [catalogName, setCatalogName] = useState("");
@@ -95,6 +173,14 @@ export const ProductEntryView: React.FC = () => {
   const pageProducts = getPageRecords(filteredProducts, safeProductPage);
   const productRange = getPaginationRange(filteredProducts.length, safeProductPage);
   useEffect(() => setProductPage(1), [searchTerm, brandFilter, stockFilter]);
+  useEffect(() => {
+    if (!priceViewProduct) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setPriceViewProduct(null);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [priceViewProduct]);
   const brandNames = Array.from(
     new Set(products.map((product) => product.brand).filter(Boolean)),
   );
@@ -103,9 +189,7 @@ export const ProductEntryView: React.FC = () => {
       ? products.find((product) => product.id === editingId)
       : undefined;
   const isAdmin = authSession?.user.role === "ADMIN";
-  const quantityChanged = Boolean(
-    productBeingEdited && Number(formQty) !== productBeingEdited.quantity,
-  );
+  const batchStockTotal = batchDrafts.reduce((sum, batch) => sum + (Number(batch.quantity) || 0), 0);
   const selectedUnit = units.find((unit) => unit.id === formUnitId);
   const selectedUnitAllowsDecimals =
     selectedUnit?.allowsDecimals ??
@@ -147,20 +231,34 @@ export const ProductEntryView: React.FC = () => {
     next.focus();
   };
 
+  const updateBatchDraft = (key: string, updates: Partial<BatchDraft>) => {
+    setBatchDrafts((previous) => previous.map((batch) => batch.key === key ? { ...batch, ...updates } : batch));
+  };
+
+  const addAnotherBatch = () => {
+    const batch = createBatchDraft();
+    setBatchDrafts((previous) => [...previous, batch]);
+    if (drawerMode === "create" && !defaultBatchKey) setDefaultBatchKey(batch.key);
+  };
+
+  const removeBatchDraft = (key: string) => {
+    const remaining = batchDrafts.filter((batch) => batch.key !== key);
+    setBatchDrafts(remaining);
+    if (defaultBatchKey === key) {
+      const replacement = remaining.find((batch) => Number(batch.quantity) > 0);
+      setDefaultBatchKey(replacement?.key || "");
+    }
+  };
+
   const openCreateDrawer = () => {
     setDrawerMode("create");
     setEditingId(null);
     setFormName("");
     setFormBrandId("");
     setFormUnitId("");
-    setFormQty("0");
-    setStockAdjustmentReason("");
-    setStockAdjustmentBatchId("");
-    setStockAdjustmentPurchaseRate("");
-    setStockAdjustmentSellingRate("");
-    setFormPurchaseRate("");
-    setFormSellingPrice("");
-    setFormMRP("");
+    const firstBatch = createBatchDraft();
+    setBatchDrafts([firstBatch]);
+    setDefaultBatchKey(firstBatch.key);
     setDrawerOpen(true);
   };
 
@@ -179,50 +277,32 @@ export const ProductEntryView: React.FC = () => {
     );
     setFormBrandId(product.brandId || productBrand?.id || "");
     setFormUnitId(product.unitId || productUnit?.id || "");
-    setFormQty(product.quantity.toString());
-    setStockAdjustmentReason("");
-    setStockAdjustmentBatchId("");
-    setStockAdjustmentPurchaseRate("");
-    setStockAdjustmentSellingRate("");
-    setFormPurchaseRate(String(product.purchaseRate ?? 0));
-    setFormSellingPrice(product.sellingPrice.toString());
-    setFormMRP(product.mrp > 0 ? product.mrp.toString() : "");
+    const existingBatches = product.batches.map((batch) => ({
+      key: batch.id,
+      id: batch.id,
+      label: batch.label || "",
+      quantity: String(batch.remainingQuantity),
+      purchaseRate: String(batch.purchaseRate),
+      sellingRate: String(batch.sellingRate),
+      mrp: batch.mrp == null ? "" : String(batch.mrp),
+      isNew: false,
+    }));
+    setBatchDrafts(existingBatches);
+    const defaultBatch = existingBatches.find((batch) => product.batches.find((source) => source.id === batch.id)?.isDefaultSellingRate)
+      || existingBatches.find((batch) => Number(batch.sellingRate) === product.sellingPrice);
+    setDefaultBatchKey(defaultBatch?.key || "");
     setDrawerOpen(true);
   };
 
   const handleFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const sp = parseFloat(formSellingPrice);
-    const mrp = formMRP.trim() ? parseFloat(formMRP) : undefined;
-    const purchaseRate = parseFloat(formPurchaseRate);
-    const qty = Number(formQty);
-    if (!Number.isFinite(purchaseRate) || purchaseRate <= 0) {
-      showToast("Purchase rate must be greater than ₹0.00.", "error");
-      return;
-    }
     if (
       !formName.trim() ||
       !formBrandId ||
       !formUnitId ||
-      !Number.isFinite(sp) ||
-      sp < 0 ||
-      (mrp !== undefined && (!Number.isFinite(mrp) || mrp < 0)) ||
-      !Number.isFinite(qty) ||
-      qty < 0
+      !batchDrafts.length
     ) {
-      showToast(
-        "Please fill out all required fields with valid values.",
-        "error",
-      );
-      return;
-    }
-    if (!isUnitQuantityValid(qty, selectedUnitAllowsDecimals)) {
-      showToast(
-        selectedUnitAllowsDecimals
-          ? "Quantity can have up to 3 decimal places."
-          : "This unit only allows whole-number quantities.",
-        "error",
-      );
+      showToast("Enter the product details and add at least one batch.", "error");
       return;
     }
     if (!isUuid(formBrandId) || !isUuid(formUnitId)) {
@@ -232,46 +312,104 @@ export const ProductEntryView: React.FC = () => {
       );
       return;
     }
-    if (drawerMode === "edit" && quantityChanged && !isAdmin) {
-      showToast("Only Admin users can change stock quantity.", "error");
+    const batchesByKey = new Map(batchDrafts.map((batch) => [batch.key, batch]));
+    const totalStock = batchDrafts.reduce((sum, batch) => sum + (Number(batch.quantity) || 0), 0);
+    const newBatchCount = batchDrafts.filter((batch) => batch.isNew).length;
+    for (const batch of batchDrafts) {
+      const quantity = Number(batch.quantity);
+      const purchaseRate = Number(batch.purchaseRate);
+      const sellingRate = Number(batch.sellingRate);
+      const mrp = batch.mrp.trim() ? Number(batch.mrp) : undefined;
+      if (!Number.isFinite(quantity) || (batch.isNew ? quantity <= 0 : quantity < 0)) {
+        showToast(`Enter a valid ${batch.isNew ? "positive" : "non-negative"} quantity for each batch.`, "error");
+        return;
+      }
+      if (!isUnitQuantityValid(quantity, selectedUnitAllowsDecimals)) {
+        showToast(selectedUnitAllowsDecimals ? "Batch quantities can have up to 3 decimal places." : "This unit only allows whole-number quantities.", "error");
+        return;
+      }
+      if (!Number.isFinite(purchaseRate) || purchaseRate <= 0 || !Number.isFinite(sellingRate) || sellingRate <= 0) {
+        showToast("Purchase and selling prices must be greater than ₹0.00 for every batch.", "error");
+        return;
+      }
+      if (mrp !== undefined && (!Number.isFinite(mrp) || mrp <= sellingRate)) {
+        showToast("Batch MRP must be greater than its selling price.", "error");
+        return;
+      }
+      if (batch.isNew) continue;
+      const originalBatch = productBeingEdited?.batches.find((entry) => entry.id === batch.id);
+      if (originalBatch && quantity > originalBatch.remainingQuantity) {
+        showToast("Increase stock by adding another batch; existing batch quantities cannot be increased.", "error");
+        return;
+      }
+      if (originalBatch && quantity < originalBatch.remainingQuantity && !isAdmin) {
+        showToast("Only Admin users can reduce batch stock.", "error");
+        return;
+      }
+    }
+    const selectedDefault = batchesByKey.get(defaultBatchKey);
+    if ((drawerMode === "create" && !selectedDefault) || (defaultBatchKey && (!selectedDefault || Number(selectedDefault.quantity) <= 0))) {
+      showToast("Choose a default selling rate from a batch with available stock.", "error");
       return;
     }
-    const stockDelta = productBeingEdited ? qty - productBeingEdited.quantity : 0;
-    const stockOutBatch = stockDelta < 0
-      ? productBeingEdited?.batches.find((batch) => batch.id === stockAdjustmentBatchId)
-      : undefined;
-    if (stockDelta > 0 && (!Number.isFinite(Number(stockAdjustmentPurchaseRate)) || Number(stockAdjustmentPurchaseRate) <= 0 || !Number.isFinite(Number(stockAdjustmentSellingRate)) || Number(stockAdjustmentSellingRate) <= 0)) {
-      showToast("Stock increases need a positive purchase rate and selling rate for the new batch.", "error");
+    if (drawerMode === "create" && totalStock <= 0) {
+      showToast("Initial stock must be greater than zero. Add a batch with a positive quantity.", "error");
       return;
     }
-    if (stockDelta < 0 && (!stockOutBatch || -stockDelta > stockOutBatch.remainingQuantity)) {
-      showToast("Select a batch with enough available stock for this reduction.", "error");
+    if (drawerMode === "edit" && newBatchCount > 0 && !isAdmin) {
+      showToast("Only Admin users can add stock batches.", "error");
       return;
     }
     setFormSaving(true);
     try {
-      const payload = {
+      const basePayload = {
         name: formName.trim(),
         brandId: formBrandId,
         unitId: formUnitId,
-        purchaseRate,
-        sellingPrice: sp,
-        mrp: mrp ?? null,
       };
-      if (drawerMode === "create") await addProduct({ ...payload, qty });
+      if (drawerMode === "create") {
+        const defaultSellingPrice = Number(selectedDefault!.sellingRate);
+        const defaultMrp = selectedDefault!.mrp.trim() ? Number(selectedDefault!.mrp) : null;
+        const totalCost = batchDrafts.reduce((sum, batch) => sum + Number(batch.quantity) * Number(batch.purchaseRate), 0);
+        await addProduct({
+          ...basePayload,
+          purchaseRate: totalStock > 0 ? Math.round((totalCost / totalStock) * 100) / 100 : Number(selectedDefault!.purchaseRate),
+          sellingPrice: defaultSellingPrice,
+          mrp: defaultMrp,
+          qty: totalStock,
+          batches: batchDrafts.map((batch) => ({
+            clientKey: batch.key,
+            label: batch.label.trim() || null,
+            quantity: Number(batch.quantity),
+            purchaseRate: Number(batch.purchaseRate),
+            sellingRate: Number(batch.sellingRate),
+            mrp: batch.mrp.trim() ? Number(batch.mrp) : null,
+            isDefaultSellingRate: batch.key === defaultBatchKey,
+          })),
+        });
+      }
       else if (editingId) {
-        await updateProduct(editingId, payload);
-        if (quantityChanged) {
-          try {
-            await adjustProductStock(editingId, qty, stockAdjustmentReason, stockDelta > 0
-              ? { purchaseRate: Number(stockAdjustmentPurchaseRate), sellingRate: Number(stockAdjustmentSellingRate) }
-              : { inventoryBatchId: stockAdjustmentBatchId });
-          } catch (error) {
-            throw new Error(
-              `Product details were saved, but stock was not confirmed: ${error instanceof Error ? error.message : "stock adjustment failed."}`,
-            );
-          }
-        }
+        await updateProduct(editingId, {
+          ...basePayload,
+          batchPricing: {
+            updates: batchDrafts.filter((batch) => !batch.isNew).map((batch) => ({
+              id: batch.id!,
+              label: batch.label.trim() || null,
+              remainingQuantity: Number(batch.quantity),
+              sellingRate: Number(batch.sellingRate),
+              mrp: batch.mrp.trim() ? Number(batch.mrp) : null,
+            })),
+            additions: batchDrafts.filter((batch) => batch.isNew).map((batch) => ({
+              clientKey: batch.key,
+              label: batch.label.trim() || null,
+              quantity: Number(batch.quantity),
+              purchaseRate: Number(batch.purchaseRate),
+              sellingRate: Number(batch.sellingRate),
+              mrp: batch.mrp.trim() ? Number(batch.mrp) : null,
+            })),
+            defaultBatchKey: defaultBatchKey || null,
+          },
+        });
       }
       setDrawerOpen(false);
     } catch (error) {
@@ -550,8 +688,23 @@ export const ProductEntryView: React.FC = () => {
                           {p.brand || "—"}
                         </span>
                       </td>
-                      <td className="py-2.5 px-space-md font-data-mono-md text-data-mono-md text-on-surface text-right font-semibold whitespace-nowrap">
-                        {formatCurrency(p.sellingPrice)}
+                      <td className="py-2.5 px-space-md text-right whitespace-nowrap">
+                        <div className="flex flex-col items-end gap-1">
+                          <span className="font-data-mono-md text-data-mono-md text-on-surface font-semibold">
+                            {formatCurrency(p.sellingPrice)}
+                          </span>
+                          {getDistinctBatchPriceCount(p) > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => setPriceViewProduct(p)}
+                              className="inline-flex items-center gap-1 rounded-md bg-primary-container/40 px-2 py-1 font-label-sm text-label-sm text-on-surface-variant transition-colors hover:bg-primary-container hover:text-on-surface"
+                              aria-label={`View all ${p.batches.filter((batch) => batch.remainingQuantity > 0).length} batch prices for ${p.name}`}
+                            >
+                              <span className="material-symbols-outlined text-[14px]">layers</span>
+                              View All Prices ({getDistinctBatchPriceCount(p)})
+                            </button>
+                          )}
+                        </div>
                       </td>
                       <td className="py-2.5 px-space-md font-data-mono-md text-data-mono-md text-on-surface-variant text-right whitespace-nowrap">
                         {p.mrp > 0 ? formatCurrency(p.mrp) : "—"}
@@ -624,6 +777,89 @@ export const ProductEntryView: React.FC = () => {
           <PaginationControls totalRecords={filteredProducts.length} page={safeProductPage} pageSize={DEFAULT_PAGE_SIZE} onPageChange={setProductPage} />
         </div>
       </div>
+
+      {priceViewProduct && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-inverse-surface/40 p-3 sm:p-6"
+          onClick={() => setPriceViewProduct(null)}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="batch-prices-title"
+            className="flex max-h-[85vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-outline-variant/30 bg-surface-container-lowest shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="flex items-start justify-between gap-4 border-b border-outline-variant/30 px-4 py-4 sm:px-6">
+              <div className="min-w-0">
+                <h2 id="batch-prices-title" className="font-headline-sm text-headline-sm text-on-surface">
+                  Batch Prices
+                </h2>
+                <p className="mt-1 truncate font-body-md text-body-md text-on-surface-variant">
+                  {priceViewProduct.name}{priceViewProduct.brand ? ` · ${priceViewProduct.brand}` : ""}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPriceViewProduct(null)}
+                className="shrink-0 rounded-md p-1 text-on-surface-variant transition-colors hover:bg-surface-container hover:text-on-surface"
+                aria-label="Close batch prices"
+              >
+                <span className="material-symbols-outlined text-[20px]">close</span>
+              </button>
+            </header>
+
+            <div className="overflow-y-auto p-4 sm:p-6">
+              <div className="rounded-lg border border-outline-variant/30">
+                <table className="w-full table-fixed border-collapse text-left">
+                  <colgroup>
+                    <col className="w-[8%]" />
+                    <col className="w-[27%]" />
+                    <col className="w-[32.5%]" />
+                    <col className="w-[32.5%]" />
+                  </colgroup>
+                  <thead className="sticky top-0 z-10 bg-surface-container-low">
+                    <tr>
+                      <th className="px-2 py-3 font-label-md text-label-md text-on-surface-variant">#</th>
+                      <th className="break-words px-2 py-3 text-center font-label-md text-label-md text-on-surface-variant">Quantity</th>
+                      <th className="break-words px-2 py-3 text-right font-label-md text-label-md text-on-surface-variant">Purchase Price</th>
+                      <th className="break-words px-2 py-3 text-right font-label-md text-label-md text-on-surface-variant">Selling Price</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {getBatchPriceGroups(priceViewProduct).map((group, index) => (
+                      <tr key={`${group.purchaseRate}-${group.sellingRate}`} className="border-t border-outline-variant/30">
+                        <td className="px-2 py-3 font-data-mono-md text-data-mono-md text-on-surface">{index + 1}</td>
+                        <td className="break-words px-2 py-3 text-center font-data-mono-md text-data-mono-md text-on-surface">
+                          {group.quantity} {priceViewProduct.unit}
+                        </td>
+                        <td className="break-words px-2 py-3 text-right font-data-mono-md text-data-mono-md text-on-surface">
+                          {formatCurrency(group.purchaseRate)}
+                        </td>
+                        <td className="break-words px-2 py-3 text-right font-data-mono-md text-data-mono-md text-on-surface">
+                          {formatCurrency(group.sellingRate)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot className="border-t border-outline-variant/40 bg-surface-container-low">
+                    <tr>
+                      <th className="px-2 py-3 text-left font-label-lg text-label-lg font-semibold text-on-surface">Total</th>
+                      <th className="break-words px-2 py-3 text-center font-data-mono-md text-data-mono-md font-semibold text-on-surface">
+                        {priceViewProduct.batches
+                          .filter((batch) => batch.remainingQuantity > 0)
+                          .reduce((total, batch) => total + batch.remainingQuantity, 0)} {priceViewProduct.unit}
+                      </th>
+                      <th className="px-2 py-3 text-right font-label-lg text-label-lg font-semibold text-on-surface-variant">—</th>
+                      <th className="px-2 py-3 text-right font-label-lg text-label-lg font-semibold text-on-surface-variant">—</th>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </div>
+          </section>
+        </div>
+      )}
 
       {/* Slide-Over Drawer for Add / Edit Product */}
       {drawerOpen && (
@@ -759,147 +995,45 @@ export const ProductEntryView: React.FC = () => {
 
                 </div>
               </div>
-              <label className="flex flex-col gap-1.5 text-[12px] font-medium text-on-surface">
-                Qty
-                <NumericTextInput
-                  required
-                  data-product-form-field="qty"
-                  onKeyDown={handleProductFormArrowNavigation}
-                  maxDecimals={selectedUnitAllowsDecimals ? 3 : 0}
-                  value={formQty}
-                  onValueChange={setFormQty}
-                  readOnly={drawerMode === "edit" && !isAdmin}
-                  className="h-8 px-2 bg-surface-container-low border border-outline-variant rounded text-on-surface font-normal read-only:opacity-70"
-                />
-                {drawerMode === "edit" && !isAdmin && (
-                  <span className="text-[11px] font-normal text-on-surface-variant">
-                    Only Admin users can adjust stock.
-                  </span>
-                )}
-              </label>
-              {drawerMode === "edit" && isAdmin && quantityChanged && (
-                <div className="flex flex-col gap-3 rounded-lg border border-outline-variant/40 bg-surface-container-lowest p-3">
-                  {Number(formQty) < (productBeingEdited?.quantity ?? 0) ? (
-                    <label className="flex flex-col gap-1.5 text-[12px] font-medium text-on-surface">
-                      Batch to reduce
-                      <select
-                        data-product-form-field="batch"
-                        value={stockAdjustmentBatchId}
-                        onChange={(event) => setStockAdjustmentBatchId(event.target.value)}
-                        className="h-8 px-2 bg-surface-container-low border border-outline-variant rounded text-on-surface font-normal"
-                      >
-                        <option value="">Select a stock batch</option>
-                        {productBeingEdited?.batches.map((batch) => (
-                          <option key={batch.id} value={batch.id}>
-                            {batch.label || `${batch.source} · ${new Date(batch.receivedAt).toLocaleDateString()}`} · {batch.remainingQuantity} available
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  ) : (
-                    <div className="grid grid-cols-2 gap-3">
-                      <label className="flex flex-col gap-1.5 text-[12px] font-medium text-on-surface">
-                        New batch purchase rate (₹)
-                        <NumericTextInput maxDecimals={2} value={stockAdjustmentPurchaseRate} onValueChange={setStockAdjustmentPurchaseRate} className="h-8 px-2 bg-surface-container-low border border-outline-variant rounded text-on-surface font-normal" />
-                      </label>
-                      <label className="flex flex-col gap-1.5 text-[12px] font-medium text-on-surface">
-                        New batch selling rate (₹)
-                        <NumericTextInput maxDecimals={2} value={stockAdjustmentSellingRate} onValueChange={setStockAdjustmentSellingRate} className="h-8 px-2 bg-surface-container-low border border-outline-variant rounded text-on-surface font-normal" />
-                      </label>
-                    </div>
-                  )}
-                  <label className="flex flex-col gap-1.5 text-[12px] font-medium text-on-surface">
-                    Stock adjustment reason (optional)
-                    <input
-                      data-product-form-field="reason"
-                      onKeyDown={handleProductFormArrowNavigation}
-                      value={stockAdjustmentReason}
-                      onChange={(e) => setStockAdjustmentReason(e.target.value)}
-                      placeholder="e.g. Physical stock count correction"
-                      className="h-8 px-2 bg-surface-container-low border border-outline-variant rounded text-on-surface font-normal"
-                    />
-                  </label>
-                </div>
-              )}
-              {/* Prices Row */}
-              <div className="grid grid-cols-2 gap-space-md">
-                {/* Selling Price */}
-                <div className="flex flex-col gap-1.5">
-                  <label className="font-label-md text-label-md text-on-surface font-semibold flex items-center justify-between">
-                    <span>Selling Price</span>
-                    <span className="text-error font-data-mono-sm text-data-mono-sm">
-                      *
-                    </span>
-                  </label>
-                  <div className="relative">
-                    <span className="absolute left-2.5 top-1/2 -translate-y-1/2 font-data-mono-md text-data-mono-md text-outline">
-                      ₹
-                    </span>
-                    <NumericTextInput
-                      className="w-full h-8 pl-6 pr-space-sm bg-surface-container-low text-on-surface font-data-mono-md text-data-mono-md rounded focus:outline-none focus:bg-surface-container-lowest focus:ring-1 focus:ring-primary placeholder:text-outline"
-                      placeholder="0.00"
-                      required
-                      data-product-form-field="selling"
-                      onKeyDown={handleProductFormArrowNavigation}
-                      maxDecimals={2}
-                      value={formSellingPrice}
-                      onValueChange={setFormSellingPrice}
-                    />
-                  </div>
-                </div>
-
-                {/* Purchase Rate */}
-                <div className="flex flex-col gap-1.5">
-                  <label className="font-label-md text-label-md text-on-surface font-semibold flex items-center justify-between">
-                    <span>Purchase Rate per unit</span>
-                    <span className="text-error font-data-mono-sm text-data-mono-sm">
-                      *
-                    </span>
-                  </label>
-                  <div className="relative">
-                    <span className="absolute left-2.5 top-1/2 -translate-y-1/2 font-data-mono-md text-data-mono-md text-outline">
-                      ₹
-                    </span>
-                    <NumericTextInput
-                      className="w-full h-8 pl-6 pr-space-sm bg-surface-container-low text-on-surface font-data-mono-md text-data-mono-md rounded focus:outline-none focus:bg-surface-container-lowest focus:ring-1 focus:ring-primary placeholder:text-outline"
-                      placeholder="0.00"
-                      required
-                      data-product-form-field="purchase"
-                      onKeyDown={handleProductFormArrowNavigation}
-                      maxDecimals={2}
-                      value={formPurchaseRate}
-                      onValueChange={setFormPurchaseRate}
-                      aria-describedby="product-purchase-rate-help"
-                    />
-                  </div>
-                  <span
-                    id="product-purchase-rate-help"
-                    className="text-[11px] font-normal text-on-surface-variant"
-                  >
-                    Cost per unit · must be greater than ₹0.00
-                  </span>
-                </div>
-                {/* Optional MRP */}
-                <div className="col-span-2 flex flex-col gap-1.5">
-                  <label className="font-label-md text-label-md text-on-surface font-semibold">
-                    MRP <span className="font-normal text-on-surface-variant">(optional)</span>
-                  </label>
-                  <div className="relative">
-                    <span className="absolute left-2.5 top-1/2 -translate-y-1/2 font-data-mono-md text-data-mono-md text-outline">
-                      ₹
-                    </span>
-                    <NumericTextInput
-                      className="w-full h-8 pl-6 pr-space-sm bg-surface-container-low text-on-surface font-data-mono-md text-data-mono-md rounded focus:outline-none focus:bg-surface-container-lowest focus:ring-1 focus:ring-primary placeholder:text-outline"
-                      placeholder="Optional"
-                      data-product-form-field="mrp"
-                      onKeyDown={handleProductFormArrowNavigation}
-                      maxDecimals={2}
-                      value={formMRP}
-                      onValueChange={setFormMRP}
-                    />
-                  </div>
-                </div>
+              <div className="flex items-end justify-between gap-3 rounded-lg border border-outline-variant/30 bg-surface-container-lowest px-3 py-2">
+                <div><label className="font-label-md text-label-md font-semibold text-on-surface">{drawerMode === "create" ? "Initial Stock (Total)" : "Current Stock (Total)"}</label><p className="text-[11px] text-on-surface-variant">Calculated from the quantities in each batch.</p></div>
+                <strong className="shrink-0 font-data-mono-md text-data-mono-md text-on-surface">{batchStockTotal.toLocaleString()} {selectedUnit?.symbol || selectedUnit?.name || productBeingEdited?.unit || "units"}</strong>
               </div>
+
+              <section className="rounded-xl border border-outline-variant/30 bg-surface-container-lowest p-3 sm:p-4">
+                <div className="mb-3 flex items-start gap-2">
+                  <span className="material-symbols-outlined mt-0.5 text-[20px] text-primary">layers</span>
+                  <div><h3 className="font-label-lg text-label-lg font-semibold text-on-surface">Batch-wise Pricing</h3><p className="font-body-sm text-body-sm text-on-surface-variant">Add batches with their own quantities and prices. Set one selling rate as the product listing default.</p></div>
+                </div>
+                <div className="space-y-2.5">
+                  {batchDrafts.map((batch, index) => {
+                    const isDefault = defaultBatchKey === batch.key;
+                    return <article key={batch.key} className={`rounded-lg border p-3 ${index % 2 === 0 ? "border-[#ead9a7] bg-[#fffaf0]" : "border-[#cfe5d0] bg-[#f2faf2]"}`}>
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <span className="rounded-full bg-surface-container px-2.5 py-1 font-label-sm text-label-sm font-semibold text-on-surface">Batch {index + 1}{isDefault ? " · Default" : ""}</span>
+                        <button type="button" disabled={!batch.isNew} onClick={() => batch.isNew && removeBatchDraft(batch.key)} title={batch.isNew ? "Remove this unsaved batch" : "Existing stock batches are retained to preserve inventory history"} aria-label={`Remove batch ${index + 1}`} className="rounded p-1 text-error transition hover:bg-error-container disabled:cursor-not-allowed disabled:opacity-40">
+                          <span className="material-symbols-outlined text-[18px]">delete</span>
+                        </button>
+                      </div>
+                      <label className="mb-2 block text-[11px] font-medium text-on-surface-variant">Batch reference (optional)<input value={batch.label} onChange={(event) => updateBatchDraft(batch.key, { label: event.target.value })} maxLength={120} placeholder={batch.id ? `Batch ${batch.id.slice(0, 8)}` : "e.g. Supplier reference"} className="mt-1 h-8 w-full rounded border border-outline-variant bg-white px-2 text-xs text-on-surface outline-none focus:border-primary" /></label>
+                      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                        <label className="flex min-w-0 flex-col gap-1 text-[11px] font-medium text-on-surface">Quantity <span className="text-error">*</span><NumericTextInput required maxDecimals={selectedUnitAllowsDecimals ? 3 : 0} value={batch.quantity} onValueChange={(quantity) => updateBatchDraft(batch.key, { quantity })} readOnly={!batch.isNew && !isAdmin} className="h-8 w-full rounded border border-outline-variant bg-white px-2 text-xs font-normal text-on-surface read-only:opacity-60" /></label>
+                        <label className="flex min-w-0 flex-col gap-1 text-[11px] font-medium text-on-surface">Purchase Price <span className="text-error">*</span><NumericTextInput required maxDecimals={2} value={batch.purchaseRate} onValueChange={(purchaseRate) => updateBatchDraft(batch.key, { purchaseRate })} readOnly={!batch.isNew} aria-label={`Purchase price per unit for batch ${index + 1}`} className="h-8 w-full rounded border border-outline-variant bg-white px-2 text-xs font-normal text-on-surface read-only:opacity-60" /></label>
+                        <label className="flex min-w-0 flex-col gap-1 text-[11px] font-medium text-on-surface">Selling Price <span className="text-error">*</span><NumericTextInput required maxDecimals={2} value={batch.sellingRate} onValueChange={(sellingRate) => updateBatchDraft(batch.key, { sellingRate })} aria-label={`Selling price for batch ${index + 1}`} className="h-8 w-full rounded border border-outline-variant bg-white px-2 text-xs font-normal text-on-surface" /></label>
+                        <label className="flex min-w-0 flex-col gap-1 text-[11px] font-medium text-on-surface">MRP <span className="font-normal text-on-surface-variant">(optional)</span><NumericTextInput maxDecimals={2} value={batch.mrp} onValueChange={(mrp) => updateBatchDraft(batch.key, { mrp })} aria-label={`MRP for batch ${index + 1}`} className="h-8 w-full rounded border border-outline-variant bg-white px-2 text-xs font-normal text-on-surface" /></label>
+                      </div>
+                      {!batch.isNew && <p className="mt-1.5 text-[10px] text-on-surface-variant">Recorded purchase cost is locked. Stock can only be reduced here; add a batch to increase it.</p>}
+                      <label className="mt-2 inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-on-surface"><input type="radio" name="default-selling-rate" checked={isDefault} disabled={Number(batch.quantity) <= 0} onChange={() => setDefaultBatchKey(batch.key)} className="accent-primary" />Use this as the product listing default</label>
+                    </article>;
+                  })}
+                </div>
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                  <button type="button" onClick={addAnotherBatch} className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary-container/60 px-3 text-xs font-semibold text-on-surface transition hover:bg-primary-container"><span className="material-symbols-outlined text-[16px]">add</span>Add Another Batch</button>
+                  {drawerMode === "edit" && !isAdmin && <span className="text-[11px] text-on-surface-variant">Only Admin users can change batch quantities or add stock.</span>}
+                </div>
+                {drawerMode === "edit" && !batchDrafts.length && <p className="mt-2 text-[11px] text-on-surface-variant">No active stock batches are available. Add a batch to receive stock.</p>}
+                {drawerMode === "edit" && batchDrafts.length > 0 && <label className="mt-3 flex items-center gap-2 border-t border-outline-variant/30 pt-3 text-xs font-medium text-on-surface"><input type="radio" name="default-selling-rate" checked={!defaultBatchKey} onChange={() => setDefaultBatchKey("")} className="accent-primary" />Keep existing product listing default ({formatCurrency(productBeingEdited?.sellingPrice || 0)})</label>}
+              </section>
 
               {/* Form Action Buttons */}
               <div className="mt-auto pt-space-lg flex items-center justify-end gap-space-sm border-t border-outline-variant/20">

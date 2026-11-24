@@ -14,6 +14,9 @@ export interface InventoryBatchOption {
   label?: string | null;
   purchaseRate: number;
   sellingRate: number;
+  mrp: number | null;
+  isDefaultSellingRate: boolean;
+  receivedQuantity: number;
   remainingQuantity: number;
   receivedAt: string;
   source: 'PURCHASE' | 'OPENING' | 'ADJUSTMENT';
