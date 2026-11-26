@@ -5,7 +5,8 @@ import { PurchaseLineItem } from "../types";
 import { formatCurrency } from "../utils/currency";
 import { getSupplierLedgerReport, PaymentMethod } from "../services/api";
 import { UnitEditorModal } from "../components/UnitEditorModal";
-import { isUnitQuantityInputValid, isUnitQuantityValid, quantityStep } from "../utils/unitQuantity";
+import { NumericTextInput } from "../components/ui/NumericTextInput";
+import { isUnitQuantityInputValid, isUnitQuantityValid } from "../utils/unitQuantity";
 import { DEFAULT_PAGE_SIZE, getPageRecords, getPaginationRange, PaginationControls } from "../components/PaginationControls";
 
 const localIso = () => {
@@ -52,12 +53,14 @@ export const PurchaseBillEntryView: React.FC = () => {
       quantity: 1,
       sellingPrice: 0,
       purchaseRate: 0,
+      mrp: null,
       totalAmount: 0,
     },
   ]);
   const [quantityDrafts, setQuantityDrafts] = useState<Record<string, string>>({});
   const [purchaseRateDrafts, setPurchaseRateDrafts] = useState<Record<string, string>>({});
   const [sellingRateDrafts, setSellingRateDrafts] = useState<Record<string, string>>({});
+  const [mrpDrafts, setMrpDrafts] = useState<Record<string, string>>({});
   const [recentSearch, setRecentSearch] = useState("");
   const [newProductOpen, setNewProductOpen] = useState(false);
   const [newProductSaving, setNewProductSaving] = useState(false);
@@ -149,6 +152,7 @@ export const PurchaseBillEntryView: React.FC = () => {
     setQuantityDrafts((previous) => { const next = { ...previous }; delete next[id]; return next; });
     setPurchaseRateDrafts((previous) => { const next = { ...previous }; delete next[id]; return next; });
     setSellingRateDrafts((previous) => { const next = { ...previous }; delete next[id]; return next; });
+    setMrpDrafts((previous) => { const next = { ...previous }; delete next[id]; return next; });
     setItems((prev) =>
       prev.map((item) =>
         item.id === id
@@ -159,6 +163,7 @@ export const PurchaseBillEntryView: React.FC = () => {
               unit: product?.unit || "",
               sellingPrice: product?.sellingPrice || 0,
               purchaseRate: product?.purchaseRate || 0,
+              mrp: product?.mrp > 0 ? product.mrp : null,
               totalAmount: (product?.purchaseRate || 0) * item.quantity,
             }
           : item,
@@ -167,8 +172,8 @@ export const PurchaseBillEntryView: React.FC = () => {
   };
   const updateItem = (
     id: string,
-    field: "quantity" | "purchaseRate" | "sellingPrice",
-    value: number,
+    field: "quantity" | "purchaseRate" | "sellingPrice" | "mrp",
+    value: number | null,
   ) =>
     setItems((prev) =>
       prev.map((item) =>
@@ -177,8 +182,8 @@ export const PurchaseBillEntryView: React.FC = () => {
               ...item,
               [field]: value,
               totalAmount:
-                (field === "quantity" ? value : item.quantity) *
-                (field === "purchaseRate" ? value : item.purchaseRate),
+                (field === "quantity" ? Number(value) : item.quantity) *
+                (field === "purchaseRate" ? Number(value) : item.purchaseRate),
             }
           : item,
       ),
@@ -194,6 +199,7 @@ export const PurchaseBillEntryView: React.FC = () => {
         quantity: 1,
         sellingPrice: 0,
         purchaseRate: 0,
+        mrp: null,
         totalAmount: 0,
       },
     ]);
@@ -232,6 +238,7 @@ export const PurchaseBillEntryView: React.FC = () => {
           unit: product.unit,
           sellingPrice: product.sellingPrice,
           purchaseRate,
+          mrp: product.mrp > 0 ? product.mrp : null,
           totalAmount: purchaseRate * item.quantity,
         } : item));
       } else {
@@ -243,6 +250,7 @@ export const PurchaseBillEntryView: React.FC = () => {
           quantity: 1,
           sellingPrice: product.sellingPrice,
           purchaseRate,
+          mrp: product.mrp > 0 ? product.mrp : null,
           totalAmount: purchaseRate,
         }]);
       }
@@ -322,12 +330,24 @@ export const PurchaseBillEntryView: React.FC = () => {
       const draft = sellingRateDrafts[item.id];
       return draft !== undefined && (!/^\d+(?:\.\d{1,2})?$/.test(draft) || !Number.isFinite(Number(draft)) || Number(draft) <= 0);
     });
-    if (invalidPurchaseRateDraft || invalidSellingRateDraft || (amountPaid !== "" && !/^\d*(?:\.\d{1,2})?$/.test(amountPaid))) {
+    const invalidMrpDraft = items.some((item) => {
+      const draft = mrpDrafts[item.id];
+      const productSellingPrice = products.find((product) => product.id === item.productId)?.sellingPrice || 0;
+      return draft !== undefined && draft !== "" && (!/^\d+(?:\.\d{1,2})?$/.test(draft) || !Number.isFinite(Number(draft)) || Number(draft) <= Math.max(item.sellingPrice, productSellingPrice));
+    });
+    if (invalidPurchaseRateDraft || invalidSellingRateDraft || invalidMrpDraft || (amountPaid !== "" && !/^\d*(?:\.\d{1,2})?$/.test(amountPaid))) {
       showToast("Enter valid amounts using digits and up to two decimal places.", "error");
       return;
     }
     if (items.some((item) => item.productId && (!Number.isFinite(item.purchaseRate) || item.purchaseRate <= 0 || !Number.isFinite(item.sellingPrice) || item.sellingPrice <= 0))) {
       showToast("Purchase and selling rates must be greater than ₹0.00 for every product line.", "error");
+      return;
+    }
+    if (items.some((item) => {
+      const productSellingPrice = products.find((product) => product.id === item.productId)?.sellingPrice || 0;
+      return item.productId && item.mrp != null && (!Number.isFinite(item.mrp) || item.mrp <= Math.max(item.sellingPrice, productSellingPrice));
+    })) {
+      showToast("MRP must be greater than the batch and configured product selling rates.", "error");
       return;
     }
     if (
@@ -372,6 +392,7 @@ export const PurchaseBillEntryView: React.FC = () => {
       setQuantityDrafts({});
       setPurchaseRateDrafts({});
       setSellingRateDrafts({});
+      setMrpDrafts({});
       setItems([
         {
           id: `line-${Date.now()}`,
@@ -381,6 +402,7 @@ export const PurchaseBillEntryView: React.FC = () => {
           quantity: 1,
           sellingPrice: 0,
           purchaseRate: 0,
+          mrp: null,
           totalAmount: 0,
         },
       ]);
@@ -410,9 +432,10 @@ export const PurchaseBillEntryView: React.FC = () => {
     setRemarks("");
     setAmountPaid("");
     setPaymentMethod("CASH");
-    setItems([{ id: `line-${Date.now()}`, productId: "", name: "", unit: "", quantity: 1, sellingPrice: 0, purchaseRate: 0, totalAmount: 0 }]);
+    setItems([{ id: `line-${Date.now()}`, productId: "", name: "", unit: "", quantity: 1, sellingPrice: 0, purchaseRate: 0, mrp: null, totalAmount: 0 }]);
     setQuantityDrafts({});
     setPurchaseRateDrafts({});
+    setMrpDrafts({});
     setNewProductOpen(false);
     setNewProductName("");
     setNewProductBrandId("");
@@ -496,29 +519,31 @@ export const PurchaseBillEntryView: React.FC = () => {
               </button>
             </div>
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[1020px] border-collapse text-left">
-                <thead><tr className="bg-[#f6f5f2] text-xs font-bold text-[#6d685f]">{["#", "Product", "Qty", "Unit", "Selling rate (₹)", "Purchase rate (₹)", "Line total (₹)", "Action"].map((h) => <th key={h} className="border-y border-r border-[#e9e3d9] px-3 py-3 text-center last:border-r-0">{h}</th>)}</tr></thead>
+              <table className="w-full min-w-[1100px] table-fixed border-collapse text-left">
+                <colgroup><col style={{ width: "4.5%" }} /><col style={{ width: "25%" }} /><col style={{ width: "8.5%" }} /><col style={{ width: "6%" }} /><col style={{ width: "12.5%" }} /><col style={{ width: "13.5%" }} /><col style={{ width: "11%" }} /><col style={{ width: "12.5%" }} /><col style={{ width: "6.5%" }} /></colgroup>
+                <thead><tr className="bg-[#f6f5f2] text-xs font-bold text-[#6d685f]">{["#", "Product", "Qty", "Unit", "Selling rate (₹)", "Purchase rate (₹)", "MRP (₹)", "Line total (₹)", "Action"].map((h) => <th key={h} className="border-y border-r border-[#e9e3d9] px-2 py-3 text-center last:border-r-0">{h}</th>)}</tr></thead>
                 <tbody className="divide-y divide-[#efede8] text-sm text-[#272727]">
                   {items.map((item, index) => (
                     <tr key={item.id} className="transition hover:bg-[#fffdf8]">
-                      <td className="w-12 border-r border-[#efede8] px-3 py-3 text-center font-semibold text-[#77736d]">{index + 1}</td>
-                      <td className="min-w-64 border-r border-[#efede8] px-3 py-3">
-                        <select required value={item.productId || ""} onChange={(e) => updateProduct(item.id, e.target.value)} className="h-11 w-full rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-[#272727] outline-none transition focus:border-[#c58a00] focus:bg-white focus:ring-2 focus:ring-[#f5e7c3]">
+                      <td className="border-r border-[#efede8] px-2 py-3 text-center font-semibold text-[#77736d]">{index + 1}</td>
+                      <td className="border-r border-[#efede8] px-2 py-3">
+                        <select required value={item.productId || ""} onChange={(e) => updateProduct(item.id, e.target.value)} className="h-11 w-full rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-2 text-[#272727] outline-none transition focus:border-[#c58a00] focus:bg-white focus:ring-2 focus:ring-[#f5e7c3]">
                           <option value="">Select product</option>
                           {products.filter((p) => p.status === "Active").map((p) => <option key={p.id} value={p.id}>{p.name}{p.sku ? ` · ${p.sku}` : ""}{p.unit ? ` · ${p.unit}` : ""}</option>)}
                         </select>
                       </td>
-                      <td className="border-r border-[#efede8] px-3 py-3">
+                      <td className="border-r border-[#efede8] px-2 py-3">
                         {(() => {
                           const allowsDecimals = products.find((product) => product.id === item.productId)?.unitAllowsDecimals ?? false;
-                          return <input type="number" min={allowsDecimals ? "0.001" : "1"} step={quantityStep(allowsDecimals)} value={quantityDrafts[item.id] ?? String(item.quantity)} onChange={(event) => { const raw = event.target.value; setQuantityDrafts((previous) => ({ ...previous, [item.id]: raw })); if (!raw || !isUnitQuantityInputValid(raw, allowsDecimals)) return; const value = Number(raw); if (value > 0) updateItem(item.id, "quantity", value); }} onBlur={() => { const raw = quantityDrafts[item.id]; if (raw === undefined) return; const value = Number(raw); if (raw && isUnitQuantityInputValid(raw, allowsDecimals) && value > 0) updateItem(item.id, "quantity", value); setQuantityDrafts((previous) => { const next = { ...previous }; delete next[item.id]; return next; }); }} className="h-11 w-24 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-[#272727] outline-none transition focus:border-[#c58a00] focus:bg-white focus:ring-2 focus:ring-[#f5e7c3]" />;
+                          return <NumericTextInput maxDecimals={allowsDecimals ? 3 : 0} value={quantityDrafts[item.id] ?? String(item.quantity)} onValueChange={(raw) => { setQuantityDrafts((previous) => ({ ...previous, [item.id]: raw })); if (!raw || !isUnitQuantityInputValid(raw, allowsDecimals)) return; const value = Number(raw); if (value > 0) updateItem(item.id, "quantity", value); }} onBlur={() => { const raw = quantityDrafts[item.id]; if (raw === undefined) return; const value = Number(raw); if (raw && isUnitQuantityInputValid(raw, allowsDecimals) && value > 0) updateItem(item.id, "quantity", value); setQuantityDrafts((previous) => { const next = { ...previous }; delete next[item.id]; return next; }); }} className="h-11 w-16 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-2 text-[#272727] outline-none transition focus:border-[#c58a00] focus:bg-white focus:ring-2 focus:ring-[#f5e7c3]" />;
                         })()}
                       </td>
-                      <td className="border-r border-[#efede8] px-3 py-3 text-center text-[#68645e]">{item.unit || "—"}</td>
-                      <td className="border-r border-[#efede8] px-3 py-3"><input type="text" inputMode="decimal" required aria-label="Selling rate for new batch, greater than zero" title="Selling rate must be greater than ₹0.00" value={sellingRateDrafts[item.id] ?? (item.sellingPrice ? String(item.sellingPrice) : "")} placeholder="Required" onPaste={blockInvalidPricePaste} onChange={(event) => { const raw = event.target.value; if (!/^\d*\.?\d{0,2}$/.test(raw)) return; setSellingRateDrafts((previous) => ({ ...previous, [item.id]: raw })); updateItem(item.id, "sellingPrice", Number(raw) || 0); }} onBlur={() => setSellingRateDrafts((previous) => { const next = { ...previous }; delete next[item.id]; return next; })} className="h-11 w-36 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-[#272727] outline-none transition focus:border-[#c58a00] focus:bg-white focus:ring-2 focus:ring-[#f5e7c3]" /></td>
-                      <td className="border-r border-[#efede8] px-3 py-3"><input type="text" inputMode="decimal" required aria-label="Purchase rate for product line, greater than zero" title="Purchase rate must be greater than ₹0.00" value={purchaseRateDrafts[item.id] ?? (item.purchaseRate ? String(item.purchaseRate) : "")} placeholder="Required" onPaste={blockInvalidPricePaste} onChange={(event) => { const raw = event.target.value; if (!/^\d*\.?\d{0,2}$/.test(raw)) return; setPurchaseRateDrafts((previous) => ({ ...previous, [item.id]: raw })); updateItem(item.id, "purchaseRate", Number(raw) || 0); }} onBlur={() => setPurchaseRateDrafts((previous) => { const next = { ...previous }; delete next[item.id]; return next; })} className="h-11 w-36 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-[#272727] outline-none transition focus:border-[#c58a00] focus:bg-white focus:ring-2 focus:ring-[#f5e7c3]" /></td>
-                      <td className="border-r border-[#efede8] px-3 py-3 text-center font-semibold text-[#272727]">{formatCurrency(item.quantity * item.purchaseRate)}</td>
-                      <td className="px-3 py-3 text-center"><button type="button" aria-label="Remove product" onClick={() => items.length > 1 ? setItems((prev) => prev.filter((row) => row.id !== item.id)) : showToast("A purchase needs at least one product line.", "error")} className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-red-100 bg-red-50 material-symbols-outlined text-error transition hover:bg-red-100">delete</button></td>
+                      <td className="border-r border-[#efede8] px-2 py-3 text-center text-[#68645e]">{item.unit || "—"}</td>
+                      <td className="border-r border-[#efede8] px-2 py-3"><input type="text" inputMode="decimal" required aria-label="Selling rate for new batch, greater than zero" title="Selling rate must be greater than ₹0.00" value={sellingRateDrafts[item.id] ?? (item.sellingPrice ? String(item.sellingPrice) : "")} placeholder="Required" onPaste={blockInvalidPricePaste} onChange={(event) => { const raw = event.target.value; if (!/^\d*\.?\d{0,2}$/.test(raw)) return; setSellingRateDrafts((previous) => ({ ...previous, [item.id]: raw })); updateItem(item.id, "sellingPrice", Number(raw) || 0); }} onBlur={() => setSellingRateDrafts((previous) => { const next = { ...previous }; delete next[item.id]; return next; })} className="h-11 w-full max-w-28 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-2 text-[#272727] outline-none transition focus:border-[#c58a00] focus:bg-white focus:ring-2 focus:ring-[#f5e7c3]" /></td>
+                      <td className="border-r border-[#efede8] px-2 py-3"><input type="text" inputMode="decimal" required aria-label="Purchase rate for product line, greater than zero" title="Purchase rate must be greater than ₹0.00" value={purchaseRateDrafts[item.id] ?? (item.purchaseRate ? String(item.purchaseRate) : "")} placeholder="Required" onPaste={blockInvalidPricePaste} onChange={(event) => { const raw = event.target.value; if (!/^\d*\.?\d{0,2}$/.test(raw)) return; setPurchaseRateDrafts((previous) => ({ ...previous, [item.id]: raw })); updateItem(item.id, "purchaseRate", Number(raw) || 0); }} onBlur={() => setPurchaseRateDrafts((previous) => { const next = { ...previous }; delete next[item.id]; return next; })} className="h-11 w-full max-w-28 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-2 text-[#272727] outline-none transition focus:border-[#c58a00] focus:bg-white focus:ring-2 focus:ring-[#f5e7c3]" /></td>
+                      <td className="border-r border-[#efede8] px-2 py-3"><input type="text" inputMode="decimal" aria-label="MRP for product batch, greater than selling rate" title="MRP is optional and, when entered, must be greater than the selling rate" value={mrpDrafts[item.id] ?? (item.mrp != null ? String(item.mrp) : "")} placeholder="Optional" onPaste={blockInvalidPricePaste} onChange={(event) => { const raw = event.target.value; if (!/^\d*\.?\d{0,2}$/.test(raw)) return; setMrpDrafts((previous) => ({ ...previous, [item.id]: raw })); updateItem(item.id, "mrp", raw === "" ? null : Number(raw)); }} onBlur={() => setMrpDrafts((previous) => { const next = { ...previous }; delete next[item.id]; return next; })} className="h-11 w-full max-w-24 rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-2 text-[#272727] outline-none transition focus:border-[#c58a00] focus:bg-white focus:ring-2 focus:ring-[#f5e7c3]" /></td>
+                      <td className="border-r border-[#efede8] px-2 py-3 text-center font-semibold text-[#272727]">{formatCurrency(item.quantity * item.purchaseRate)}</td>
+                      <td className="px-2 py-3 text-center"><button type="button" aria-label="Remove product" onClick={() => items.length > 1 ? setItems((prev) => prev.filter((row) => row.id !== item.id)) : showToast("A purchase needs at least one product line.", "error")} className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-red-100 bg-red-50 material-symbols-outlined text-error transition hover:bg-red-100">delete</button></td>
                     </tr>
                   ))}
                 </tbody>

@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useApp } from "../context/AppContext";
 import { Product } from "../types";
+import { ApiClientError } from "../services/api";
+import type { UpdateProductPayload } from "../services/api";
 import { formatCurrency } from "../utils/currency";
 import { UnitEditorModal } from "../components/UnitEditorModal";
 import { NumericTextInput } from "../components/ui/NumericTextInput";
@@ -15,17 +17,54 @@ const isUuid = (value: string) =>
 type BatchDraft = {
   key: string;
   id?: string;
-  label: string;
   quantity: string;
   purchaseRate: string;
   sellingRate: string;
   mrp: string;
   isNew: boolean;
+  original?: {
+    quantity: string;
+    sellingRate: string;
+    mrp: string;
+  };
+};
+
+type PendingProductUpdate = {
+  idempotencyKey: string;
+  payload: UpdateProductPayload;
+};
+
+const pendingProductUpdateStorageKey = (productId: string) => `able-lubes:pending-product-update:${productId}`;
+
+const readPendingProductUpdate = (productId: string): PendingProductUpdate | null => {
+  try {
+    const stored = localStorage.getItem(pendingProductUpdateStorageKey(productId));
+    if (!stored) return null;
+    const parsed = JSON.parse(stored) as PendingProductUpdate;
+    return parsed?.idempotencyKey && parsed?.payload?.batchPricing ? parsed : null;
+  } catch {
+    return null;
+  }
+};
+
+const writePendingProductUpdate = (productId: string, pending: PendingProductUpdate) => {
+  try {
+    localStorage.setItem(pendingProductUpdateStorageKey(productId), JSON.stringify(pending));
+  } catch {
+    // The in-memory retry key still protects retries while this view remains open.
+  }
+};
+
+const clearPendingProductUpdate = (productId: string) => {
+  try {
+    localStorage.removeItem(pendingProductUpdateStorageKey(productId));
+  } catch {
+    // Storage is best-effort; server-side idempotency remains authoritative.
+  }
 };
 
 const createBatchDraft = (): BatchDraft => ({
   key: crypto.randomUUID(),
-  label: "",
   quantity: "",
   purchaseRate: "",
   sellingRate: "",
@@ -40,16 +79,20 @@ const getDistinctBatchPriceCount = (product: Product) => {
 const getBatchPriceGroups = (product: Product) => {
   const groups = new Map<
     string,
-    { purchaseRate: number; sellingRate: number; batches: Product["batches"] }
+    { purchaseRate: number; sellingRate: number; mrp: number | null; batches: Product["batches"] }
   >();
 
   product.batches
     .filter((batch) => batch.remainingQuantity > 0)
     .forEach((batch) => {
-      const key = `${batch.purchaseRate.toFixed(2)}:${batch.sellingRate.toFixed(2)}`;
+      const purchaseRate = Number(batch.purchaseRate.toFixed(2));
+      const sellingRate = Number(batch.sellingRate.toFixed(2));
+      const mrp = batch.mrp == null ? null : Number(batch.mrp.toFixed(2));
+      const key = `${purchaseRate.toFixed(2)}:${sellingRate.toFixed(2)}:${mrp == null ? "null" : mrp.toFixed(2)}`;
       const group = groups.get(key) ?? {
-        purchaseRate: batch.purchaseRate,
-        sellingRate: batch.sellingRate,
+        purchaseRate,
+        sellingRate,
+        mrp,
         batches: [],
       };
       group.batches.push(batch);
@@ -124,6 +167,7 @@ export const ProductEntryView: React.FC = () => {
   );
   const deletingProductIdsRef = useRef(new Set<string>());
   const [priceViewProduct, setPriceViewProduct] = useState<Product | null>(null);
+  const [batchStockInfoOpen, setBatchStockInfoOpen] = useState(false);
 
   // Drawer state
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -137,6 +181,11 @@ export const ProductEntryView: React.FC = () => {
   const [batchDrafts, setBatchDrafts] = useState<BatchDraft[]>([]);
   const [defaultBatchKey, setDefaultBatchKey] = useState("");
   const [formSaving, setFormSaving] = useState(false);
+  const [pendingRetryAvailable, setPendingRetryAvailable] = useState(false);
+  const [focusNewBatchKey, setFocusNewBatchKey] = useState<string | null>(null);
+  const formRef = useRef<HTMLFormElement | null>(null);
+  const lastFocusedBatchFieldRef = useRef("quantity");
+  const productUpdateInFlightRef = useRef(false);
   const [catalogModal, setCatalogModal] = useState<"brand" | null>(null);
   const [catalogName, setCatalogName] = useState("");
   const [catalogSaving, setCatalogSaving] = useState(false);
@@ -181,6 +230,34 @@ export const ProductEntryView: React.FC = () => {
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [priceViewProduct]);
+  useEffect(() => {
+    if (!batchStockInfoOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setBatchStockInfoOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [batchStockInfoOpen]);
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [drawerOpen]);
+  useEffect(() => {
+    if (!focusNewBatchKey) return;
+    const frame = window.requestAnimationFrame(() => {
+      const input = formRef.current?.querySelector<HTMLElement>(
+        `[data-batch-key="${focusNewBatchKey}"][data-batch-field="quantity"]`,
+      );
+      input?.focus({ preventScroll: true });
+      input?.scrollIntoView({ block: "nearest", inline: "nearest" });
+      setFocusNewBatchKey(null);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [batchDrafts, focusNewBatchKey]);
   const brandNames = Array.from(
     new Set(products.map((product) => product.brand).filter(Boolean)),
   );
@@ -238,7 +315,94 @@ export const ProductEntryView: React.FC = () => {
   const addAnotherBatch = () => {
     const batch = createBatchDraft();
     setBatchDrafts((previous) => [...previous, batch]);
-    if (drawerMode === "create" && !defaultBatchKey) setDefaultBatchKey(batch.key);
+    setFocusNewBatchKey(batch.key);
+    if (!defaultBatchKey) setDefaultBatchKey(batch.key);
+  };
+
+  const handleBatchGridNavigation = (event: React.KeyboardEvent<HTMLInputElement | HTMLButtonElement>) => {
+    const { key } = event;
+    if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(key)) return;
+    const form = formRef.current;
+    if (!form) return;
+    const current = event.currentTarget;
+    const addBatchButton = form.querySelector<HTMLButtonElement>("[data-add-batch]");
+    const submitButton = form.querySelector<HTMLButtonElement>("[data-product-submit]");
+
+    if (current === submitButton && key === "ArrowUp" && addBatchButton) {
+      event.preventDefault();
+      addBatchButton.focus();
+      addBatchButton.scrollIntoView({ block: "nearest" });
+      return;
+    }
+    if (current === addBatchButton) {
+      if (key === "ArrowDown" && submitButton) {
+        event.preventDefault();
+        submitButton.focus();
+        submitButton.scrollIntoView({ block: "nearest" });
+      } else if (key === "ArrowUp") {
+        const rows = Array.from(form.querySelectorAll<HTMLElement>("[data-batch-row]"));
+        for (let index = rows.length - 1; index >= 0; index -= 1) {
+          const candidate = rows[index].querySelector<HTMLElement>(
+            `[data-batch-field="${lastFocusedBatchFieldRef.current}"]`,
+          );
+          if (candidate && !candidate.matches(":disabled, [readonly]")) {
+            event.preventDefault();
+            candidate.focus();
+            candidate.scrollIntoView({ block: "nearest", inline: "nearest" });
+            return;
+          }
+        }
+      }
+      return;
+    }
+
+    const row = current.closest<HTMLElement>("[data-batch-row]");
+    const field = current.dataset.batchField;
+    if (!row || !field) return;
+    lastFocusedBatchFieldRef.current = field;
+
+    if (key === "ArrowLeft" || key === "ArrowRight") {
+      const input = current as HTMLInputElement;
+      const hasSelection = input.selectionStart !== input.selectionEnd;
+      const atBoundary = key === "ArrowLeft"
+        ? input.selectionStart === 0
+        : input.selectionEnd === input.value.length;
+      if (hasSelection || !atBoundary) return;
+      const fields = ["quantity", "purchaseRate", "sellingRate", "mrp"];
+      const direction = key === "ArrowRight" ? 1 : -1;
+      let index = fields.indexOf(field) + direction;
+      while (index >= 0 && index < fields.length) {
+        const candidate = row.querySelector<HTMLElement>(`[data-batch-field="${fields[index]}"]`);
+        if (candidate && !candidate.matches(":disabled, [readonly]")) {
+          event.preventDefault();
+          candidate.focus();
+          candidate.scrollIntoView({ block: "nearest", inline: "nearest" });
+          return;
+        }
+        index += direction;
+      }
+      return;
+    }
+
+    const rows = Array.from(form.querySelectorAll<HTMLElement>("[data-batch-row]"));
+    const rowIndex = rows.indexOf(row);
+    const direction = key === "ArrowDown" ? 1 : -1;
+    let nextIndex = rowIndex + direction;
+    while (nextIndex >= 0 && nextIndex < rows.length) {
+      const candidate = rows[nextIndex].querySelector<HTMLElement>(`[data-batch-field="${field}"]`);
+      if (candidate && !candidate.matches(":disabled, [readonly]")) {
+        event.preventDefault();
+        candidate.focus();
+        candidate.scrollIntoView({ block: "nearest", inline: "nearest" });
+        return;
+      }
+      nextIndex += direction;
+    }
+    if (key === "ArrowDown" && rowIndex === rows.length - 1 && addBatchButton) {
+      event.preventDefault();
+      addBatchButton.focus();
+      addBatchButton.scrollIntoView({ block: "nearest" });
+    }
   };
 
   const removeBatchDraft = (key: string) => {
@@ -251,6 +415,8 @@ export const ProductEntryView: React.FC = () => {
   };
 
   const openCreateDrawer = () => {
+    productUpdateInFlightRef.current = false;
+    setPendingRetryAvailable(false);
     setDrawerMode("create");
     setEditingId(null);
     setFormName("");
@@ -280,22 +446,57 @@ export const ProductEntryView: React.FC = () => {
     const existingBatches = product.batches.map((batch) => ({
       key: batch.id,
       id: batch.id,
-      label: batch.label || "",
       quantity: String(batch.remainingQuantity),
       purchaseRate: String(batch.purchaseRate),
       sellingRate: String(batch.sellingRate),
       mrp: batch.mrp == null ? "" : String(batch.mrp),
       isNew: false,
+      original: {
+        quantity: String(batch.remainingQuantity),
+        sellingRate: String(batch.sellingRate),
+        mrp: batch.mrp == null ? "" : String(batch.mrp),
+      },
     }));
     setBatchDrafts(existingBatches);
     const defaultBatch = existingBatches.find((batch) => product.batches.find((source) => source.id === batch.id)?.isDefaultSellingRate)
       || existingBatches.find((batch) => Number(batch.sellingRate) === product.sellingPrice);
-    setDefaultBatchKey(defaultBatch?.key || "");
+    const availableDefault = defaultBatch && Number(defaultBatch.quantity) > 0
+      ? defaultBatch
+      : existingBatches.find((batch) => Number(batch.quantity) > 0);
+    setDefaultBatchKey(availableDefault?.key || "");
+    const pendingUpdate = readPendingProductUpdate(product.id);
+    setPendingRetryAvailable(Boolean(pendingUpdate));
+    if (pendingUpdate) {
+      showToast("A previous update has an uncertain result. Confirm it first; any edits in this drawer will need to be applied after reopening.", "error");
+    }
     setDrawerOpen(true);
   };
 
   const handleFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (productUpdateInFlightRef.current) return;
+    const pendingRetry = drawerMode === "edit" && editingId ? readPendingProductUpdate(editingId) : null;
+    if (pendingRetry && editingId) {
+      productUpdateInFlightRef.current = true;
+      setFormSaving(true);
+      try {
+        await updateProduct(editingId, pendingRetry.payload);
+        clearPendingProductUpdate(editingId);
+        setPendingRetryAvailable(false);
+        setDrawerOpen(false);
+        showToast("The previous product update was confirmed. Reopen the product to make further changes.");
+      } catch (error) {
+        if (error instanceof ApiClientError && error.status !== undefined && error.status >= 400 && error.status < 500 && !error.message.includes("still resolving")) {
+          clearPendingProductUpdate(editingId);
+          setPendingRetryAvailable(false);
+        }
+        showToast(error instanceof Error ? error.message : "Unable to confirm the previous product update.", "error");
+      } finally {
+        productUpdateInFlightRef.current = false;
+        setFormSaving(false);
+      }
+      return;
+    }
     if (
       !formName.trim() ||
       !formBrandId ||
@@ -348,7 +549,7 @@ export const ProductEntryView: React.FC = () => {
       }
     }
     const selectedDefault = batchesByKey.get(defaultBatchKey);
-    if ((drawerMode === "create" && !selectedDefault) || (defaultBatchKey && (!selectedDefault || Number(selectedDefault.quantity) <= 0))) {
+    if (!selectedDefault || Number(selectedDefault.quantity) <= 0) {
       showToast("Choose a default selling rate from a batch with available stock.", "error");
       return;
     }
@@ -360,6 +561,7 @@ export const ProductEntryView: React.FC = () => {
       showToast("Only Admin users can add stock batches.", "error");
       return;
     }
+    productUpdateInFlightRef.current = true;
     setFormSaving(true);
     try {
       const basePayload = {
@@ -379,7 +581,6 @@ export const ProductEntryView: React.FC = () => {
           qty: totalStock,
           batches: batchDrafts.map((batch) => ({
             clientKey: batch.key,
-            label: batch.label.trim() || null,
             quantity: Number(batch.quantity),
             purchaseRate: Number(batch.purchaseRate),
             sellingRate: Number(batch.sellingRate),
@@ -389,35 +590,59 @@ export const ProductEntryView: React.FC = () => {
         });
       }
       else if (editingId) {
-        await updateProduct(editingId, {
-          ...basePayload,
-          batchPricing: {
-            updates: batchDrafts.filter((batch) => !batch.isNew).map((batch) => ({
-              id: batch.id!,
-              label: batch.label.trim() || null,
-              remainingQuantity: Number(batch.quantity),
-              sellingRate: Number(batch.sellingRate),
-              mrp: batch.mrp.trim() ? Number(batch.mrp) : null,
-            })),
-            additions: batchDrafts.filter((batch) => batch.isNew).map((batch) => ({
-              clientKey: batch.key,
-              label: batch.label.trim() || null,
-              quantity: Number(batch.quantity),
-              purchaseRate: Number(batch.purchaseRate),
-              sellingRate: Number(batch.sellingRate),
-              mrp: batch.mrp.trim() ? Number(batch.mrp) : null,
-            })),
-            defaultBatchKey: defaultBatchKey || null,
-          },
+        const updates = batchDrafts.filter((batch) => !batch.isNew).flatMap((batch) => {
+          const original = batch.original;
+          if (!original) return [];
+          const change: NonNullable<UpdateProductPayload["batchPricing"]>["updates"][number] = { id: batch.id! };
+          const initialQuantity = Number(original.quantity);
+          const nextQuantity = Number(batch.quantity);
+          if (initialQuantity !== nextQuantity) {
+            change.expectedRemainingQuantity = initialQuantity;
+            change.remainingQuantity = nextQuantity;
+          }
+          if (Number(original.sellingRate) !== Number(batch.sellingRate)) change.sellingRate = Number(batch.sellingRate);
+          const initialMrp = original.mrp.trim() ? Number(original.mrp) : null;
+          const nextMrp = batch.mrp.trim() ? Number(batch.mrp) : null;
+          if (initialMrp !== nextMrp) change.mrp = nextMrp;
+          return Object.keys(change).length > 1 ? [change] : [];
         });
+        const idempotencyKey = crypto.randomUUID();
+        const pending: PendingProductUpdate = {
+          idempotencyKey,
+          payload: {
+            ...basePayload,
+            idempotencyKey,
+            batchPricing: {
+              updates,
+              additions: batchDrafts.filter((batch) => batch.isNew).map((batch) => ({
+                clientKey: batch.key,
+                quantity: Number(batch.quantity),
+                purchaseRate: Number(batch.purchaseRate),
+                sellingRate: Number(batch.sellingRate),
+                mrp: batch.mrp.trim() ? Number(batch.mrp) : null,
+              })),
+              defaultBatchKey: defaultBatchKey || null,
+            },
+          },
+        };
+        writePendingProductUpdate(editingId, pending);
+        setPendingRetryAvailable(true);
+        await updateProduct(editingId, pending.payload);
+        clearPendingProductUpdate(editingId);
+        setPendingRetryAvailable(false);
       }
       setDrawerOpen(false);
     } catch (error) {
+      if (drawerMode === "edit" && editingId && error instanceof ApiClientError && error.status !== undefined && error.status >= 400 && error.status < 500 && !error.message.includes("still resolving")) {
+        clearPendingProductUpdate(editingId);
+        setPendingRetryAvailable(false);
+      }
       showToast(
         error instanceof Error ? error.message : "Unable to save the product.",
         "error",
       );
     } finally {
+      productUpdateInFlightRef.current = false;
       setFormSaving(false);
     }
   };
@@ -813,10 +1038,11 @@ export const ProductEntryView: React.FC = () => {
               <div className="rounded-lg border border-outline-variant/30">
                 <table className="w-full table-fixed border-collapse text-left">
                   <colgroup>
-                    <col className="w-[8%]" />
-                    <col className="w-[27%]" />
-                    <col className="w-[32.5%]" />
-                    <col className="w-[32.5%]" />
+                    <col className="w-[6%]" />
+                    <col className="w-[22%]" />
+                    <col className="w-[24%]" />
+                    <col className="w-[24%]" />
+                    <col className="w-[24%]" />
                   </colgroup>
                   <thead className="sticky top-0 z-10 bg-surface-container-low">
                     <tr>
@@ -824,11 +1050,12 @@ export const ProductEntryView: React.FC = () => {
                       <th className="break-words px-2 py-3 text-center font-label-md text-label-md text-on-surface-variant">Quantity</th>
                       <th className="break-words px-2 py-3 text-right font-label-md text-label-md text-on-surface-variant">Purchase Price</th>
                       <th className="break-words px-2 py-3 text-right font-label-md text-label-md text-on-surface-variant">Selling Price</th>
+                      <th className="break-words px-2 py-3 text-right font-label-md text-label-md text-on-surface-variant">MRP</th>
                     </tr>
                   </thead>
                   <tbody>
                     {getBatchPriceGroups(priceViewProduct).map((group, index) => (
-                      <tr key={`${group.purchaseRate}-${group.sellingRate}`} className="border-t border-outline-variant/30">
+                      <tr key={`${group.purchaseRate}-${group.sellingRate}-${group.mrp == null ? "no-mrp" : group.mrp.toFixed(2)}`} className="border-t border-outline-variant/30">
                         <td className="px-2 py-3 font-data-mono-md text-data-mono-md text-on-surface">{index + 1}</td>
                         <td className="break-words px-2 py-3 text-center font-data-mono-md text-data-mono-md text-on-surface">
                           {group.quantity} {priceViewProduct.unit}
@@ -838,6 +1065,9 @@ export const ProductEntryView: React.FC = () => {
                         </td>
                         <td className="break-words px-2 py-3 text-right font-data-mono-md text-data-mono-md text-on-surface">
                           {formatCurrency(group.sellingRate)}
+                        </td>
+                        <td className="break-words px-2 py-3 text-right font-data-mono-md text-data-mono-md text-on-surface">
+                          {group.mrp == null ? "—" : formatCurrency(group.mrp)}
                         </td>
                       </tr>
                     ))}
@@ -852,6 +1082,7 @@ export const ProductEntryView: React.FC = () => {
                       </th>
                       <th className="px-2 py-3 text-right font-label-lg text-label-lg font-semibold text-on-surface-variant">—</th>
                       <th className="px-2 py-3 text-right font-label-lg text-label-lg font-semibold text-on-surface-variant">—</th>
+                      <th className="px-2 py-3 text-right font-label-lg text-label-lg font-semibold text-on-surface-variant">—</th>
                     </tr>
                   </tfoot>
                 </table>
@@ -861,23 +1092,23 @@ export const ProductEntryView: React.FC = () => {
         </div>
       )}
 
-      {/* Slide-Over Drawer for Add / Edit Product */}
+      {/* Centered Add / Edit Product modal */}
       {drawerOpen && (
         <div
-          className="fixed inset-0 z-50 bg-inverse-surface/40 flex justify-end"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-3 sm:p-5"
           onClick={() => setDrawerOpen(false)}
         >
           <div
-            className="w-full max-w-md bg-surface-container-lowest h-full shadow-2xl flex flex-col p-space-xl overflow-y-auto animate-in slide-in-from-right duration-200"
+            className="flex max-h-[94vh] w-full max-w-[1150px] flex-col overflow-hidden rounded-2xl border border-outline-variant/30 bg-white shadow-2xl sm:w-[85vw] lg:w-[78vw]"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between pb-space-md border-b border-outline-variant/20">
+            <div className="flex shrink-0 items-center justify-between border-b border-outline-variant/20 bg-white px-4 py-3 sm:px-6">
               <div className="flex flex-col">
 
                 <h2 className="font-headline-sm text-headline-sm text-on-surface">
                   {drawerMode === "create"
                     ? "Add New Product"
-                    : "Edit Product Details"}
+                    : "Edit Product"}
                 </h2>
               </div>
               <button
@@ -893,9 +1124,22 @@ export const ProductEntryView: React.FC = () => {
 
             {/* Add/Edit Product Form */}
             <form
-              className="flex flex-col gap-space-md mt-space-sm flex-1"
+              ref={formRef}
+              className="flex min-h-0 flex-1 flex-col"
               onSubmit={handleFormSubmit}
             >
+              <div className="min-h-0 flex-1 overflow-y-auto bg-white p-3 sm:p-4">
+              <section className="mb-3 overflow-hidden rounded-xl border border-outline-variant/30 bg-white">
+              <div className="p-3">
+              {catalogError && (
+                <p
+                  role="alert"
+                  className="mb-3 rounded-md bg-error-container px-3 py-2 text-xs text-on-error-container"
+                >
+                  Brand and unit options could not be loaded: {catalogError}
+                </p>
+              )}
+              <div className="grid grid-cols-1 gap-space-md md:grid-cols-3">
               {/* Product Name */}
               <div className="flex flex-col gap-1.5">
                 <label className="font-label-md text-label-md text-on-surface font-semibold flex items-center justify-between">
@@ -916,16 +1160,7 @@ export const ProductEntryView: React.FC = () => {
                 />
               </div>
 
-              {catalogError && (
-                <p
-                  role="alert"
-                  className="rounded-md bg-error-container px-3 py-2 text-xs text-on-error-container"
-                >
-                  Brand and unit options could not be loaded: {catalogError}
-                </p>
-              )}
-              <div className="grid grid-cols-2 gap-space-md">
-                <div className="flex flex-col gap-1.5 text-[12px] font-medium text-on-surface">
+              <div className="flex flex-col gap-1.5 text-[12px] font-medium text-on-surface">
                   <label>
                     Brand
                     <select
@@ -995,65 +1230,129 @@ export const ProductEntryView: React.FC = () => {
 
                 </div>
               </div>
-              <div className="flex items-end justify-between gap-3 rounded-lg border border-outline-variant/30 bg-surface-container-lowest px-3 py-2">
-                <div><label className="font-label-md text-label-md font-semibold text-on-surface">{drawerMode === "create" ? "Initial Stock (Total)" : "Current Stock (Total)"}</label><p className="text-[11px] text-on-surface-variant">Calculated from the quantities in each batch.</p></div>
-                <strong className="shrink-0 font-data-mono-md text-data-mono-md text-on-surface">{batchStockTotal.toLocaleString()} {selectedUnit?.symbol || selectedUnit?.name || productBeingEdited?.unit || "units"}</strong>
               </div>
+              </section>
 
-              <section className="rounded-xl border border-outline-variant/30 bg-surface-container-lowest p-3 sm:p-4">
-                <div className="mb-3 flex items-start gap-2">
-                  <span className="material-symbols-outlined mt-0.5 text-[20px] text-primary">layers</span>
-                  <div><h3 className="font-label-lg text-label-lg font-semibold text-on-surface">Batch-wise Pricing</h3><p className="font-body-sm text-body-sm text-on-surface-variant">Add batches with their own quantities and prices. Set one selling rate as the product listing default.</p></div>
+              <section className="rounded-xl border border-outline-variant/30 bg-white p-2.5 sm:p-3">
+                <div className="mb-3 flex items-center justify-between gap-2">
+                  <div className="flex items-start gap-2">
+                    <span className="material-symbols-outlined mt-0.5 text-[20px] text-primary">layers</span>
+                    <h3 className="font-label-lg text-label-lg font-semibold text-on-surface">Batch-wise Pricing</h3>
+                  </div>
+                  {drawerMode === "edit" && (
+                    <button
+                      type="button"
+                      onClick={() => setBatchStockInfoOpen(true)}
+                      className="inline-flex shrink-0 items-center justify-center rounded-full p-1 text-on-surface-variant transition-colors hover:bg-surface-container hover:text-primary"
+                      aria-label="Batch quantity restrictions"
+                      title="Batch quantity restrictions"
+                    >
+                      <span className="material-symbols-outlined text-[18px]">info</span>
+                    </button>
+                  )}
                 </div>
-                <div className="space-y-2.5">
-                  {batchDrafts.map((batch, index) => {
-                    const isDefault = defaultBatchKey === batch.key;
-                    return <article key={batch.key} className={`rounded-lg border p-3 ${index % 2 === 0 ? "border-[#ead9a7] bg-[#fffaf0]" : "border-[#cfe5d0] bg-[#f2faf2]"}`}>
-                      <div className="mb-2 flex items-center justify-between gap-2">
-                        <span className="rounded-full bg-surface-container px-2.5 py-1 font-label-sm text-label-sm font-semibold text-on-surface">Batch {index + 1}{isDefault ? " · Default" : ""}</span>
-                        <button type="button" disabled={!batch.isNew} onClick={() => batch.isNew && removeBatchDraft(batch.key)} title={batch.isNew ? "Remove this unsaved batch" : "Existing stock batches are retained to preserve inventory history"} aria-label={`Remove batch ${index + 1}`} className="rounded p-1 text-error transition hover:bg-error-container disabled:cursor-not-allowed disabled:opacity-40">
-                          <span className="material-symbols-outlined text-[18px]">delete</span>
-                        </button>
-                      </div>
-                      <label className="mb-2 block text-[11px] font-medium text-on-surface-variant">Batch reference (optional)<input value={batch.label} onChange={(event) => updateBatchDraft(batch.key, { label: event.target.value })} maxLength={120} placeholder={batch.id ? `Batch ${batch.id.slice(0, 8)}` : "e.g. Supplier reference"} className="mt-1 h-8 w-full rounded border border-outline-variant bg-white px-2 text-xs text-on-surface outline-none focus:border-primary" /></label>
-                      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                        <label className="flex min-w-0 flex-col gap-1 text-[11px] font-medium text-on-surface">Quantity <span className="text-error">*</span><NumericTextInput required maxDecimals={selectedUnitAllowsDecimals ? 3 : 0} value={batch.quantity} onValueChange={(quantity) => updateBatchDraft(batch.key, { quantity })} readOnly={!batch.isNew && !isAdmin} className="h-8 w-full rounded border border-outline-variant bg-white px-2 text-xs font-normal text-on-surface read-only:opacity-60" /></label>
-                        <label className="flex min-w-0 flex-col gap-1 text-[11px] font-medium text-on-surface">Purchase Price <span className="text-error">*</span><NumericTextInput required maxDecimals={2} value={batch.purchaseRate} onValueChange={(purchaseRate) => updateBatchDraft(batch.key, { purchaseRate })} readOnly={!batch.isNew} aria-label={`Purchase price per unit for batch ${index + 1}`} className="h-8 w-full rounded border border-outline-variant bg-white px-2 text-xs font-normal text-on-surface read-only:opacity-60" /></label>
-                        <label className="flex min-w-0 flex-col gap-1 text-[11px] font-medium text-on-surface">Selling Price <span className="text-error">*</span><NumericTextInput required maxDecimals={2} value={batch.sellingRate} onValueChange={(sellingRate) => updateBatchDraft(batch.key, { sellingRate })} aria-label={`Selling price for batch ${index + 1}`} className="h-8 w-full rounded border border-outline-variant bg-white px-2 text-xs font-normal text-on-surface" /></label>
-                        <label className="flex min-w-0 flex-col gap-1 text-[11px] font-medium text-on-surface">MRP <span className="font-normal text-on-surface-variant">(optional)</span><NumericTextInput maxDecimals={2} value={batch.mrp} onValueChange={(mrp) => updateBatchDraft(batch.key, { mrp })} aria-label={`MRP for batch ${index + 1}`} className="h-8 w-full rounded border border-outline-variant bg-white px-2 text-xs font-normal text-on-surface" /></label>
-                      </div>
-                      {!batch.isNew && <p className="mt-1.5 text-[10px] text-on-surface-variant">Recorded purchase cost is locked. Stock can only be reduced here; add a batch to increase it.</p>}
-                      <label className="mt-2 inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-on-surface"><input type="radio" name="default-selling-rate" checked={isDefault} disabled={Number(batch.quantity) <= 0} onChange={() => setDefaultBatchKey(batch.key)} className="accent-primary" />Use this as the product listing default</label>
-                    </article>;
-                  })}
-                </div>
+                  <div className="overflow-x-auto rounded-lg border border-outline-variant/30 lg:overflow-x-visible">
+                    <table className="w-full min-w-[760px] table-fixed border-collapse text-left lg:min-w-0">
+                      <colgroup>
+                        <col className="w-[12%]" />
+                        <col className="w-[20%]" />
+                        <col className="w-[17%]" />
+                        <col className="w-[17%]" />
+                        <col className="w-[17%]" />
+                        <col className="w-[9%]" />
+                        <col className="w-[8%]" />
+                      </colgroup>
+                      <thead className="bg-surface-container-low">
+                        <tr>
+                          <th className="px-1.5 py-2 text-center font-label-sm text-label-sm text-on-surface-variant">#</th>
+                          <th className="px-1.5 py-2 font-label-sm text-label-sm text-on-surface-variant">{drawerMode === "edit" ? "Quantity (Available)" : "Quantity"}</th>
+                          <th className="px-1.5 py-2 font-label-sm text-label-sm text-on-surface-variant">Purchase Price</th>
+                          <th className="px-1.5 py-2 font-label-sm text-label-sm text-on-surface-variant">Selling Price</th>
+                          <th className="px-1.5 py-2 font-label-sm text-label-sm text-on-surface-variant">MRP</th>
+                          <th className="px-1 py-2 text-center font-label-sm text-label-sm text-on-surface-variant">Default</th>
+                          <th className="px-1 py-2 text-center font-label-sm text-label-sm text-on-surface-variant">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {batchDrafts.map((batch, index) => {
+                          const isDefault = defaultBatchKey === batch.key;
+                          return (
+                            <React.Fragment key={batch.key}>
+                            <tr data-batch-row data-batch-key={batch.key} className="border-t border-outline-variant/30">
+                              <td className="px-1.5 py-1.5 text-center align-middle">
+                                <span className="font-data-mono-md text-data-mono-md text-on-surface">{index + 1}</span>
+                              </td>
+                              <td className="px-1.5 py-1.5 align-middle">
+                                <NumericTextInput required maxDecimals={selectedUnitAllowsDecimals ? 3 : 0} value={batch.quantity} onValueChange={(quantity) => updateBatchDraft(batch.key, { quantity })} onFocus={() => { lastFocusedBatchFieldRef.current = "quantity"; }} onKeyDown={handleBatchGridNavigation} data-batch-field="quantity" data-product-form-field="qty" readOnly={!batch.isNew && !isAdmin} aria-label={`Available quantity for batch ${index + 1}`} className="h-8 w-full rounded border border-outline-variant bg-white px-2 text-xs font-normal text-on-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1" />
+                              </td>
+                              <td className="px-1.5 py-1.5 align-middle">
+                                <NumericTextInput required maxDecimals={2} value={batch.purchaseRate} onValueChange={(purchaseRate) => updateBatchDraft(batch.key, { purchaseRate })} onFocus={() => { lastFocusedBatchFieldRef.current = "purchaseRate"; }} onKeyDown={handleBatchGridNavigation} data-batch-field="purchaseRate" readOnly={!batch.isNew} aria-label={`Purchase price for batch ${index + 1}`} className="h-8 w-full rounded border border-outline-variant bg-white px-2 text-xs font-normal text-on-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1" />
+                              </td>
+                              <td className="px-1.5 py-1.5 align-middle">
+                                <NumericTextInput required maxDecimals={2} value={batch.sellingRate} onValueChange={(sellingRate) => updateBatchDraft(batch.key, { sellingRate })} onFocus={() => { lastFocusedBatchFieldRef.current = "sellingRate"; }} onKeyDown={handleBatchGridNavigation} data-batch-field="sellingRate" aria-label={`Selling price for batch ${index + 1}`} className="h-8 w-full rounded border border-outline-variant bg-white px-2 text-xs font-normal text-on-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1" />
+                              </td>
+                              <td className="px-1.5 py-1.5 align-middle">
+                                <NumericTextInput maxDecimals={2} value={batch.mrp} onValueChange={(mrp) => updateBatchDraft(batch.key, { mrp })} onFocus={() => { lastFocusedBatchFieldRef.current = "mrp"; }} onKeyDown={handleBatchGridNavigation} data-batch-field="mrp" aria-label={`MRP for batch ${index + 1}`} className="h-8 w-full rounded border border-outline-variant bg-white px-2 text-xs font-normal text-on-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1" />
+                              </td>
+                              <td className="px-1.5 py-1.5 align-middle">
+                                <div className="flex justify-center">
+                                  <input type="radio" name="default-selling-rate" checked={isDefault} disabled={Number(batch.quantity) <= 0} onChange={() => setDefaultBatchKey(batch.key)} aria-label={`Use batch ${index + 1} as the product listing default`} className="accent-primary" />
+                                </div>
+                              </td>
+                              <td className="px-1.5 py-1.5 align-middle">
+                                <div className="flex flex-col items-center gap-1">
+                                  <button type="button" disabled={!batch.isNew} onClick={() => batch.isNew && removeBatchDraft(batch.key)} title={batch.isNew ? "Remove this unsaved batch" : "Existing stock batches are retained to preserve inventory history"} aria-label={`Remove batch ${index + 1}`} className="rounded p-1 text-error transition hover:bg-error-container disabled:cursor-not-allowed disabled:opacity-40">
+                                    <span className="material-symbols-outlined text-[18px]">delete</span>
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                            </React.Fragment>
+                          );
+                        })}
+                      </tbody>
+                      <tfoot className="border-t border-outline-variant/40 bg-surface-container-low">
+                        <tr>
+                          <th className="px-2 py-2.5 text-left font-label-md text-label-md font-semibold text-on-surface">Total</th>
+                          <th className="px-1.5 py-2.5 font-data-mono-md text-data-mono-md font-semibold text-on-surface">{batchStockTotal.toLocaleString()} {selectedUnit?.symbol || selectedUnit?.name || productBeingEdited?.unit || "units"}</th>
+                          <th colSpan={5} className="px-2 py-2.5" />
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
                 <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-                  <button type="button" onClick={addAnotherBatch} className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary-container/60 px-3 text-xs font-semibold text-on-surface transition hover:bg-primary-container"><span className="material-symbols-outlined text-[16px]">add</span>Add Another Batch</button>
+                  <button type="button" data-add-batch onKeyDown={handleBatchGridNavigation} onClick={addAnotherBatch} className="inline-flex h-9 items-center gap-1.5 rounded-md border border-primary/40 bg-surface-container-lowest px-3 text-sm font-semibold text-primary transition hover:bg-primary-container/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2"><span className="material-symbols-outlined text-[17px]">add</span>Add New Batch</button>
                   {drawerMode === "edit" && !isAdmin && <span className="text-[11px] text-on-surface-variant">Only Admin users can change batch quantities or add stock.</span>}
                 </div>
                 {drawerMode === "edit" && !batchDrafts.length && <p className="mt-2 text-[11px] text-on-surface-variant">No active stock batches are available. Add a batch to receive stock.</p>}
                 {drawerMode === "edit" && batchDrafts.length > 0 && <label className="mt-3 flex items-center gap-2 border-t border-outline-variant/30 pt-3 text-xs font-medium text-on-surface"><input type="radio" name="default-selling-rate" checked={!defaultBatchKey} onChange={() => setDefaultBatchKey("")} className="accent-primary" />Keep existing product listing default ({formatCurrency(productBeingEdited?.sellingPrice || 0)})</label>}
               </section>
+              </div>
 
               {/* Form Action Buttons */}
-              <div className="mt-auto pt-space-lg flex items-center justify-end gap-space-sm border-t border-outline-variant/20">
+              <div className="flex shrink-0 items-center justify-end gap-space-sm border-t border-outline-variant/20 bg-white px-3 py-2.5 sm:px-6">
                 <button
-                  className="h-8 px-space-md rounded bg-surface-container-low hover:bg-surface-container text-on-surface font-label-md text-label-md transition-colors"
+                  className="h-9 rounded border border-outline-variant/50 bg-surface-container-lowest px-space-md font-label-md text-label-md text-on-surface transition-colors hover:bg-surface-container"
                   onClick={() => setDrawerOpen(false)}
                   type="button"
                 >
                   Cancel
                 </button>
                 <button
-                  className="h-8 px-space-lg rounded bg-primary-container hover:bg-primary text-on-primary font-label-md text-label-md font-semibold transition-colors shadow-sm flex items-center gap-1 disabled:opacity-60"
+                  className="inline-flex h-9 min-w-[210px] items-center justify-center gap-1.5 whitespace-nowrap rounded bg-primary-container px-space-lg font-label-md text-label-md font-semibold text-on-primary shadow-sm transition-colors hover:bg-primary disabled:opacity-60"
                   type="submit"
+                  data-product-submit
                   data-product-form-field="save"
                   disabled={formSaving}
+                  aria-busy={formSaving}
+                  onKeyDown={handleBatchGridNavigation}
                 >
-                  <span className="material-symbols-outlined text-[16px]">
-                    check
-                  </span>
-                  <span>{formSaving ? "Saving…" : "Save Product"}</span>
+                  {formSaving ? (
+                    <span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 border-on-primary/40 border-t-on-primary" />
+                  ) : (
+                    <span className="material-symbols-outlined text-[16px]">check</span>
+                  )}
+                  <span>{formSaving ? (drawerMode === "edit" ? "Updating Product..." : "Adding Product...") : drawerMode === "edit" && pendingRetryAvailable ? "Confirm Previous Update" : drawerMode === "edit" ? "Update Product" : "Add Product"}</span>
                 </button>
               </div>
             </form>
@@ -1213,6 +1512,48 @@ export const ProductEntryView: React.FC = () => {
               />
             )}
           </div>
+        </div>
+      )}
+      {batchStockInfoOpen && (
+        <div
+          className="fixed inset-0 z-[120] flex items-center justify-center bg-black/35 p-4"
+          onClick={() => setBatchStockInfoOpen(false)}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="batch-stock-info-title"
+            className="w-full max-w-sm rounded-xl border border-outline-variant/30 bg-white p-5 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start gap-3">
+              <span className="material-symbols-outlined mt-0.5 text-[20px] text-primary">info</span>
+              <div>
+                <h2 id="batch-stock-info-title" className="font-label-lg text-label-lg font-semibold text-on-surface">
+                  Batch limits
+                </h2>
+                <p className="mt-2 font-label-sm text-label-sm font-semibold text-on-surface">You can’t</p>
+                <ul className="mt-1 list-disc space-y-1 pl-4 font-body-sm text-body-sm text-on-surface-variant">
+                  <li>Increase an existing batch’s quantity.</li>
+                  <li>Change its purchase price or delete the batch.</li>
+                </ul>
+                <p className="mt-3 font-label-sm text-label-sm font-semibold text-on-surface">You can</p>
+                <ul className="mt-1 list-disc space-y-1 pl-4 font-body-sm text-body-sm text-on-surface-variant">
+                  <li>Change its selling price and MRP.</li>
+                  <li>As Admin, reduce stock or add a new batch.</li>
+                </ul>
+              </div>
+            </div>
+            <div className="mt-4 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setBatchStockInfoOpen(false)}
+                className="h-8 rounded-md bg-primary-container px-4 font-label-md text-label-md font-semibold text-on-primary"
+              >
+                Got it
+              </button>
+            </div>
+          </section>
         </div>
       )}
     </div>

@@ -1,11 +1,28 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { AlertTriangle, Building2, CreditCard, FileText, LoaderCircle, Package, Pencil, Plus, Printer, Wallet } from 'lucide-react';
+import { AnimatePresence, motion } from 'motion/react';
+import { AlertTriangle, Building2, CircleAlert, CreditCard, FileText, Info, LoaderCircle, LockKeyhole, PackageX, Pencil, Plus, Printer, ShoppingCart, Wallet, X } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { createSupplierPaymentRequest, getSupplierLedgerReport } from '../services/api';
 import { NumericTextInput } from '../components/ui/NumericTextInput';
 import LoaderOne from '../components/ui/loader-one';
 import { formatCurrency } from '../utils/currency';
 import { DEFAULT_PAGE_SIZE, getPageRecords, getPaginationRange, PaginationControls } from '../components/PaginationControls';
+
+type PurchaseCancellationRestrictionCode = 'PURCHASE_STATUS_NOT_POSTED' | 'ORIGINAL_BATCH_UNAVAILABLE' | 'BATCH_INACTIVE' | 'STOCK_QUANTITY_CHANGED' | 'SALES_HISTORY_EXISTS' | 'STOCK_MOVEMENT_HISTORY_EXISTS';
+type PurchaseCancellationBlocker = {
+  code?: PurchaseCancellationRestrictionCode;
+  purchaseItemId: string | null;
+  productId: string | null;
+  productName: string | null;
+  batchReference: string | null;
+  purchasedQuantity: string | null;
+  batchReceivedQuantity: string | null;
+  currentAvailableQuantity: string | null;
+  batchStatus: string | null;
+  hasSalesHistory: boolean | null;
+  hasStockMovementHistory: boolean | null;
+  reason: string;
+};
 
 type SupplierLedgerPurchase = {
   id: string;
@@ -17,7 +34,7 @@ type SupplierLedgerPurchase = {
   creditApplied: string | number;
   outstanding: string | number;
   status: 'POSTED' | 'CANCELLED';
-  cancellationEligibility: { eligible: boolean; reasons: string[]; blockers?: Array<{ productId: string; productName: string; reason: string }> };
+  cancellationEligibility: { eligible: boolean; reasons: string[]; blockers?: PurchaseCancellationBlocker[] };
   cancellation?: {
     reason: string;
     cancelledAt: string;
@@ -86,6 +103,81 @@ const purchaseCancellationReasons = [
   'Incorrect purchase details',
 ] as const;
 
+const cancellationRestrictionMessages: Record<PurchaseCancellationRestrictionCode, { title: string; description: string; icon: typeof CircleAlert }> = {
+  PURCHASE_STATUS_NOT_POSTED: { title: 'Purchase status restriction', description: 'The current purchase status does not allow cancellation.', icon: FileText },
+  ORIGINAL_BATCH_UNAVAILABLE: { title: 'Original stock unavailable', description: 'The original purchased stock could not be reliably identified.', icon: CircleAlert },
+  BATCH_INACTIVE: { title: 'Original stock inactive', description: 'The original purchased stock is no longer active in inventory.', icon: LockKeyhole },
+  STOCK_QUANTITY_CHANGED: { title: 'Stock no longer fully available', description: 'The full originally purchased quantity is no longer available.', icon: PackageX },
+  SALES_HISTORY_EXISTS: { title: 'Sales activity recorded', description: 'A sales record exists for this stock. Returning it does not remove that history.', icon: ShoppingCart },
+  STOCK_MOVEMENT_HISTORY_EXISTS: { title: 'Stock changes recorded', description: 'Stock changes have been recorded for this purchase.', icon: Info },
+};
+
+const getCancellationRestrictionCode = (blocker: PurchaseCancellationBlocker): PurchaseCancellationRestrictionCode | undefined => {
+  if (blocker.code) return blocker.code;
+  const legacyReason = blocker.reason.toLowerCase();
+  if (legacyReason.includes('only posted purchases')) return 'PURCHASE_STATUS_NOT_POSTED';
+  if (legacyReason.includes('missing') || legacyReason.includes('does not match')) return 'ORIGINAL_BATCH_UNAVAILABLE';
+  if (legacyReason.includes('no longer active')) return 'BATCH_INACTIVE';
+  if (legacyReason.includes('no longer available')) return 'STOCK_QUANTITY_CHANGED';
+  if (legacyReason.includes('sale') || legacyReason.includes('return history')) return 'SALES_HISTORY_EXISTS';
+  if (legacyReason.includes('stock adjustment') || legacyReason.includes('movement history')) return 'STOCK_MOVEMENT_HISTORY_EXISTS';
+  return undefined;
+};
+
+const cancellationStatusLabel = (status: string | null) => {
+  if (!status) return 'Unavailable';
+  return status.toLowerCase().replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+};
+
+type CancellationRestrictionGroup = {
+  key: string;
+  purchaseItemId: string | null;
+  productId: string | null;
+  productName: string | null;
+  batchReference: string | null;
+  purchasedQuantity: string | null;
+  batchReceivedQuantity: string | null;
+  currentAvailableQuantity: string | null;
+  batchStatus: string | null;
+  hasSalesHistory: boolean | null;
+  hasStockMovementHistory: boolean | null;
+  restrictions: PurchaseCancellationBlocker[];
+};
+
+const groupCancellationBlockers = (blockers: PurchaseCancellationBlocker[]) => {
+  const grouped = new Map<string, CancellationRestrictionGroup>();
+  blockers.forEach((blocker) => {
+    const code = getCancellationRestrictionCode(blocker);
+    const key = blocker.purchaseItemId
+      ? `item:${blocker.purchaseItemId}`
+      : blocker.batchReference
+        ? `legacy-batch:${blocker.productId || blocker.productName || 'unknown'}:${blocker.batchReference}`
+        : blocker.productId
+          ? `legacy-product:${blocker.productId}`
+          : `purchase-status:${code || blocker.reason}`;
+    const group: CancellationRestrictionGroup = grouped.get(key) || {
+      key,
+      purchaseItemId: blocker.purchaseItemId,
+      productId: blocker.productId,
+      productName: blocker.productName,
+      batchReference: blocker.batchReference,
+      purchasedQuantity: blocker.purchasedQuantity,
+      batchReceivedQuantity: blocker.batchReceivedQuantity,
+      currentAvailableQuantity: blocker.currentAvailableQuantity,
+      batchStatus: blocker.batchStatus,
+      hasSalesHistory: blocker.hasSalesHistory,
+      hasStockMovementHistory: blocker.hasStockMovementHistory,
+      restrictions: [],
+    };
+    if (!group.restrictions.some((entry) => {
+      const existingCode = getCancellationRestrictionCode(entry);
+      return code ? existingCode === code : !existingCode && entry.reason === blocker.reason;
+    })) group.restrictions.push(blocker);
+    grouped.set(key, group);
+  });
+  return [...grouped.values()];
+};
+
 const escapeHtml = (value: string | number) => String(value)
   .replace(/&/g, '&amp;')
   .replace(/</g, '&lt;')
@@ -116,6 +208,8 @@ export const PartyLedgerManagementView: React.FC = () => {
   const [editingSupplierId, setEditingSupplierId] = useState<string | null>(null);
   const [supplierModalOpen, setSupplierModalOpen] = useState(false);
   const [savingSupplier, setSavingSupplier] = useState(false);
+  const [deactivateTarget, setDeactivateTarget] = useState<(typeof suppliers)[number] | null>(null);
+  const [deactivatingSupplier, setDeactivatingSupplier] = useState(false);
   const [paymentOpen, setPaymentOpen] = useState(false);
   const [cashPaymentAmount, setCashPaymentAmount] = useState('');
   const [upiPaymentAmount, setUpiPaymentAmount] = useState('');
@@ -124,6 +218,7 @@ export const PartyLedgerManagementView: React.FC = () => {
   const [savingPayment, setSavingPayment] = useState(false);
   const [purchasePage, setPurchasePage] = useState(1);
   const [cancelTarget, setCancelTarget] = useState<SupplierLedgerPurchase | null>(null);
+  const [eligibilityDetailsTarget, setEligibilityDetailsTarget] = useState<SupplierLedgerPurchase | null>(null);
   const [cancelReason, setCancelReason] = useState('');
   const [paymentGroupDecisions, setPaymentGroupDecisions] = useState<Record<string, boolean | undefined>>({});
   const [refundHandlingEnabled, setRefundHandlingEnabled] = useState(false);
@@ -138,8 +233,37 @@ export const PartyLedgerManagementView: React.FC = () => {
   const [savingRefundSettlement, setSavingRefundSettlement] = useState(false);
   const settlementIdempotencyKey = useRef(crypto.randomUUID());
 
+  useEffect(() => {
+    if (!deactivateTarget) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !deactivatingSupplier) setDeactivateTarget(null);
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [deactivateTarget, deactivatingSupplier]);
+
+  useEffect(() => {
+    if (!eligibilityDetailsTarget) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setEligibilityDetailsTarget(null);
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [eligibilityDetailsTarget]);
+
   const selectedSupplier = suppliers.find((supplier) => supplier.id === selectedSupplierId);
-  const newestFirstPurchases = [...(ledger?.purchases || [])].sort((left, right) =>
+  const activePurchases = (ledger?.purchases || []).filter((purchase) => purchase.status !== 'CANCELLED');
+  const newestFirstPurchases = [...activePurchases].sort((left, right) =>
     new Date(right.date).getTime() - new Date(left.date).getTime(),
   );
   const purchasePageCount = Math.max(1, Math.ceil(newestFirstPurchases.length / DEFAULT_PAGE_SIZE));
@@ -176,7 +300,7 @@ export const PartyLedgerManagementView: React.FC = () => {
   useEffect(() => { setPurchasePage(1); }, [selectedSupplierId]);
   useEffect(() => { if (purchasePage > purchasePageCount) setPurchasePage(purchasePageCount); }, [purchasePage, purchasePageCount]);
   const paymentReceipts = new Map<string, SupplierPaymentReceipt>();
-  for (const purchase of newestFirstPurchases) {
+  for (const purchase of ledger?.purchases || []) {
     for (const payment of purchase.payments) {
       const key = payment.paymentGroupId || payment.id;
       const receipt = paymentReceipts.get(key) || {
@@ -189,7 +313,7 @@ export const PartyLedgerManagementView: React.FC = () => {
       };
       receipt.amount += Number(payment.amount) || 0;
       receipt.methods.add(payment.method);
-      receipt.purchaseNumbers.add(purchase.supplierInvoiceNumber || purchase.purchaseNumber);
+      if (purchase.status !== 'CANCELLED') receipt.purchaseNumbers.add(purchase.supplierInvoiceNumber || purchase.purchaseNumber);
       paymentReceipts.set(key, receipt);
     }
   }
@@ -248,12 +372,16 @@ export const PartyLedgerManagementView: React.FC = () => {
     setSupplierModalOpen(true);
   };
 
-  const removeSupplier = async (supplier: (typeof suppliers)[number]) => {
-    if (!window.confirm(`Deactivate ${supplier.name}? They will no longer appear in supplier selection.`)) return;
+  const confirmSupplierDeactivation = async () => {
+    if (!deactivateTarget || deactivatingSupplier) return;
+    setDeactivatingSupplier(true);
     try {
-      await deactivateSupplier(supplier.id);
+      await deactivateSupplier(deactivateTarget.id);
+      setDeactivateTarget(null);
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Unable to deactivate the supplier.', 'error');
+    } finally {
+      setDeactivatingSupplier(false);
     }
   };
 
@@ -398,7 +526,7 @@ export const PartyLedgerManagementView: React.FC = () => {
       showToast('Allow pop-ups to print or save the supplier ledger as PDF.', 'error');
       return;
     }
-    const transactions = newestFirstPurchases.flatMap((purchase, purchaseIndex) => [
+    const transactions = activePurchases.flatMap((purchase, purchaseIndex) => [
       {
         date: String(purchase.date).slice(0, 10),
         kind: 'Purchase' as const,
@@ -450,6 +578,11 @@ export const PartyLedgerManagementView: React.FC = () => {
         }).join('')
       : '<tr><td colspan="5" class="empty">No purchase or payment transactions are recorded for this supplier.</td></tr>';
     const generatedDate = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+    const activeTotals = activePurchases.reduce((totals, purchase) => ({
+      billed: totals.billed + (Number(purchase.total) || 0),
+      paid: totals.paid + (Number(purchase.paid) || 0),
+      outstanding: totals.outstanding + (Number(purchase.outstanding) || 0),
+    }), { billed: 0, paid: 0, outstanding: 0 });
 
     printWindow.document.open();
     printWindow.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Supplier Account Statement</title>
@@ -486,13 +619,13 @@ export const PartyLedgerManagementView: React.FC = () => {
         .closing { margin-top: 8mm; padding-top: 4mm; border-top: 1px solid #d9dce1; color: #60646c; font-size: 8pt; }
         @media print { body { padding: 0; } .document { max-width: none; } tr { break-inside: avoid; } }
       </style></head><body><main class="document">
-        <header><div><div class="brand">ABLE LUBES</div><h1>Supplier Account Statement</h1><div class="subtitle">Full purchase and payment history</div></div><div class="generated"><strong>STATEMENT DATE</strong><br>${escapeHtml(generatedDate)}</div></header>
+        <header><div><div class="brand">ABLE LUBES</div><h1>Supplier Account Statement</h1><div class="subtitle">Active purchase and payment history</div></div><div class="generated"><strong>STATEMENT DATE</strong><br>${escapeHtml(generatedDate)}</div></header>
         <section class="party"><div><div class="party-label">Prepared for</div><div class="party-name">${escapeHtml(ledger.supplier.name)}</div></div>${ledger.supplier.phone ? `<div class="party-phone"><div class="party-label">Phone</div><div>${escapeHtml(ledger.supplier.phone)}</div></div>` : ''}</section>
         <section class="summary">
-          <div class="summary-card"><span class="summary-label">Total billed</span><strong class="summary-value">${escapeHtml(formatCurrency(Number(ledger.totals.billed)))}</strong></div>
-          <div class="summary-card"><span class="summary-label">Total paid</span><strong class="summary-value">${escapeHtml(formatCurrency(Number(ledger.totals.paid)))}</strong></div>
-          <div class="summary-card"><span class="summary-label">Balance due</span><strong class="summary-value">${escapeHtml(formatCurrency(Number(ledger.totals.outstanding)))}</strong></div>
-          <div class="summary-card"><span class="summary-label">Supplier refund due</span><strong class="summary-value">${escapeHtml(formatCurrency(Number(ledger.totals.refundReceivable || 0)))}</strong></div>
+          <div class="summary-card"><span class="summary-label">Total billed</span><strong class="summary-value">${escapeHtml(formatCurrency(activeTotals.billed))}</strong></div>
+          <div class="summary-card"><span class="summary-label">Total paid</span><strong class="summary-value">${escapeHtml(formatCurrency(activeTotals.paid))}</strong></div>
+          <div class="summary-card"><span class="summary-label">Balance due</span><strong class="summary-value">${escapeHtml(formatCurrency(activeTotals.outstanding))}</strong></div>
+          <div class="summary-card"><span class="summary-label">Purchases</span><strong class="summary-value">${activePurchases.length}</strong></div>
         </section>
         <h2>Account activity</h2>
         <table><thead><tr><th>Date</th><th>Transaction</th><th class="amount">Debit</th><th class="amount">Credit</th><th class="amount">Balance</th></tr></thead><tbody>${statementRows}</tbody></table>
@@ -620,7 +753,7 @@ export const PartyLedgerManagementView: React.FC = () => {
               <button type="button" onClick={() => { resetSupplierForm(); setSupplierModalOpen(true); }} className="inline-flex h-10 items-center gap-1.5 rounded-lg bg-[#ffe4a0] px-3 text-sm font-semibold text-[#493819] shadow-sm transition hover:bg-[#ffdc82]"><Plus size={16} />Add supplier</button>
               {selectedSupplier && <>
                 <button type="button" disabled={!ledger || ledgerLoading} onClick={printSupplierLedger} className="inline-flex h-11 items-center gap-2 rounded-lg border border-[#eadfc8] bg-white px-3 text-sm font-semibold text-[#765000] shadow-sm hover:bg-[#fffaf0] disabled:cursor-not-allowed disabled:opacity-50"><Printer size={15} />Print / Save PDF</button>
-                <button type="button" onClick={() => void removeSupplier(selectedSupplier)} className="h-11 rounded-lg border border-red-200 bg-white px-3 text-sm font-semibold text-red-700 shadow-sm hover:bg-red-50">Deactivate</button>
+                <button type="button" onClick={() => setDeactivateTarget(selectedSupplier)} className="h-11 rounded-lg border border-red-200 bg-white px-3 text-sm font-semibold text-red-700 shadow-sm hover:bg-red-50">Deactivate</button>
               </>}
               <button type="button" disabled={!ledger || Number(ledger.totals.outstanding) <= 0 || ledgerLoading} onClick={() => { setCashPaymentAmount(String(Number(ledger?.totals.outstanding || 0))); setUpiPaymentAmount(''); setPaymentDate(localToday()); setReceiptNumber(''); setPaymentOpen(true); }} className="inline-flex h-11 items-center gap-2 rounded-lg bg-[#c58a00] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#a97000] disabled:cursor-not-allowed disabled:opacity-45"><Wallet size={16} />Record payment</button>
             </div>
@@ -640,10 +773,9 @@ export const PartyLedgerManagementView: React.FC = () => {
                   ...(Number(ledger.totals.refundReceivable || 0) > 0 ? [{ label: 'Supplier refund due', value: ledger.totals.refundReceivable || 0, icon: Wallet, tone: 'bg-[#eef5ff] text-[#355b92]' }] : []),
                 ].map(({ label, value, icon: Icon, tone }) => <div key={label} className="flex items-center gap-3 rounded-xl border border-[#eee8df] bg-[#fffdfa] p-4 shadow-[0_2px_8px_rgba(37,27,12,.04)]"><span className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl ${tone}`}><Icon size={20} /></span><div className="min-w-0"><div className="text-xs font-semibold uppercase tracking-wide text-[#77736d]">{label}</div><div className={`mt-1 truncate text-xl font-bold ${label === 'Outstanding' || label === 'Supplier refund due' ? 'text-[#a86600]' : 'text-[#272727]'}`}>{formatCurrency(Number(value))}</div></div></div>)}
               </div>
-              <div className="flex items-center justify-between gap-3 border-y border-[#efede8] px-5 py-3"><div className="flex min-w-0 items-start gap-2"><Package size={17} className="mt-0.5 shrink-0 text-[#a86600]" /><div className="min-w-0"><h3 className="font-semibold text-[#272727]">Purchase history</h3><p className="mt-0.5 text-xs text-[#77736d]">Supplier payments may be allocated across older outstanding bills.</p></div></div><span className="shrink-0 rounded-full bg-[#f6f5f2] px-2.5 py-1 text-xs font-semibold text-[#77736d]">{ledger.purchases.length} bills</span></div>
               <div className="overflow-x-auto">
                 <table className="w-full min-w-[920px] border-collapse text-left">
-                  <thead><tr className="h-11 bg-[#f8f7f4] text-xs font-bold uppercase tracking-wide text-[#6d685f]">{['Purchase / date', 'Purchase total (₹)', 'Payment allocated (₹)', 'Supplier credit applied (₹)', 'Remaining balance (₹)', 'Payment details', 'Actions'].map((heading) => <th key={heading} className="px-3 py-2">{heading}</th>)}</tr></thead>
+                  <thead><tr className="h-11 bg-[#f8f7f4] text-xs font-bold uppercase tracking-wide text-[#6d685f]">{['Purchase / date', 'Purchase total (₹)', 'Payment allocated (₹)', 'Supplier credit applied (₹)', 'Remaining balance (₹)', 'Payment details'].map((heading) => <th key={heading} className="px-3 py-2">{heading}</th>)}<th className="px-3 py-2"><div className="flex items-center justify-between gap-2"><span>Actions</span><span className="shrink-0 rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold normal-case tracking-normal text-[#77736d]">{newestFirstPurchases.length} bills</span></div></th></tr></thead>
                   <tbody className="divide-y divide-[#efede8] text-sm text-[#272727]">
                     {pageLedgerPurchases.map((purchase) => (
                       <tr key={purchase.id} className={`align-top transition-colors hover:bg-[#fffdf8] ${purchase.status === 'CANCELLED' ? 'bg-[#faf9f7] text-[#77736d]' : ''}`}>
@@ -662,13 +794,12 @@ export const PartyLedgerManagementView: React.FC = () => {
                             {Number(purchase.cancellation?.refund?.pending || 0) > 0 && authSession?.user.role === 'ADMIN' && <button type="button" onClick={() => openRefundSettlement(purchase)} className="rounded-md border border-[#e4d6b7] bg-white px-2.5 py-1 text-xs font-semibold text-[#765000] hover:bg-[#fff8e7]">Record refund</button>}
                             <span className="max-w-[190px] text-[11px] text-[#77736d]">{purchase.cancellation?.reason}</span>
                           </div> : <div className="flex min-w-[155px] flex-col items-start gap-1.5">
-                            {authSession?.user.role === 'ADMIN' ? cancellingPurchaseId === purchase.id ? <span role="status" className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-xs font-semibold text-red-700"><LoaderCircle size={13} className="animate-spin" />Cancelling...</span> : <button type="button" disabled={!purchase.cancellationEligibility?.eligible} title={purchase.cancellationEligibility?.reasons.join(' ') || undefined} onClick={() => openPurchaseCancellation(purchase)} className="rounded-md border border-red-200 bg-white px-2.5 py-1 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50">Cancel purchase</button> : <span className="text-xs text-[#77736d]">Admin action</span>}
-                            {!purchase.cancellationEligibility?.eligible && <span className="max-w-[200px] text-[11px] leading-snug text-red-700">{purchase.cancellationEligibility?.reasons.join(' ') || 'Eligibility could not be verified.'}</span>}
+                            {authSession?.user.role === 'ADMIN' ? cancellingPurchaseId === purchase.id ? <span role="status" className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-xs font-semibold text-red-700"><LoaderCircle size={13} className="animate-spin" />Cancelling...</span> : purchase.cancellationEligibility?.eligible ? <button type="button" onClick={() => openPurchaseCancellation(purchase)} className="rounded-md border border-red-200 bg-white px-2.5 py-1 text-xs font-semibold text-red-700 hover:bg-red-50">Cancel purchase</button> : <div className="flex flex-col items-start gap-1"><span className="inline-flex items-center gap-1 text-xs font-semibold text-[#68645e]"><LockKeyhole size={13} aria-hidden="true" />Cannot cancel</span><button type="button" onClick={() => setEligibilityDetailsTarget(purchase)} className="inline-flex items-center gap-1 rounded px-1 py-0.5 text-[11px] font-semibold text-[#8b6500] hover:bg-[#fff7e2] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c58a00]"><Info size={12} aria-hidden="true" />View reason</button></div> : <span className="text-xs text-[#77736d]">Admin action</span>}
                           </div>}
                         </td>
                       </tr>
                     ))}
-                    {ledger.purchases.length === 0 && <tr><td colSpan={7} className="px-4 py-12 text-center text-sm text-[#77736d]">No purchase or payment records for this supplier.</td></tr>}
+                    {newestFirstPurchases.length === 0 && <tr><td colSpan={7} className="px-4 py-12 text-center text-sm text-[#77736d]">No active purchase records for this supplier.</td></tr>}
                   </tbody>
                 </table>
               </div>
@@ -830,6 +961,70 @@ export const PartyLedgerManagementView: React.FC = () => {
           </form>
         </div>
       )}
+      <AnimatePresence>
+        {eligibilityDetailsTarget && (() => {
+          const eligibility = eligibilityDetailsTarget.cancellationEligibility;
+          const blockerGroups = groupCancellationBlockers(eligibility.blockers || []);
+          const formatQuantity = (quantity: string | null, unitName?: string | null) => quantity == null
+            ? 'Unavailable'
+            : `${Number(quantity).toLocaleString('en-IN')} ${unitName || 'units'}`;
+          return <motion.div className="fixed inset-0 z-[150] flex items-center justify-center bg-black/40 p-3 backdrop-blur-[2px] sm:p-5" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onMouseDown={(event) => { if (event.target === event.currentTarget) setEligibilityDetailsTarget(null); }}>
+            <motion.section role="dialog" aria-modal="true" aria-labelledby="purchase-eligibility-title" initial={{ opacity: 0, scale: 0.96, y: 10 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.97, y: 6 }} transition={{ duration: 0.18, ease: 'easeOut' }} className="flex max-h-[88vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-[#eee8df] bg-white shadow-2xl">
+              <header className="flex shrink-0 items-start gap-3 border-b border-[#efede8] px-4 py-4 sm:px-5">
+                <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#fff5dc] text-[#9a6c00]"><CircleAlert size={18} aria-hidden="true" /></span>
+                <div className="min-w-0 flex-1"><h2 id="purchase-eligibility-title" className="text-lg font-bold text-[#272727]">Why can't I cancel this purchase?</h2><p className="mt-1 break-words text-sm text-[#68645e]">{eligibilityDetailsTarget.supplierInvoiceNumber || eligibilityDetailsTarget.purchaseNumber} · {String(eligibilityDetailsTarget.date).slice(0, 10)} · {selectedSupplier?.name || 'Supplier unavailable'}</p></div>
+                <button type="button" aria-label="Close" onClick={() => setEligibilityDetailsTarget(null)} className="shrink-0 rounded-lg p-1.5 text-[#77736d] hover:bg-[#f6f5f2] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c58a00]"><X size={18} /></button>
+              </header>
+              <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4 sm:p-5">
+                <h3 className="text-sm font-semibold text-[#272727]">Affected products and stock</h3>
+                {blockerGroups.length > 0 ? blockerGroups.map((group) => {
+                  const matchingPurchaseItem = eligibilityDetailsTarget.items.find((item) => item.id === group.purchaseItemId);
+                  const sameProductItems = group.productId
+                    ? eligibilityDetailsTarget.items.filter((item) => item.productId === group.productId)
+                    : [];
+                  const purchaseLineNumber = matchingPurchaseItem ? sameProductItems.findIndex((item) => item.id === matchingPurchaseItem.id) + 1 : 0;
+                  const lineUnit = matchingPurchaseItem?.unitName || 'units';
+                  const legacyProductItems = !group.purchaseItemId && group.productId
+                    ? eligibilityDetailsTarget.items.filter((item) => item.productId === group.productId)
+                    : [];
+                  const received = group.batchReceivedQuantity == null ? null : Number(group.batchReceivedQuantity);
+                  const available = group.currentAvailableQuantity == null ? null : Number(group.currentAvailableQuantity);
+                  const fullyAvailable = received != null && available != null && received === available;
+                  return <article key={group.key} className="rounded-lg bg-[#f8f7f4] px-3 py-2.5 sm:px-4">
+                    <div className="flex flex-wrap items-start justify-between gap-2"><div className="min-w-0"><h4 className="font-semibold text-[#272727]">{group.productName || 'Purchase status'}{group.purchaseItemId && sameProductItems.length > 1 && <span className="ml-2 text-xs font-medium text-[#77736d]">Purchase line {purchaseLineNumber}</span>}</h4>{group.batchReference && <p className="mt-0.5 text-xs text-[#77736d]">Stock reference: {group.batchReference}</p>}</div>{group.batchStatus && <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${group.batchStatus === 'ACTIVE' ? 'bg-green-50 text-green-800' : 'bg-[#ecebe8] text-[#625f59]'}`}>Stock {cancellationStatusLabel(group.batchStatus)}</span>}</div>
+                    {group.purchaseItemId && <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs text-[#68645e]"><span>Purchased <strong className="text-[#272727]">{formatQuantity(group.purchasedQuantity, lineUnit)}</strong></span><span>Original stock <strong className="text-[#272727]">{formatQuantity(group.batchReceivedQuantity, lineUnit)}</strong></span><span>Available now <strong className="text-[#272727]">{formatQuantity(group.currentAvailableQuantity, lineUnit)}</strong></span></div>}
+                    {legacyProductItems.length > 0 && <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-[#68645e]"><span className="font-medium">Purchase lines</span>{legacyProductItems.map((item, index) => <span key={item.id}>Line {index + 1}: <strong className="text-[#272727]">{formatQuantity(String(item.quantity), item.unitName)}</strong></span>)}<span>Available now <strong className="text-[#77736d]">Unavailable</strong></span></div>}
+                    <ul className="mt-2 space-y-1.5">{group.restrictions.map((restriction, index) => {
+                      const code = getCancellationRestrictionCode(restriction);
+                      const presentation = (code && cancellationRestrictionMessages[code]) || { title: 'Cancellation details unavailable', description: 'The current inventory records do not provide a clear reason.', icon: Info };
+                      const RestrictionIcon = presentation.icon;
+                      const description = code === 'STOCK_QUANTITY_CHANGED' && received != null && available != null
+                        ? `${formatQuantity(String(available), lineUnit)} of ${formatQuantity(String(received), lineUnit)} is currently available in the original stock.`
+                        : presentation.description;
+                      return <li key={`${code || restriction.reason}-${index}`} className="flex items-start gap-2.5 text-sm leading-snug text-[#49463f]"><RestrictionIcon size={15} className="mt-0.5 shrink-0 text-[#8b6500]" aria-hidden="true" /><span><strong className="font-semibold text-[#34312c]">{presentation.title}</strong><span className="ml-1.5 text-[#68645e]">{description}</span></span></li>;
+                    })}</ul>
+                  </article>;
+                }) : eligibility.reasons.length > 0 ? <ul className="space-y-2 rounded-xl border border-[#eee8df] bg-[#fffdfa] p-3">{eligibility.reasons.map((reason, index) => <li key={`${reason}-${index}`} className="flex items-start gap-2 text-sm text-[#49463f]"><CircleAlert size={14} className="mt-0.5 shrink-0 text-[#9a6c00]" aria-hidden="true" /><span>{reason}</span></li>)}</ul> : <p className="rounded-xl border border-[#eee8df] bg-[#fffdfa] p-3 text-sm text-[#68645e]">The available inventory details are not sufficient to determine the restriction.</p>}
+              </div>
+              <footer className="flex shrink-0 flex-col gap-3 border-t border-[#efede8] bg-[#fffdfa] px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5"><p className="text-xs leading-relaxed text-[#77736d]">Purchase cancellation is restricted to protect existing inventory and transaction records.</p><button type="button" onClick={() => setEligibilityDetailsTarget(null)} className="h-9 shrink-0 rounded-lg bg-[#ffe4a0] px-4 text-sm font-semibold text-[#493819] hover:bg-[#ffdc82] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c58a00]">Close</button></footer>
+            </motion.section>
+          </motion.div>;
+        })()}
+      </AnimatePresence>
+      <AnimatePresence>
+        {deactivateTarget && <motion.div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/35 p-4 backdrop-blur-sm" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onMouseDown={(event) => { if (event.target === event.currentTarget && !deactivatingSupplier) setDeactivateTarget(null); }}>
+          <motion.section role="alertdialog" aria-modal="true" aria-labelledby="deactivate-supplier-title" aria-describedby="deactivate-supplier-description" initial={{ opacity: 0, scale: 0.94, y: 12 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.96, y: 8 }} transition={{ duration: 0.2, ease: 'easeOut' }} className="w-full max-w-md overflow-hidden rounded-2xl border border-[#eee8df] bg-white shadow-2xl">
+            <header className="flex items-start justify-between gap-4 px-5 pb-3 pt-5">
+              <div className="flex items-start gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-red-50 text-red-700"><AlertTriangle size={20} aria-hidden="true" /></span><div><h2 id="deactivate-supplier-title" className="text-lg font-bold text-[#272727]">Deactivate supplier?</h2><p id="deactivate-supplier-description" className="mt-1 text-sm leading-relaxed text-[#68645e]">Are you sure you want to deactivate {deactivateTarget.name}? They will no longer appear in supplier selection.</p></div></div>
+              <button type="button" aria-label="Close confirmation" disabled={deactivatingSupplier} onClick={() => setDeactivateTarget(null)} className="shrink-0 rounded-lg p-1.5 text-[#77736d] hover:bg-[#f6f5f2] disabled:opacity-50"><X size={18} /></button>
+            </header>
+            <footer className="flex justify-end gap-2 border-t border-[#efede8] bg-[#fffdfa] px-5 py-4">
+              <button type="button" disabled={deactivatingSupplier} onClick={() => setDeactivateTarget(null)} className="h-10 rounded-lg border border-[#e9e3d9] bg-white px-4 text-sm font-semibold text-[#555] hover:bg-[#f8f7f4] disabled:opacity-50">Cancel</button>
+              <button type="button" disabled={deactivatingSupplier} onClick={() => void confirmSupplierDeactivation()} className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-[#ffe4a0] px-4 text-sm font-semibold text-[#493819] shadow-sm hover:bg-[#ffdc82] disabled:cursor-not-allowed disabled:opacity-55">{deactivatingSupplier && <LoaderCircle size={15} className="animate-spin" aria-hidden="true" />}{deactivatingSupplier ? 'Deactivating…' : 'Deactivate'}</button>
+            </footer>
+          </motion.section>
+        </motion.div>}
+      </AnimatePresence>
     </div>
   );
 };

@@ -2,13 +2,17 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   CalendarDays,
+  Check,
   Download,
   FileText,
   LoaderCircle,
   Printer,
   Plus,
+  RotateCcw,
   Search,
   ShoppingCart,
+  CreditCard,
+  ChevronDown,
   X,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
@@ -20,7 +24,7 @@ import { NumericTextInput } from '../components/ui/NumericTextInput';
 import { SaleRecord } from '../types';
 import { DEFAULT_PAGE_SIZE, getPageRecords, getPaginationRange, PaginationControls } from '../components/PaginationControls';
 
-type RegisterTab = 'sales' | 'expenses';
+type RegisterTab = 'sales' | 'expenses' | 'product-returns' | 'credit-returns';
 type PaymentMode = 'all' | 'Cash' | 'Credit' | 'UPI' | 'Coupon' | 'Store Credit';
 type TransactionHistoryDetail = { id: string; group: string; label: string; amount: number; method?: string | null; reference?: string | null; date?: string };
 type TransactionHistoryEntry = {
@@ -95,6 +99,7 @@ export const DailySalesManagementView: React.FC = () => {
   const [toDate, setToDate] = useState(today);
   const [modeFilter, setModeFilter] = useState<PaymentMode>('all');
   const [searchTerm, setSearchTerm] = useState('');
+  const [returnCustomerFilter, setReturnCustomerFilter] = useState('all');
   const [page, setPage] = useState(1);
   const [transactionPage, setTransactionPage] = useState(1);
   const [apiSales, setApiSales] = useState<SaleRecord[] | null>(null);
@@ -105,6 +110,7 @@ export const DailySalesManagementView: React.FC = () => {
   const [selectedTransaction, setSelectedTransaction] = useState<TransactionHistoryEntry | null>(null);
   const [invoiceLoading, setInvoiceLoading] = useState(false);
   const [returnQuantities, setReturnQuantities] = useState<Record<string, string>>({});
+  const [expandedReturnGroups, setExpandedReturnGroups] = useState<Record<string, boolean>>({});
   const [returnReason, setReturnReason] = useState('');
   const [returnNotes, setReturnNotes] = useState('');
   const [returnReasonPreset, setReturnReasonPreset] = useState('');
@@ -255,6 +261,7 @@ export const DailySalesManagementView: React.FC = () => {
     setInvoiceDetail(null);
     setReturnDetailsOnly(false);
     setReturnQuantities({});
+    setExpandedReturnGroups({});
     setReturnReason('');
     setReturnNotes('');
     setReturnReasonPreset('');
@@ -263,7 +270,12 @@ export const DailySalesManagementView: React.FC = () => {
     try {
       const invoice = await getSaleForReturnRequest(authSession.token, saleId);
       setInvoiceDetail(invoice);
-      setReturnDetailsOnly(fromReturnButton && invoice.returns.length > 0);
+      setReturnDetailsOnly(
+        fromReturnButton &&
+          (invoice.returnStatus === 'FULLY_RETURNED' ||
+            (invoice.items.length > 0 &&
+              invoice.items.every((item) => Number(item.remainingQuantity) <= 0.0000001))),
+      );
       setReturnQuantities(defaultReturnQuantities(invoice));
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Invoice details could not be loaded.', 'error');
@@ -304,6 +316,43 @@ export const DailySalesManagementView: React.FC = () => {
     const creditApplied = Math.min(amount, outstanding);
     return { items, amount, creditApplied, settlementAmount: Math.max(0, amount - creditApplied) };
   })();
+  const returnProductGroups = (() => {
+    if (!invoiceDetail) return [];
+    const groups = new Map<string, {
+      key: string;
+      productId: string;
+      productName: string;
+      sellingPrice: number;
+      sold: number;
+      returned: number;
+      remaining: number;
+      requested: number;
+      amount: number;
+      lines: Array<{ item: ApiSaleReturnDetail['items'][number]; sold: number; returned: number; remaining: number; requested: number; amount: number }>;
+    }>();
+    for (const item of invoiceDetail.items) {
+      const key = `${item.productId}:${Number(item.unitSellingPrice).toFixed(2)}`;
+      const sold = item.displayQuantity != null ? Number(item.displayQuantity) : Number(item.quantity);
+      const returned = item.displayQuantity != null ? Number(item.returnedDisplayQuantity || 0) : Number(item.returnedQuantity);
+      const remaining = Math.max(0, sold - returned);
+      const requested = Number(returnQuantities[item.id] || 0);
+      const amount = returnPreview.items.find((line) => line.saleItemId === item.id)?.amount || 0;
+      const group = groups.get(key) || {
+        key, productId: item.productId, productName: item.productName,
+        sellingPrice: Number(item.unitSellingPrice), sold: 0, returned: 0,
+        remaining: 0, requested: 0, amount: 0, lines: [],
+      };
+      group.sold += sold;
+      group.returned += returned;
+      group.remaining += remaining;
+      group.requested += requested;
+      group.amount += amount;
+      group.lines.push({ item, sold, returned, remaining, requested, amount });
+      groups.set(key, group);
+    }
+    return [...groups.values()];
+  })();
+  const canViewReturnCost = authSession?.user.role === 'ADMIN';
 
   const submitSalesReturn = async () => {
     if (!authSession || !invoiceDetail || savingReturn || returnRequestInFlight.current || !returnReason.trim() || !returnPreview.items.length) return;
@@ -407,19 +456,19 @@ export const DailySalesManagementView: React.FC = () => {
       const refundedAmount = refunds.reduce((total, refund) => total + refund.amount, 0);
       const pendingAmount = row.settlementType === 'PENDING' ? Math.max(0, row.amount - row.creditAppliedAmount - refundedAmount) : 0;
       const customerCredit = row.settlements.filter((settlement) => settlement.type === 'CUSTOMER_CREDIT').reduce((total, settlement) => total + settlement.amount, 0);
-      const settlementStatus = customerCredit > 0 || row.settlementType === 'CUSTOMER_CREDIT'
-        ? 'Customer Credit'
-        : pendingAmount > 0 && refundedAmount > 0
-          ? 'Partially Refunded · Refund Pending'
-          : pendingAmount > 0
-            ? 'Refund Pending'
-            : refundedAmount > 0
-              ? 'Refunded'
-              : 'No Refund Required';
+      const settlementStatus = pendingAmount > 0
+        ? 'Refund pending'
+        : customerCredit > 0
+          ? 'Credit issued'
+          : refundedAmount > 0
+            ? 'Refund completed'
+            : row.settlementType === 'BALANCE_OFFSET'
+              ? 'No Refund Required'
+              : 'Settlement not recorded';
       const details: TransactionHistoryDetail[] = [];
       if (row.creditAppliedAmount > 0) details.push({ id: `${row.id}-balance`, group: 'Settlement details', label: 'Applied to invoice balance', amount: row.creditAppliedAmount });
-      row.settlements.filter((settlement) => settlement.type === 'CUSTOMER_CREDIT').forEach((settlement) => details.push({ id: settlement.id, group: 'Settlement details', label: 'Customer Credit', amount: settlement.amount, date: settlement.date }));
-      refunds.forEach((refund) => details.push({ id: refund.id, group: 'Settlement details', label: 'Refunded', amount: refund.amount, method: refund.method, reference: refund.reference, date: refund.date }));
+      row.settlements.filter((settlement) => settlement.type === 'CUSTOMER_CREDIT').forEach((settlement) => details.push({ id: settlement.id, group: 'Settlement details', label: 'Credit issued', amount: settlement.amount, date: settlement.date }));
+      refunds.forEach((refund) => details.push({ id: refund.id, group: 'Settlement details', label: 'Refund completed', amount: refund.amount, method: refund.method, reference: refund.reference, date: refund.date }));
       if (pendingAmount > 0) details.push({ id: `${row.id}-pending`, group: 'Settlement details', label: 'Refund Pending', amount: pendingAmount });
       if (!details.length) details.push({ id: `${row.id}-none`, group: 'Settlement details', label: 'No refund or credit settlement required', amount: 0 });
       return { id: `return-${row.id}`, date: row.date, invoiceNumber: row.invoiceNumber, customer: row.customer, transactionType: 'Sales Return', reason: row.reason, amount: row.amount, settlementStatus, staff: row.returnedBy, details };
@@ -446,6 +495,11 @@ export const DailySalesManagementView: React.FC = () => {
   ]
     .filter((row) => !query || [row.invoiceNumber, row.customer, row.transactionType, row.reason, row.settlementStatus].some((value) => value.toLowerCase().includes(query)))
     .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  const returnCustomerOptions = [...new Set((activeTab === 'product-returns' ? apiSalesReturns : apiCreditCancellations)
+    .filter((row) => inRange(row.date.slice(0, 10)))
+    .map((row) => row.customer))].sort((a, b) => a.localeCompare(b));
+  const productReturns = transactionHistory.filter((row) => row.transactionType === 'Sales Return' && (returnCustomerFilter === 'all' || row.customer === returnCustomerFilter));
+  const creditReturns = transactionHistory.filter((row) => row.transactionType === 'Credit Cancellation' && (returnCustomerFilter === 'all' || row.customer === returnCustomerFilter));
   const filteredSales = rangeSales.filter((sale) => {
     const matchesMode = modeFilter === 'all' || sale.paymentMode === modeFilter || sale.paymentMode.includes(`${modeFilter} `);
     const matchesSearch = !query || sale.billNumber.toLowerCase().includes(query) || sale.customerName.toLowerCase().includes(query) || sale.itemsList.toLowerCase().includes(query) || sale.paymentMode.toLowerCase().includes(query);
@@ -457,10 +511,11 @@ export const DailySalesManagementView: React.FC = () => {
   const safePage = Math.min(page, pageCount);
   const pageSales = getPageRecords(filteredSales, safePage, pageSize);
   const salesRange = getPaginationRange(filteredSales.length, safePage, pageSize);
-  const transactionPageCount = Math.max(1, Math.ceil(transactionHistory.length / pageSize));
+  const activeReturnRows = activeTab === 'product-returns' ? productReturns : creditReturns;
+  const transactionPageCount = Math.max(1, Math.ceil(activeReturnRows.length / pageSize));
   const safeTransactionPage = Math.min(transactionPage, transactionPageCount);
-  const pageTransactions = getPageRecords(transactionHistory, safeTransactionPage, pageSize);
-  const transactionRange = getPaginationRange(transactionHistory.length, safeTransactionPage, pageSize);
+  const pageTransactions = getPageRecords(activeReturnRows, safeTransactionPage, pageSize);
+  const transactionRange = getPaginationRange(activeReturnRows.length, safeTransactionPage, pageSize);
   const printSalesTotal = filteredSales.reduce((sum, sale) => sum + (sale.netSalesAmount ?? sale.amount), 0);
   const printPaymentsTotal = filteredSales.reduce((sum, sale) => sum + sale.amount, 0);
   const printExpensesTotal = matchingExpenses.reduce((sum, expense) => sum + expense.amount, 0);
@@ -469,7 +524,7 @@ console.log(pageSales,"pageSales");
   useEffect(() => {
     setPage(1);
     setTransactionPage(1);
-  }, [activeTab, fromDate, toDate, modeFilter, searchTerm]);
+  }, [activeTab, fromDate, toDate, modeFilter, searchTerm, returnCustomerFilter]);
 
   const selectToday = () => {
     const date = localDate(new Date());
@@ -489,7 +544,10 @@ console.log(pageSales,"pageSales");
 
   const handlePrintRegister = () => {
     const previousTitle = document.title;
-    document.title = activeTab === 'sales' ? 'Able Lubes - Daily Sales Register' : 'Able Lubes - Daily Expenses Register';
+    const registerName = activeTab === 'sales' ? 'Daily Sales Register'
+      : activeTab === 'expenses' ? 'Daily Expenses Register'
+        : activeTab === 'product-returns' ? 'Product Returns' : 'Credit Returns';
+    document.title = `Able Lubes - ${registerName}`;
     const restoreTitle = () => {
       document.title = previousTitle;
       window.removeEventListener('afterprint', restoreTitle);
@@ -588,10 +646,12 @@ console.log(pageSales,"pageSales");
     <div className="daily-register-page w-full">
       <div className="daily-register-screen flex w-full flex-col gap-4">
       <section className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <div role="tablist" aria-label="Daily register records" className="inline-flex w-fit max-w-full items-center rounded-full border border-[#e9e3d9] bg-white p-1 shadow-[0_3px_12px_rgba(37,27,12,.08)]">
+        <div role="tablist" aria-label="Daily register records" className="inline-flex w-fit max-w-full flex-wrap items-center rounded-full border border-[#e9e3d9] bg-white p-1 shadow-[0_3px_12px_rgba(37,27,12,.08)]">
           {([
-            { id: 'sales', label: 'Sales', count: rangeSales.length, icon: ShoppingCart },
-            { id: 'expenses', label: 'Expenses', count: rangeExpenses.length, icon: FileText },
+            { id: 'sales', label: 'Sales', count: filteredSales.length, icon: ShoppingCart },
+            { id: 'expenses', label: 'Expenses', count: matchingExpenses.length, icon: FileText },
+            { id: 'product-returns', label: 'Product Returns', count: productReturns.length, icon: RotateCcw },
+            { id: 'credit-returns', label: 'Credit Returns', count: creditReturns.length, icon: CreditCard },
           ] as const).map(({ id, label, count, icon: Icon }) => (
             <button
               key={id}
@@ -611,11 +671,11 @@ console.log(pageSales,"pageSales");
             <Plus size={17} aria-hidden="true" /> Add Expense
           </button>}
           <button type="button" onClick={handlePrintRegister} className="inline-flex h-10 items-center gap-2 rounded-lg border border-[#e9e3d9] bg-white px-3 text-sm font-semibold text-[#272727] shadow-sm transition hover:bg-[#f8f6f2]">
-            <Printer size={17} aria-hidden="true" /> Print {activeTab === 'sales' ? 'Sales' : 'Expenses'} / Save PDF
+            <Printer size={17} aria-hidden="true" /> Print {activeTab === 'sales' ? 'Sales' : activeTab === 'expenses' ? 'Expenses' : activeTab === 'product-returns' ? 'Product Returns' : 'Credit Returns'} / Save PDF
           </button>
-          <button type="button" onClick={handleExportDaySheet} className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#ffe4a0] px-3 text-sm font-semibold text-[#493819] shadow-sm transition hover:bg-[#ffdc82]">
+          {/* <button type="button" onClick={handleExportDaySheet} className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#ffe4a0] px-3 text-sm font-semibold text-[#493819] shadow-sm transition hover:bg-[#ffdc82]">
             <Download size={17} aria-hidden="true" /> Export Day Sheet
-          </button>
+          </button> */}
         </div>
       </section>
 
@@ -652,10 +712,17 @@ console.log(pageSales,"pageSales");
               <option value="Store Credit">Store Credit</option>
             </select>
           </label>}
+          {(activeTab === 'product-returns' || activeTab === 'credit-returns') && <label className="flex items-center gap-2 text-xs font-semibold text-[#77736d]" htmlFor="return-customer-filter">
+            <span>Customer</span>
+            <select id="return-customer-filter" value={returnCustomerFilter} onChange={(event) => setReturnCustomerFilter(event.target.value)} className="h-9 max-w-[220px] rounded-lg border border-[#e8e4dd] bg-[#f8f7f4] px-3 text-sm font-medium text-[#272727] outline-none focus:border-[#c58a00] focus:bg-white">
+              <option value="all">All customers</option>
+              {returnCustomerOptions.map((customer) => <option key={customer} value={customer}>{customer}</option>)}
+            </select>
+          </label>}
         </div>
         <label className="relative block w-full lg:max-w-[320px]">
           <Search size={17} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#89847b]" aria-hidden="true" />
-          <input type="search" value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} placeholder={activeTab === 'sales' ? 'Search bill, customer or product…' : 'Search expense or category…'} className="h-10 w-full rounded-lg border border-[#e8e4dd] bg-[#f7f7f6] pl-9 pr-3 text-sm text-[#272727] outline-none placeholder:text-[#89847b] focus:border-[#c58a00] focus:bg-white" aria-label={activeTab === 'sales' ? 'Search sales' : 'Search expenses'} />
+          <input type="search" value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} placeholder={activeTab === 'sales' ? 'Search bill, customer or product…' : activeTab === 'expenses' ? 'Search expense or category…' : 'Search invoice, customer or reason…'} className="h-10 w-full rounded-lg border border-[#e8e4dd] bg-[#f7f7f6] pl-9 pr-3 text-sm text-[#272727] outline-none placeholder:text-[#89847b] focus:border-[#c58a00] focus:bg-white" aria-label={activeTab === 'sales' ? 'Search sales' : activeTab === 'expenses' ? 'Search expenses' : activeTab === 'product-returns' ? 'Search product returns' : 'Search credit returns'} />
         </label>
       </section>
 
@@ -741,19 +808,24 @@ console.log(pageSales,"pageSales");
             </div>
           </footer>
         </motion.section>
-      ) : (
+      ) : activeTab === 'expenses' ? (
         <motion.div key="expenses-panel" initial={{ opacity: 0, y: 7 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.2, ease: 'easeOut' }} role="tabpanel" aria-label="Expense records">
           <ExpenseManagementView embedded dateRange={{ from: fromDate, to: toDate }} sharedSearchTerm={searchTerm} onRegisterAddExpense={registerAddExpense} />
         </motion.div>
+      ) : (
+        <motion.section key={`${activeTab}-panel`} initial={{ opacity: 0, y: 7 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.2, ease: 'easeOut' }} className="overflow-hidden rounded-xl border border-[#e9e3d9] bg-white shadow-sm" role="tabpanel" aria-label={activeTab === 'product-returns' ? 'Product return records' : 'Credit return records'}>
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#eee8df] px-4 py-3">
+            <div><h2 className="text-sm font-bold text-[#272727]">{activeTab === 'product-returns' ? 'Product Returns' : 'Credit Returns'}</h2></div>
+            <strong className="text-sm text-[#a86600]">{activeReturnRows.length} records</strong>
+          </div>
+          <div className="overflow-x-auto"><table className="w-full min-w-[900px] border-collapse text-left text-sm"><thead><tr className="h-10 bg-[#f6f5f2] text-xs font-bold uppercase tracking-wide text-[#6d685f]"><th className="px-4 py-2">Date &amp; time</th><th className="px-4 py-2">Invoice</th><th className="px-4 py-2">Customer</th><th className="px-4 py-2">Reason</th><th className="px-4 py-2 text-right">Amount</th><th className="px-4 py-2">Settlement status</th></tr></thead><tbody className="divide-y divide-[#efede8] text-sm text-[#272727]">
+            {apiLoading ? <tr><td colSpan={6} className="px-4 py-14 text-center"><LoaderOne /></td></tr> : pageTransactions.map((transaction) => <tr key={transaction.id} className="transition hover:bg-[#fcfbf9]"><td className="whitespace-nowrap px-4 py-2 text-xs text-[#68645e]">{formatSaleDateTime(transaction.date)}</td><td className="px-4 py-2"><button type="button" onClick={() => setSelectedTransaction(transaction)} title="Open transaction details" className="font-semibold text-[#a86600] hover:underline">{transaction.invoiceNumber}</button></td><td className="px-4 py-2">{transaction.customer}</td><td className="max-w-[260px] truncate px-4 py-2" title={transaction.reason}>{transaction.reason || '—'}</td><td className="whitespace-nowrap px-4 py-2 text-right font-semibold">{formatCurrency(transaction.amount)}</td><td className="px-4 py-2"><span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${transaction.settlementStatus.includes('Pending') ? 'bg-[#fff5d9] text-[#765000]' : transaction.settlementStatus === 'Refunded' ? 'bg-[#eaf5ed] text-[#2f6d3d]' : transaction.settlementStatus === 'Customer Credit' ? 'bg-[#edf3ff] text-[#375b9d]' : 'bg-[#f1f1ef] text-[#625d54]'}`}>{transaction.settlementStatus}</span></td></tr>)}
+            {!apiLoading && activeReturnRows.length === 0 && <tr><td colSpan={6} className="px-4 py-10 text-center text-sm text-[#77736d]">{activeTab === 'product-returns' ? 'No product returns match this date range and search.' : 'No credit returns match this date range and search.'}</td></tr>}
+          </tbody></table></div>
+          <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-[#eee8df] bg-[#f8f7f4] px-4 py-3"><span className="text-xs text-[#6b665c]">Showing <strong className="text-[#272727]">{transactionRange.start}-{transactionRange.end}</strong> of <strong className="text-[#272727]">{activeReturnRows.length}</strong> records</span><PaginationControls totalRecords={activeReturnRows.length} page={safeTransactionPage} pageSize={pageSize} onPageChange={setTransactionPage} /></footer>
+        </motion.section>
       )}
       </AnimatePresence>
-      {activeTab === 'sales' && (
-        <section className="mt-4 overflow-hidden rounded-xl border border-[#e9e3d9] bg-white shadow-sm" aria-label="Transaction History">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#eee8df] px-4 py-3"><div><h2 className="text-sm font-bold text-[#272727]">Sales Returns &amp; Billing Credit Cancellations</h2><p className="text-xs text-[#77736d]">Sales returns and billing credit cancellations, with their settlement status.</p></div><strong className="text-sm text-[#a86600]">{transactionHistory.length} transactions</strong></div>
-          <div className="overflow-x-auto"><table className="w-full min-w-[1050px] border-collapse text-left text-sm"><thead><tr className="h-9 bg-[#f6f5f2] text-xs font-bold uppercase tracking-wide text-[#6d685f]"><th className="px-4 py-2">Date &amp; time</th><th className="px-4 py-2">Invoice</th><th className="px-4 py-2">Customer</th><th className="px-4 py-2">Transaction type</th><th className="px-4 py-2">Reason</th><th className="px-4 py-2 text-right">Amount</th><th className="px-4 py-2">Settlement status</th></tr></thead><tbody className="divide-y divide-[#efede8]">{pageTransactions.map((transaction) => <tr key={transaction.id} className="hover:bg-[#fcfbf9]"><td className="whitespace-nowrap px-4 py-2 text-xs text-[#68645e]">{formatSaleDateTime(transaction.date)}</td><td className="px-4 py-2"><button type="button" onClick={() => setSelectedTransaction(transaction)} title="Open transaction details" className="font-semibold text-[#a86600] hover:underline">{transaction.invoiceNumber}</button></td><td className="px-4 py-2">{transaction.customer}</td><td className="px-4 py-2"><span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${transaction.transactionType === 'Credit Cancellation' ? 'bg-[#fff0ed] text-[#a53c2c]' : 'bg-[#fff5d9] text-[#765000]'}`}>{transaction.transactionType}</span></td><td className="max-w-[230px] truncate px-4 py-2" title={transaction.reason}>{transaction.reason || '—'}</td><td className="whitespace-nowrap px-4 py-2 text-right font-semibold">{formatCurrency(transaction.amount)}</td><td className="px-4 py-2"><span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${transaction.settlementStatus.includes('Pending') ? 'bg-[#fff5d9] text-[#765000]' : transaction.settlementStatus === 'Refunded' ? 'bg-[#eaf5ed] text-[#2f6d3d]' : transaction.settlementStatus === 'Customer Credit' ? 'bg-[#edf3ff] text-[#375b9d]' : 'bg-[#f1f1ef] text-[#625d54]'}`}>{transaction.settlementStatus}</span></td></tr>)}{transactionHistory.length === 0 && <tr><td colSpan={7} className="px-4 py-8 text-center text-sm text-[#77736d]">No sales returns or credit cancellations in this date range.</td></tr>}</tbody></table></div>
-          <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-[#eee8df] bg-[#f8f7f4] px-4 py-3"><span className="text-xs text-[#6b665c]">Showing <strong className="text-[#272727]">{transactionRange.start}-{transactionRange.end}</strong> of <strong className="text-[#272727]">{transactionHistory.length}</strong> transactions</span><PaginationControls totalRecords={transactionHistory.length} page={safeTransactionPage} pageSize={pageSize} onPageChange={setTransactionPage} /></footer>
-        </section>
-      )}
       </div>
 
       {selectedTransaction && (
@@ -797,14 +869,31 @@ console.log(pageSales,"pageSales");
               <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3 sm:px-5">
                 <section>
                   <div className="mb-2 flex items-center gap-2"><span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#ffedc2] text-xs font-bold text-[#684400]">1</span><h3 className="text-sm font-bold text-[#171717]">Select products to return</h3></div>
-                  <div className="overflow-x-auto rounded-lg border border-[#e8e4dd]"><table className="w-full min-w-[700px] text-left text-xs"><thead className="bg-[#f6f5f3] text-[10px] font-semibold uppercase tracking-wide text-[#5d5a55]"><tr><th className="px-3 py-2">Product</th><th className="px-2 py-2 text-right">Sold</th><th className="px-2 py-2 text-right">Returned</th><th className="px-2 py-2 text-right">Remaining</th><th className="px-2 py-2 text-right">Return Qty</th><th className="px-3 py-2 text-right">Line Value</th></tr></thead><tbody className="divide-y divide-[#eeeae4]">
-                    {invoiceDetail.items.map((item) => {
-                      const unit = item.displayUnitSymbol || item.displayUnitName || item.unitSymbol || item.unitName;
-                      const sold = item.displayQuantity != null ? Number(item.displayQuantity) : Number(item.quantity);
-                      const returned = item.displayQuantity != null ? Number(item.returnedDisplayQuantity || 0) : Number(item.returnedQuantity);
-                      const remaining = item.displayQuantity != null ? Math.max(0, sold - returned) : Math.max(0, Number(item.remainingQuantity));
-                      const lineReturnAmount = returnPreview.items.find((entry) => entry.saleItemId === item.id)?.amount || 0;
-                      return <tr key={item.id} className="bg-white"><td className="px-3 py-2 font-semibold text-[#171717]">{item.productName}</td><td className="whitespace-nowrap px-2 py-2 text-right text-[#282828]">{sold.toLocaleString('en-IN')} {unit}</td><td className="whitespace-nowrap px-2 py-2 text-right text-[#282828]">{returned.toLocaleString('en-IN')} {unit}</td><td className="whitespace-nowrap px-2 py-2 text-right text-[#282828]">{remaining.toLocaleString('en-IN')} {unit}</td><td className="px-2 py-1.5 text-right"><NumericTextInput min="0" max={remaining} maxDecimals={item.displayQuantity != null ? 0 : item.unitAllowsDecimals ? 3 : 0} value={returnQuantities[item.id] || ''} onValueChange={(value) => setReturnQuantities((previous) => ({ ...previous, [item.id]: value }))} disabled={remaining <= 0 || savingReturn} className="h-8 w-24 rounded-md border border-[#e1d9cb] bg-white px-2 text-right text-sm font-medium text-[#171717] outline-none focus:border-[#c58a00] disabled:bg-[#f5f4f2] disabled:text-[#a5a19a]" aria-label={`Return quantity for ${item.productName}`} /></td><td className="whitespace-nowrap px-3 py-2 text-right font-semibold text-[#171717]">{formatCurrency(lineReturnAmount)}</td></tr>;
+                  <div className="overflow-x-auto rounded-lg border border-[#e8e4dd]"><table className="w-full min-w-[760px] text-left text-xs"><thead className="bg-[#f6f5f3] text-[10px] font-semibold uppercase tracking-wide text-[#5d5a55]"><tr><th className="px-3 py-2">Product</th><th className="px-2 py-2 text-right">Selling price</th><th className="px-2 py-2 text-right">Sold</th><th className="px-2 py-2 text-right">Returned</th><th className="px-2 py-2 text-right">Remaining</th><th className="px-2 py-2 text-right">Return Qty</th><th className="px-3 py-2 text-right">Line Value</th></tr></thead><tbody className="divide-y divide-[#eeeae4]">
+                    {returnProductGroups.map((group) => {
+                      const unit = group.lines[0]?.item.displayUnitSymbol || group.lines[0]?.item.displayUnitName || group.lines[0]?.item.unitSymbol || group.lines[0]?.item.unitName || 'units';
+                      const isExpanded = Boolean(expandedReturnGroups[group.key]);
+                      const singleLine = group.lines.length === 1 ? group.lines[0] : null;
+                      const mrpText = (item: ApiSaleReturnDetail['items'][number]) => item.historicalMrpSnapshot == null ? 'Unavailable' : formatCurrency(Number(item.historicalMrpSnapshot));
+                      const costText = (item: ApiSaleReturnDetail['items'][number]) => item.historicalCostSnapshot == null ? 'Unavailable' : formatCurrency(Number(item.historicalCostSnapshot));
+                      const renderReturnInput = (line: typeof group.lines[number]) => <NumericTextInput min="0" max={line.remaining} maxDecimals={line.item.displayQuantity != null ? 0 : line.item.unitAllowsDecimals ? 3 : 0} value={returnQuantities[line.item.id] || ''} onValueChange={(value) => setReturnQuantities((previous) => ({ ...previous, [line.item.id]: value }))} disabled={line.remaining <= 0 || savingReturn} className="h-8 w-24 rounded-md border border-[#e1d9cb] bg-white px-2 text-right text-sm font-medium text-[#171717] outline-none focus:border-[#c58a00] disabled:bg-[#f5f4f2] disabled:text-[#a5a19a]" aria-label={`Return quantity for ${line.item.productName}, original line ${group.lines.indexOf(line) + 1}`} />;
+                      return <React.Fragment key={group.key}>
+                        <tr className="bg-white">
+                          <td className="px-3 py-2 font-semibold text-[#171717]">
+                            {group.lines.length > 1 ? <button type="button" aria-expanded={isExpanded} onClick={() => setExpandedReturnGroups((previous) => ({ ...previous, [group.key]: !previous[group.key] }))} className="inline-flex items-center gap-1.5 text-left hover:text-[#8f5f00]"><ChevronDown size={14} className={`shrink-0 transition-transform ${isExpanded ? 'rotate-180' : ''}`} aria-hidden="true" /><span>{group.productName}<span className="ml-2 text-[10px] font-medium text-[#77736d]">{group.lines.length} original lines</span></span></button> : <><span>{group.productName}</span><span className="mt-1 block text-[10px] font-medium text-[#68645e]">MRP {mrpText(singleLine!.item)}{canViewReturnCost ? ` · Purchase rate ${costText(singleLine!.item)}` : ''}</span></>}
+                          </td>
+                          <td className="whitespace-nowrap px-2 py-2 text-right text-[#282828]">{formatCurrency(group.sellingPrice)}</td>
+                          <td className="whitespace-nowrap px-2 py-2 text-right text-[#282828]">{group.sold.toLocaleString('en-IN')} {unit}</td>
+                          <td className="whitespace-nowrap px-2 py-2 text-right text-[#282828]">{group.returned.toLocaleString('en-IN')} {unit}</td>
+                          <td className="whitespace-nowrap px-2 py-2 text-right text-[#282828]">{group.remaining.toLocaleString('en-IN')} {unit}</td>
+                          <td className="px-2 py-1.5 text-right">{singleLine ? renderReturnInput(singleLine) : <span className="font-semibold text-[#282828]">{group.requested.toLocaleString('en-IN')} {unit}</span>}</td>
+                          <td className="whitespace-nowrap px-3 py-2 text-right font-semibold text-[#171717]">{formatCurrency(group.amount)}</td>
+                        </tr>
+                        {group.lines.length > 1 && isExpanded && <tr className="bg-[#fbfaf7]"><td colSpan={7} className="px-3 py-2"><div className="overflow-x-auto rounded-md border border-[#e8e4dd] bg-white"><table className="w-full min-w-[720px] text-left text-[11px]"><thead className="bg-[#f6f5f3] uppercase tracking-wide text-[#68645e]"><tr><th className="px-2 py-2">Original sale line</th><th className="px-2 py-2">Historical MRP</th>{canViewReturnCost && <th className="px-2 py-2">Purchase rate</th>}<th className="px-2 py-2 text-right">Sold</th><th className="px-2 py-2 text-right">Returned</th><th className="px-2 py-2 text-right">Remaining</th><th className="px-2 py-2 text-right">Return Qty</th><th className="px-2 py-2 text-right">Value</th></tr></thead><tbody className="divide-y divide-[#eeeae4]">{group.lines.map((line, index) => {
+                          const lineUnit = line.item.displayUnitSymbol || line.item.displayUnitName || line.item.unitSymbol || line.item.unitName || 'units';
+                          return <tr key={line.item.id}><td className="px-2 py-2 font-medium text-[#272727]">Line {index + 1}</td><td className="px-2 py-2 font-semibold text-[#765000]">{mrpText(line.item)}</td>{canViewReturnCost && <td className="px-2 py-2 text-[#4e4b46]">{costText(line.item)}</td>}<td className="whitespace-nowrap px-2 py-2 text-right">{line.sold.toLocaleString('en-IN')} {lineUnit}</td><td className="whitespace-nowrap px-2 py-2 text-right">{line.returned.toLocaleString('en-IN')} {lineUnit}</td><td className="whitespace-nowrap px-2 py-2 text-right">{line.remaining.toLocaleString('en-IN')} {lineUnit}</td><td className="px-2 py-1.5 text-right">{renderReturnInput(line)}</td><td className="whitespace-nowrap px-2 py-2 text-right font-semibold">{formatCurrency(line.amount)}</td></tr>;
+                        })}</tbody></table></div></td></tr>}
+                      </React.Fragment>;
                     })}
                   </tbody></table></div>
                 </section>
@@ -826,7 +915,7 @@ console.log(pageSales,"pageSales");
                   </div>
                 </section>
 
-                {invoiceDetail.returns.length > 0 && <details className="rounded-lg border border-[#eee8df] bg-white"><summary className="cursor-pointer px-3 py-2 text-xs font-semibold text-[#272727]">Return history ({invoiceDetail.returns.length})</summary><div className="space-y-1.5 border-t border-[#eee8df] p-2">{invoiceDetail.returns.map((salesReturn) => <div key={salesReturn.id} className="rounded-md border border-[#eee8df] p-2"><div className="flex flex-wrap items-start justify-between gap-2"><div><p className="text-sm font-semibold text-[#272727]">{String(salesReturn.returnedAt).slice(0, 16).replace('T', ' ')} · {salesReturn.reason}</p><p className="mt-1 text-xs text-[#77736d]">{salesReturn.returnedBy?.name || 'Staff'} · {salesReturn.items.map((item) => `${item.productName} × ${item.quantity}`).join(', ')}</p></div><div className="text-right"><strong className="text-sm text-[#a86600]">{formatCurrency(Number(salesReturn.amount))}</strong><p className="text-[11px] text-[#77736d]">{salesReturn.settlementType === 'BALANCE_OFFSET' ? 'Applied to invoice balance' : salesReturn.settlementType === 'CUSTOMER_CREDIT' ? 'Customer credit' : salesReturn.settlementType === 'PENDING' ? 'Refund pending' : 'Refunded now'}</p></div></div>{Number(salesReturn.pendingRefundPayable) > 0 && <div className="mt-3 border-t border-[#eee8df] pt-3"><div className="flex flex-wrap items-center justify-between gap-2"><span className="text-xs font-semibold text-[#8b4b25]">Pending payable {formatCurrency(Number(salesReturn.pendingRefundPayable))}</span><button type="button" onClick={() => { setPendingSettlementId(salesReturn.id); setPendingSettlementAmount(String(Number(salesReturn.pendingRefundPayable))); }} className="rounded-lg border border-[#eadfc8] px-3 py-1.5 text-xs font-semibold text-[#765000] hover:bg-[#fffaf0]">Settle pending</button></div>{pendingSettlementId === salesReturn.id && <div className="mt-3 grid gap-2 sm:grid-cols-4"><input type="number" min="0.01" max={Number(salesReturn.pendingRefundPayable)} step="0.01" value={pendingSettlementAmount} onChange={(event) => setPendingSettlementAmount(event.target.value)} aria-label="Amount to settle" className="h-9 rounded-lg border border-[#e8e4dd] px-2 text-sm" /><select value={pendingSettlementMethod} onChange={(event) => setPendingSettlementMethod(event.target.value as typeof pendingSettlementMethod)} aria-label="Settlement method" className="h-9 rounded-lg border border-[#e8e4dd] bg-white px-2 text-sm"><option value="CASH">Cash</option><option value="UPI">UPI</option><option value="BANK">Bank</option><option value="OTHER">Other</option></select><input value={pendingSettlementReference} onChange={(event) => setPendingSettlementReference(event.target.value)} placeholder="Reference (optional)" maxLength={120} className="h-9 rounded-lg border border-[#e8e4dd] px-2 text-sm" /><button type="button" disabled={savingPendingSettlement || !Number(pendingSettlementAmount)} onClick={() => void settlePendingRefund(salesReturn.id)} className="h-9 rounded-lg bg-[#ffe4a0] px-3 text-sm font-semibold text-[#493819] disabled:opacity-50">{savingPendingSettlement ? 'Saving…' : 'Record settlement'}</button></div>}</div>}</div>)}</div></details>}
+                {invoiceDetail.returns.length > 0 && <details className="rounded-lg border border-[#eee8df] bg-white"><summary className="cursor-pointer px-3 py-2 text-xs font-semibold text-[#272727]">Return history ({invoiceDetail.returns.length})</summary><div className="space-y-1.5 border-t border-[#eee8df] p-2">{invoiceDetail.returns.map((salesReturn) => <div key={salesReturn.id} className="rounded-md border border-[#eee8df] p-2"><div className="flex flex-wrap items-start justify-between gap-2"><div><p className="text-sm font-semibold text-[#272727]">{String(salesReturn.returnedAt).slice(0, 16).replace('T', ' ')} · {salesReturn.reason}</p><p className="mt-1 text-xs text-[#77736d]">{salesReturn.returnedBy?.name || 'Staff'} · {salesReturn.items.map((item) => `${item.productName} × ${item.quantity}`).join(', ')}</p></div><div className="text-right"><strong className="text-sm text-[#a86600]">{formatCurrency(Number(salesReturn.amount))}</strong><span className={`inline-flex items-center gap-1 text-[11px] ${Number(salesReturn.pendingRefundPayable) > 0 ? 'font-semibold text-[#765000]' : salesReturn.settlements.some((settlement) => settlement.type === 'CUSTOMER_CREDIT' || settlement.type === 'REFUND') ? 'font-semibold text-[#2f6d3d]' : 'text-[#77736d]'}`}>{Number(salesReturn.pendingRefundPayable) <= 0 && salesReturn.settlements.some((settlement) => settlement.type === 'CUSTOMER_CREDIT' || settlement.type === 'REFUND') && <Check size={12} aria-hidden="true" />}{Number(salesReturn.pendingRefundPayable) > 0 ? 'Refund pending' : salesReturn.settlements.some((settlement) => settlement.type === 'CUSTOMER_CREDIT') ? 'Credit issued' : salesReturn.settlements.some((settlement) => settlement.type === 'REFUND') ? 'Refund completed' : salesReturn.settlementType === 'BALANCE_OFFSET' ? 'Applied to invoice balance' : 'Settlement not recorded'}</span></div></div>{Number(salesReturn.pendingRefundPayable) > 0 && <div className="mt-3 border-t border-[#eee8df] pt-3"><div className="flex flex-wrap items-center justify-between gap-2"><span className="text-xs font-semibold text-[#8b4b25]">Pending payable {formatCurrency(Number(salesReturn.pendingRefundPayable))}</span><button type="button" onClick={() => { setPendingSettlementId(salesReturn.id); setPendingSettlementAmount(String(Number(salesReturn.pendingRefundPayable))); }} className="rounded-lg border border-[#eadfc8] px-3 py-1.5 text-xs font-semibold text-[#765000] hover:bg-[#fffaf0]">Settle pending</button></div>{pendingSettlementId === salesReturn.id && <div className="mt-3 grid gap-2 sm:grid-cols-4"><input type="number" min="0.01" max={Number(salesReturn.pendingRefundPayable)} step="0.01" value={pendingSettlementAmount} onChange={(event) => setPendingSettlementAmount(event.target.value)} aria-label="Amount to settle" className="h-9 rounded-lg border border-[#e8e4dd] px-2 text-sm" /><select value={pendingSettlementMethod} onChange={(event) => setPendingSettlementMethod(event.target.value as typeof pendingSettlementMethod)} aria-label="Settlement method" className="h-9 rounded-lg border border-[#e8e4dd] bg-white px-2 text-sm"><option value="CASH">Cash</option><option value="UPI">UPI</option><option value="BANK">Bank</option><option value="OTHER">Other</option></select><input value={pendingSettlementReference} onChange={(event) => setPendingSettlementReference(event.target.value)} placeholder="Reference (optional)" maxLength={120} className="h-9 rounded-lg border border-[#e8e4dd] px-2 text-sm" /><button type="button" disabled={savingPendingSettlement || !Number(pendingSettlementAmount)} onClick={() => void settlePendingRefund(salesReturn.id)} className="h-9 rounded-lg bg-[#ffe4a0] px-3 text-sm font-semibold text-[#493819] disabled:opacity-50">{savingPendingSettlement ? 'Saving…' : 'Record settlement'}</button></div>}</div>}</div>)}</div></details>}
               </div>
 
               <footer className="flex shrink-0 flex-col gap-2 border-t border-[#eee8df] bg-white px-4 py-2 sm:flex-row sm:items-center sm:justify-between sm:px-5">
@@ -864,9 +953,9 @@ console.log(pageSales,"pageSales");
                   return <article key={salesReturn.id} className="rounded-lg border border-[#eee8df] p-3">
                     <div className="flex flex-wrap items-start justify-between gap-2"><div><p className="text-sm font-semibold text-[#272727]">{String(salesReturn.returnedAt).slice(0, 16).replace('T', ' ')} · {salesReturn.reason}</p><p className="mt-1 text-xs text-[#77736d]">{salesReturn.returnedBy?.name || 'Staff'} · {salesReturn.items.map((item) => `${item.productName} × ${Number(item.quantity).toLocaleString('en-IN')}`).join(', ')}</p></div><strong className="text-sm text-[#493819]">{formatCurrency(Number(salesReturn.amount))}</strong></div>
                     {Number(salesReturn.creditAppliedAmount) > 0 && <p className="mt-2 text-xs text-[#375b9d]">Applied to invoice balance: {formatCurrency(Number(salesReturn.creditAppliedAmount))}</p>}
-                    {customerCredits.map((settlement) => <p key={settlement.id} className="mt-2 text-xs text-[#375b9d]">Customer credit recorded: {formatCurrency(Number(settlement.amount))} · {formatSaleDateTime(settlement.createdAt)}</p>)}
-                    {refundSettlements.map((settlement) => <div key={settlement.id} className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-md bg-[#eaf5ed] px-2.5 py-2 text-xs text-[#2f6d3d]"><span><strong>Refund settled · {settlement.method || 'Payment'}</strong>{settlement.reference && <span> · Ref: {settlement.reference}</span>}<span> · {formatSaleDateTime(settlement.createdAt)}</span></span><strong>{formatCurrency(Number(settlement.amount))}</strong></div>)}
-                    {pendingAmount > 0 && <p className="mt-2 rounded-md bg-[#fff5d9] px-2.5 py-2 text-xs font-semibold text-[#765000]">{refundSettlements.length ? 'Partially settled · refund still pending' : 'Refund pending'}: {formatCurrency(pendingAmount)}</p>}
+                    {customerCredits.map((settlement) => <p key={settlement.id} className="mt-2 inline-flex items-center gap-1 rounded-md bg-[#eaf5ed] px-2.5 py-2 text-xs font-semibold text-[#2f6d3d]"><Check size={13} aria-hidden="true" />Credit issued: {formatCurrency(Number(settlement.amount))} · {formatSaleDateTime(settlement.createdAt)}</p>)}
+                    {refundSettlements.map((settlement) => <div key={settlement.id} className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-md bg-[#eaf5ed] px-2.5 py-2 text-xs text-[#2f6d3d]"><span><strong className="inline-flex items-center gap-1"><Check size={13} aria-hidden="true" />Refund completed · {settlement.method || 'Payment'}</strong>{settlement.reference && <span> · Ref: {settlement.reference}</span>}<span> · {formatSaleDateTime(settlement.createdAt)}</span></span><strong>{formatCurrency(Number(settlement.amount))}</strong></div>)}
+                    {pendingAmount > 0 && <p className="mt-2 rounded-md bg-[#fff5d9] px-2.5 py-2 text-xs font-semibold text-[#765000]">Refund pending: {formatCurrency(pendingAmount)}</p>}
                   </article>;
                 })}
               </div></section>
@@ -879,8 +968,8 @@ console.log(pageSales,"pageSales");
         <div className="register-print-heading">
           <div>
             <p className="register-print-brand">ABLE LUBES</p>
-            <h1>{activeTab === 'sales' ? 'Daily Sales Register' : 'Daily Expenses Register'}</h1>
-            <p>{activeTab === 'sales' ? 'Sales report' : 'Expense report'}</p>
+            <h1>{activeTab === 'sales' ? 'Daily Sales Register' : activeTab === 'expenses' ? 'Daily Expenses Register' : activeTab === 'product-returns' ? 'Product Returns' : 'Credit Returns'}</h1>
+            <p>{activeTab === 'sales' ? 'Sales report' : activeTab === 'expenses' ? 'Expense report' : activeTab === 'product-returns' ? 'Sales return report' : 'Billing credit cancellation report'}</p>
           </div>
           <div className="register-print-meta">
             <strong>Period</strong><span>{reportDate(fromDate)} to {reportDate(toDate)}</span>
@@ -889,9 +978,9 @@ console.log(pageSales,"pageSales");
 
         {activeTab === 'sales' ? <div className="register-print-totals">
           <div><span>Total sales</span><strong>{formatCurrency(printSalesTotal)}</strong></div>
-        </div> : <div className="register-print-totals">
+        </div> : activeTab === 'expenses' ? <div className="register-print-totals">
           <div><span>Total expenses</span><strong>{formatCurrency(printExpensesTotal)}</strong></div>
-        </div>}
+        </div> : <div className="register-print-totals"><div><span>{activeTab === 'product-returns' ? 'Product returns' : 'Credit returns'}</span><strong>{activeReturnRows.length} records</strong></div></div>}
 
         {activeTab === 'sales' ? <section className="register-print-section">
           <h2>Sales <span>({filteredSales.length})</span></h2>
@@ -905,7 +994,7 @@ console.log(pageSales,"pageSales");
               {filteredSales.length > 0 && <tr><td colSpan={3}><strong>Grand total</strong></td><td><strong>{formatCurrency(printPaymentsTotal)}</strong></td><td><strong>{formatCurrency(printSalesTotal)}</strong></td><td /><td /><td /></tr>}
             </tbody>
           </table>
-        </section> : <section className="register-print-section">
+        </section> : activeTab === 'expenses' ? <section className="register-print-section">
           <h2>Expenses <span>({matchingExpenses.length})</span></h2>
           <table className="register-print-expenses">
             <thead><tr><th>Date</th><th>Description</th><th>Category / payment / notes</th><th>Amount (₹)</th></tr></thead>
@@ -916,8 +1005,13 @@ console.log(pageSales,"pageSales");
               {matchingExpenses.length === 0 && <tr><td colSpan={4} className="register-print-empty">No expenses in this range.</td></tr>}
             </tbody>
           </table>
+        </section> : <section className="register-print-section">
+          <h2>{activeTab === 'product-returns' ? 'Product Returns' : 'Credit Returns'} <span>({activeReturnRows.length})</span></h2>
+          <table className="register-print-sales">
+            <thead><tr><th>Date &amp; time</th><th>Invoice</th><th>Customer</th><th>Reason</th><th>Amount (₹)</th><th>Settlement status</th></tr></thead>
+            <tbody>{activeReturnRows.map((transaction) => <tr key={transaction.id}><td>{formatSaleDateTime(transaction.date)}</td><td>{transaction.invoiceNumber}</td><td>{transaction.customer}</td><td>{transaction.reason || '—'}</td><td>{formatCurrency(transaction.amount)}</td><td>{transaction.settlementStatus}</td></tr>)}{activeReturnRows.length === 0 && <tr><td colSpan={6} className="register-print-empty">No records in this range.</td></tr>}</tbody>
+          </table>
         </section>}
-        {activeTab === 'sales' && transactionHistory.length > 0 && <section className="register-print-section"><h2>Transaction History <span>({transactionHistory.length})</span></h2><table className="register-print-sales"><thead><tr><th>Date &amp; time</th><th>Invoice</th><th>Customer</th><th>Transaction type</th><th>Reason</th><th>Amount (₹)</th><th>Settlement status</th></tr></thead><tbody>{transactionHistory.map((transaction) => <tr key={transaction.id}><td>{formatSaleDateTime(transaction.date)}</td><td>{transaction.invoiceNumber}</td><td>{transaction.customer}</td><td>{transaction.transactionType}</td><td>{transaction.reason}</td><td>{formatCurrency(transaction.amount)}</td><td>{transaction.settlementStatus}</td></tr>)}</tbody></table></section>}
       </article>
     </div>
   );

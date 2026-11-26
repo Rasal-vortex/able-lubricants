@@ -161,6 +161,7 @@ export interface PurchaseLineItem {
   quantity: number;
   sellingPrice: number;
   purchaseRate: number;
+  mrp: number | null;
   totalAmount: number;
 }
 

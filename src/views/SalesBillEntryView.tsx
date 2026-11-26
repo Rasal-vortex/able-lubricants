@@ -463,6 +463,98 @@ export const SalesBillEntryView: React.FC = () => {
     return 0;
   };
 
+  const cartStockErrorsByRow = (() => {
+    const errors: Record<string, string> = {};
+    const quantitiesByProduct = new Map<string, { product: (typeof products)[number]; quantity: number; rowIds: string[] }>();
+    const quantitiesByPriceGroup = new Map<string, { product: (typeof products)[number]; price: number; quantity: number; available: number; rowIds: string[] }>();
+
+    for (const item of selectedCartItems) {
+      const product = products.find((entry) => entry.id === item.productId);
+      if (!product) continue;
+
+      const rawDraft = quantityDrafts[item.id];
+      const gramEntry = isKilogramProduct(product);
+      const validDraft = rawDraft !== undefined && (gramEntry
+        ? /^\d+$/.test(rawDraft)
+        : isUnitQuantityInputValid(rawDraft, product.unitAllowsDecimals));
+      const requested = validDraft
+        ? Number(rawDraft) / (gramEntry ? 1000 : 1)
+        : item.quantity;
+      if (rawDraft !== undefined && (!validDraft || requested <= 0)) {
+        errors[item.id] = gramEntry
+          ? "Enter grams as a whole number greater than zero."
+          : product.unitAllowsDecimals
+            ? "Enter a quantity greater than zero with up to 3 decimal places."
+            : "Enter a positive whole-number quantity.";
+      }
+      const requestedQuantity = Number.isFinite(requested) && requested > 0 ? requested : item.quantity;
+
+      const productRequest = quantitiesByProduct.get(product.id) || {
+        product,
+        quantity: 0,
+        rowIds: [],
+      };
+      productRequest.quantity += requestedQuantity;
+      productRequest.rowIds.push(item.id);
+      quantitiesByProduct.set(product.id, productRequest);
+
+      const groups = getBatchPriceGroups(product, item.id);
+      const priceKey = selectedSellingPriceByRow[item.id] || (groups.length === 1 ? groups[0].key : "");
+      if (!priceKey) continue;
+      const price = Number(priceKey);
+      const groupStock = product.batches
+        .filter((batch) => String(Number(batch.sellingRate)) === priceKey)
+        .reduce((sum, batch) => sum + batch.remainingQuantity, 0);
+      const key = `${product.id}:${priceKey}`;
+      const groupRequest = quantitiesByPriceGroup.get(key) || {
+        product,
+        price,
+        quantity: 0,
+        available: groupStock,
+        rowIds: [],
+      };
+      groupRequest.quantity += requestedQuantity;
+      groupRequest.rowIds.push(item.id);
+      quantitiesByPriceGroup.set(key, groupRequest);
+    }
+
+    for (const { product, quantity, rowIds } of quantitiesByProduct.values()) {
+      const available = Math.min(
+        product.quantity,
+        product.batches.reduce((sum, batch) => sum + batch.remainingQuantity, 0),
+      );
+      if (quantity > available) {
+        const formattedAvailable = new Intl.NumberFormat("en-IN", { maximumFractionDigits: 3 }).format(available);
+        for (const rowId of rowIds) {
+          errors[rowId] = `Only ${formattedAvailable} ${product.unit || "units"} of ${product.name} are available.`;
+        }
+      }
+    }
+
+    for (const { product, price, quantity, available, rowIds } of quantitiesByPriceGroup.values()) {
+      if (quantity > available) {
+        const formattedAvailable = new Intl.NumberFormat("en-IN", { maximumFractionDigits: 3 }).format(available);
+        for (const rowId of rowIds) {
+          errors[rowId] = `Only ${formattedAvailable} ${product.unit || "units"} of ${product.name} are available at ${formatCurrency(price)}.`;
+        }
+      }
+    }
+    return errors;
+  })();
+  const hasCartStockError = Object.keys(cartStockErrorsByRow).length > 0;
+  const hasInvalidQuantityDraft = selectedCartItems.some((item) => {
+    const draft = quantityDrafts[item.id];
+    if (draft === undefined) return false;
+    const product = products.find((entry) => entry.id === item.productId);
+    if (!product) return true;
+    const gramEntry = isKilogramProduct(product);
+    const valid = gramEntry
+      ? /^\d+$/.test(draft)
+      : isUnitQuantityInputValid(draft, product.unitAllowsDecimals);
+    const quantity = Number(draft) / (gramEntry ? 1000 : 1);
+    return !draft || !valid || !Number.isFinite(quantity) || quantity <= 0;
+  });
+
   const handleSelectSellingPrice = (item: CartItem, priceKey: string) => {
     const product = products.find((entry) => entry.id === item.productId);
     const group = product ? getBatchPriceGroups(product, item.id).find((entry) => entry.key === priceKey) : undefined;
@@ -540,6 +632,10 @@ export const SalesBillEntryView: React.FC = () => {
     }
     if (selectedCartItems.length === 0) {
       showToast("Cannot complete sale with an empty cart.", "error");
+      return;
+    }
+    if (hasCartStockError) {
+      showToast(Object.values(cartStockErrorsByRow)[0], "error");
       return;
     }
     const unresolvedPriceItem = selectedCartItems.find((item) => {
@@ -1002,13 +1098,6 @@ export const SalesBillEntryView: React.FC = () => {
                                 ? /^\d+$/.test(raw)
                                 : isUnitQuantityInputValid(raw, allowsDecimals);
                               if (!raw || !validInput) {
-                                setStockWarning(
-                                  gramEntry
-                                    ? "Enter grams as a whole number."
-                                    : allowsDecimals
-                                    ? "Use no more than 3 decimal places for this quantity."
-                                    : "This unit only allows whole-number quantities.",
-                                );
                                 return;
                               }
                               const maximum = maximumCartQuantity;
@@ -1016,11 +1105,7 @@ export const SalesBillEntryView: React.FC = () => {
                                 requested < minimumQuantity ||
                                 requested > maximum
                               ) {
-                                const message =
-                                  requested > maximum
-                                    ? `Only ${maximum} ${product?.unit || "units"} of ${item.name} are available.`
-                                    : "Quantity must be greater than zero.";
-                                setStockWarning(message);
+                                setStockWarning("");
                               } else {
                                 setStockWarning("");
                                 setCartItems((prev) =>
@@ -1046,11 +1131,7 @@ export const SalesBillEntryView: React.FC = () => {
                                 requested < minimumQuantity ||
                                 requested > maximumCartQuantity
                               ) {
-                                setQuantityDrafts((previous) => {
-                                  const next = { ...previous };
-                                  delete next[item.id];
-                                  return next;
-                                });
+                                return;
                               } else {
                                 setCartItems((previous) =>
                                   previous.map((it) =>
@@ -1115,6 +1196,11 @@ export const SalesBillEntryView: React.FC = () => {
                             +
                           </button>
                         </div>
+                        {cartStockErrorsByRow[item.id] && (
+                          <p role="alert" className="mt-1 max-w-48 text-xs text-error">
+                            {cartStockErrorsByRow[item.id]}
+                          </p>
+                        )}
                       </td>
                       <td className="px-2 py-2 text-center text-xs font-medium text-[#68645e]">{product ? displayUnit : "—"}</td>
                       <td className="py-2 px-space-sm text-right">
@@ -1498,7 +1584,7 @@ export const SalesBillEntryView: React.FC = () => {
               </button>
             <button
               type="button"
-              disabled={savingSale || selectedCartItems.length === 0 || manualDiscountInvalid || !splitTenderValid}
+              disabled={savingSale || selectedCartItems.length === 0 || manualDiscountInvalid || !splitTenderValid || hasCartStockError || hasInvalidQuantityDraft}
               className="flex min-h-12 flex-1 items-center justify-center gap-2 rounded-xl bg-[#ffc21a] text-base font-bold text-[#171717] shadow-sm transition hover:bg-[#ffb900] disabled:cursor-not-allowed disabled:opacity-50"
               onClick={handleCompleteSale}
             >

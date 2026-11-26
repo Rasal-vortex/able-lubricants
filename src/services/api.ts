@@ -105,9 +105,10 @@ async function requestEnvelope<T>(
   options: RequestInit = {},
   token?: string,
   allowRefresh = true,
+  timeoutMs = 10_000,
 ): Promise<ApiEnvelope<T>> {
   const controller = new AbortController();
-  const timeoutId = window.setTimeout(() => controller.abort(), 10_000);
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetch(`${API_BASE_URL}${path}`, {
@@ -125,7 +126,7 @@ async function requestEnvelope<T>(
     if (!response.ok) {
       if (response.status === 401 && token && allowRefresh && !path.startsWith('/auth/')) {
         const renewedToken = await refreshAccessToken();
-        if (renewedToken) return requestEnvelope<T>(path, options, renewedToken, false);
+        if (renewedToken) return requestEnvelope<T>(path, options, renewedToken, false, timeoutMs);
       }
       throw new ApiClientError(
         body.message || body.error || `Request failed (${response.status})`,
@@ -142,7 +143,7 @@ async function requestEnvelope<T>(
     return body;
   } catch (error) {
     if (controller.signal.aborted) {
-      throw new Error('The API did not respond within 10 seconds. Check that the backend is running and reachable.');
+      throw new Error(`The API did not respond within ${Math.round(timeoutMs / 1000)} seconds. Check that the backend is running and reachable.`);
     }
     if (error instanceof TypeError) {
       throw new Error(`Cannot reach the API at ${API_BASE_URL}. Check the backend address, server status, and network access.`);
@@ -153,8 +154,8 @@ async function requestEnvelope<T>(
   }
 }
 
-export async function apiRequest<T>(path: string, options: RequestInit = {}, token?: string): Promise<T> {
-  const response = await requestEnvelope<T>(path, options, token);
+export async function apiRequest<T>(path: string, options: RequestInit = {}, token?: string, timeoutMs = 10_000): Promise<T> {
+  const response = await requestEnvelope<T>(path, options, token, true, timeoutMs);
   if (response.data === undefined) return undefined as T;
   return response.data as T;
 }
@@ -190,7 +191,6 @@ export interface ProductPayload {
 
 export interface ProductBatchInput {
   clientKey?: string;
-  label?: string | null;
   quantity: number;
   purchaseRate: number;
   sellingRate: number;
@@ -201,9 +201,9 @@ export interface ProductBatchInput {
 export interface ProductBatchPricingUpdate {
   updates: Array<{
     id: string;
-    label?: string | null;
-    remainingQuantity: number;
-    sellingRate: number;
+    expectedRemainingQuantity?: number;
+    remainingQuantity?: number;
+    sellingRate?: number;
     mrp?: number | null;
   }>;
   additions: ProductBatchInput[];
@@ -211,6 +211,7 @@ export interface ProductBatchPricingUpdate {
 }
 
 export type UpdateProductPayload = Partial<ProductPayload> & {
+  idempotencyKey?: string;
   batchPricing?: ProductBatchPricingUpdate;
 };
 
@@ -307,6 +308,7 @@ export interface ApiSale {
     displayUnitSymbol?: string | null;
     sellingPrice: string | number;
     historicalCostSnapshot?: string | number | null;
+    historicalMrpSnapshot?: string | number | null;
     batchSellingPriceSnapshot?: string | number | null;
     costSnapshotSource?: 'VERIFIED_BATCH' | 'LEGACY_ESTIMATE' | null;
     discountAmount: string | number;
@@ -341,6 +343,7 @@ export interface ApiSaleReturnDetail {
     discountAmount: string | number;
     lineTotal: string | number;
     historicalCostSnapshot?: string | number | null;
+    historicalMrpSnapshot?: string | number | null;
     returnedQuantity: string | number;
     returnedAmount: string | number;
     returnedDisplayQuantity?: string | number | null;
@@ -461,6 +464,7 @@ export interface CreatePurchasePayload {
     quantity: number;
     supplierRate: number;
     sellingRate: number;
+    mrp?: number | null;
   }>;
 }
 
@@ -565,6 +569,7 @@ export type StockAdjustmentPayload =
       direction: 'IN';
       purchaseRate: number;
       sellingRate: number;
+      mrp?: number | null;
       reason?: string;
       notes?: string;
     }
@@ -668,7 +673,7 @@ export const createProductRequest = (token: string, payload: CreateProductPayloa
   apiRequest<ApiProduct>('/products', { method: 'POST', body: JSON.stringify(payload) }, token);
 
 export const updateProductRequest = (token: string, id: string, payload: UpdateProductPayload) =>
-  apiRequest<ApiProduct>(`/products/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(payload) }, token);
+  apiRequest<ApiProduct>(`/products/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(payload) }, token, 20_000);
 
 export const createStockAdjustmentRequest = (token: string, payload: StockAdjustmentPayload) =>
   apiRequest<ApiStockAdjustment>('/stock-adjustments', { method: 'POST', body: JSON.stringify(payload) }, token);

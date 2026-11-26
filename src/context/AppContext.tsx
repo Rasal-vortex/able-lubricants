@@ -227,7 +227,7 @@ interface AppContextType {
     id: string,
     quantity: number,
     reason?: string,
-    batchDetails?: { inventoryBatchId?: string; purchaseRate?: number; sellingRate?: number },
+    batchDetails?: { inventoryBatchId?: string; purchaseRate?: number; sellingRate?: number; mrp?: number | null },
   ) => Promise<void>;
   deleteProduct: (id: string) => Promise<void>;
 
@@ -462,6 +462,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 quantity: Number(item.quantity) || 0,
                 sellingPrice: 0,
                 purchaseRate: Number(item.purchaseRate) || 0,
+                mrp: null,
                 totalAmount: Number(item.lineTotal) || 0,
               })),
               subtotal: totalAmount,
@@ -657,8 +658,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const updateProduct = async (id: string, updates: UpdateProductPayload) => {
     if (!authSession) throw new Error('Sign in to update products.');
-    const updated = await updateProductRequest(authSession.token, id, updates);
-    const mapped = mapProduct(updated);
+    let updated: ApiProduct;
+    try {
+      updated = await updateProductRequest(authSession.token, id, updates);
+    } catch (error) {
+      try {
+        const latest = await getProductRequest(authSession.token, id);
+        const refreshed = mapProduct(latest);
+        setProducts((previous) => previous.map((product) => product.id === id ? refreshed : product));
+      } catch {
+        // Keep the original update error; a later refresh can reconcile an uncertain result.
+      }
+      throw error;
+    }
+    let authoritative = updated;
+    try {
+      authoritative = await getProductRequest(authSession.token, id);
+    } catch {
+      // The committed PATCH response remains authoritative if the follow-up read is unavailable.
+    }
+    const mapped = mapProduct(authoritative);
     setProducts((prev) => prev.map((product) => product.id === id ? mapped : product));
     showToast(`Product details updated successfully.`);
   };
@@ -667,7 +686,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     id: string,
     desiredQuantity: number,
     reason = "",
-    batchDetails: { inventoryBatchId?: string; purchaseRate?: number; sellingRate?: number } = {},
+    batchDetails: { inventoryBatchId?: string; purchaseRate?: number; sellingRate?: number; mrp?: number | null } = {},
   ) => {
     if (!authSession) throw new Error('Sign in to adjust product stock.');
     if (authSession.user.role !== 'ADMIN') throw new Error('Only Admin users can adjust product stock.');
@@ -697,6 +716,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           direction: 'IN',
           purchaseRate: batchDetails.purchaseRate ?? 0,
           sellingRate: batchDetails.sellingRate ?? 0,
+          mrp: batchDetails.mrp ?? null,
         }
       : {
           ...common,
@@ -1281,6 +1301,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         quantity: item.quantity,
         supplierRate: item.purchaseRate,
         sellingRate: item.sellingPrice,
+        mrp: item.mrp,
       })),
     };
 

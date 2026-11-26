@@ -33,7 +33,7 @@ export const CreditBillManagementView: React.FC = () => {
   const localToday = new Date(today.getTime() - today.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'All' | 'Overdue' | 'Partial' | 'Unpaid' | 'Paid' | 'Cancelled'>('All');
+  const [statusFilter, setStatusFilter] = useState<'All' | 'Overdue' | 'Partially Paid' | 'Unpaid' | 'Settled' | 'Cancelled'>('All');
   const [customerPage, setCustomerPage] = useState(1);
   const [supplierPage, setSupplierPage] = useState(1);
 
@@ -97,11 +97,11 @@ export const CreditBillManagementView: React.FC = () => {
       bill.billNumber.toLowerCase().includes(q) ||
       bill.gstin.toLowerCase().includes(q);
 
-    let matchesStatus = true;
+    let matchesStatus = statusFilter === 'All' ? bill.status !== 'Cancelled' : true;
     if (statusFilter === 'Overdue') matchesStatus = bill.status === 'Overdue';
-    if (statusFilter === 'Partial') matchesStatus = bill.status === 'Partially Paid';
+    if (statusFilter === 'Partially Paid') matchesStatus = bill.status === 'Partially Paid';
     if (statusFilter === 'Unpaid') matchesStatus = bill.status === 'Unpaid';
-    if (statusFilter === 'Paid') matchesStatus = bill.status === 'Settled';
+    if (statusFilter === 'Settled') matchesStatus = bill.status === 'Settled';
     if (statusFilter === 'Cancelled') matchesStatus = bill.status === 'Cancelled';
 
     const parsedDate = new Date(bill.billDate);
@@ -132,8 +132,8 @@ export const CreditBillManagementView: React.FC = () => {
     const matchesDate = (!fromDate || date >= fromDate) && (!toDate || date <= toDate);
     const matchesStatus = statusFilter === 'All' ||
       (statusFilter === 'Unpaid' && due > 0 && paid <= 0) ||
-      (statusFilter === 'Partial' && due > 0 && paid > 0) ||
-      (statusFilter === 'Paid' && due <= 0);
+      (statusFilter === 'Partially Paid' && due > 0 && paid > 0) ||
+      (statusFilter === 'Settled' && due <= 0);
     return matchesSearch && matchesDate && matchesStatus;
   });
   const supplierPageCount = Math.max(1, Math.ceil(supplierPurchases.length / DEFAULT_PAGE_SIZE));
@@ -473,7 +473,7 @@ export const CreditBillManagementView: React.FC = () => {
               onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}
               className="h-10 min-w-0 flex-1 rounded-lg border border-outline-variant/25 bg-surface-container-low px-3 text-sm font-medium text-on-surface outline-none focus:border-primary"
             >
-              {(creditView === 'customers' ? ['All', 'Overdue', 'Partial', 'Unpaid', 'Paid', 'Cancelled'] : ['All', 'Partial', 'Unpaid', 'Paid']).map((status) => <option key={status} value={status}>{status}</option>)}
+              {(creditView === 'customers' ? ['All', 'Overdue', 'Partially Paid', 'Unpaid', 'Settled', 'Cancelled'] : ['All', 'Partially Paid', 'Unpaid', 'Settled']).map((status) => <option key={status} value={status}>{status}</option>)}
             </select>
           </label>
 
