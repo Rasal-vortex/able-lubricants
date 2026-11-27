@@ -35,9 +35,40 @@ type TransactionHistoryEntry = {
   transactionType: 'Sales Return' | 'Credit Cancellation';
   reason: string;
   amount: number;
+  billAmount?: number;
+  creditReversedAmount?: number | null;
+  refundedAmount?: number;
   settlementStatus: string;
   staff?: string | null;
   details: TransactionHistoryDetail[];
+};
+type ReturnSaleLine = {
+  item: ApiSaleReturnDetail['items'][number];
+  sold: number;
+  returned: number;
+  remaining: number;
+};
+type ReturnAllocationGroup = {
+  key: string;
+  lines: ReturnSaleLine[];
+  sold: number;
+  returned: number;
+  remaining: number;
+  requested: number;
+  amount: number;
+};
+type ReturnProductGroup = {
+  key: string;
+  productId: string;
+  productName: string;
+  sellingPrice: number;
+  sold: number;
+  returned: number;
+  remaining: number;
+  requested: number;
+  amount: number;
+  lines: ReturnSaleLine[];
+  allocationGroups: ReturnAllocationGroup[];
 };
 const SALES_RETURN_REASON_PRESETS = [
   'Product defective',
@@ -73,13 +104,162 @@ const reportDate = (date: string) => new Intl.DateTimeFormat('en-IN', {
   year: 'numeric',
 }).format(new Date(`${date}T12:00:00`));
 
+const scaledInteger = (value: string | number | null | undefined, decimals: number): bigint | null => {
+  const raw = String(value ?? '').trim();
+  const match = /^(-?)(\d+)(?:\.(\d+))?$/.exec(raw);
+  if (!match) return null;
+  const fraction = match[3] || '';
+  if (fraction.slice(decimals).replace(/0/g, '').length) return null;
+  const scale = 10n ** BigInt(decimals);
+  const whole = BigInt(match[2]);
+  const decimal = BigInt(fraction.slice(0, decimals).padEnd(decimals, '0') || '0');
+  const result = whole * scale + decimal;
+  return match[1] === '-' ? -result : result;
+};
+
+const gcd = (left: bigint, right: bigint): bigint => {
+  let a = left < 0n ? -left : left;
+  let b = right < 0n ? -right : right;
+  while (b) [a, b] = [b, a % b];
+  return a || 1n;
+};
+
+const fractionKey = (
+  numerator: string | number | null | undefined,
+  numeratorDecimals: number,
+  denominator: string | number | null | undefined,
+  denominatorDecimals: number,
+) => {
+  const numeratorUnits = scaledInteger(numerator, numeratorDecimals);
+  const denominatorUnits = scaledInteger(denominator, denominatorDecimals);
+  if (numeratorUnits == null || denominatorUnits == null || denominatorUnits <= 0n) return null;
+  let top = numeratorUnits * (10n ** BigInt(denominatorDecimals));
+  let bottom = denominatorUnits * (10n ** BigInt(numeratorDecimals));
+  const divisor = gcd(top, bottom);
+  top /= divisor;
+  bottom /= divisor;
+  return `${top}/${bottom}`;
+};
+
+const divideRoundHalfUp = (numerator: bigint, denominator: bigint) => {
+  if (denominator <= 0n) return 0n;
+  const quotient = numerator / denominator;
+  const remainder = numerator % denominator;
+  return remainder * 2n >= denominator ? quotient + 1n : quotient;
+};
+
+const allocatedReturnRevenueByItem = (invoice: ApiSaleReturnDetail) => {
+  const totalAmountCents = scaledInteger(invoice.totalAmount, 2) ?? 0n;
+  const lineTotalCents = invoice.items.map((item) => scaledInteger(item.lineTotal, 2) ?? 0n);
+  const lineRevenueTotalCents = lineTotalCents.reduce((total, amount) => total + amount, 0n);
+  let allocatedBeforeCents = 0n;
+  return invoice.items.map((_, index) => {
+    const amount = index === invoice.items.length - 1
+      ? totalAmountCents - allocatedBeforeCents
+      : lineRevenueTotalCents > 0n
+        ? divideRoundHalfUp(totalAmountCents * lineTotalCents[index], lineRevenueTotalCents)
+        : 0n;
+    allocatedBeforeCents += amount;
+    return amount;
+  });
+};
+
+const returnAllocationIdentity = (item: ApiSaleReturnDetail['items'][number], allocatedRevenueCents: bigint) => {
+  const itemKey = `sale-item:${item.id}`;
+  const receivedAt = item.inventoryBatchReceivedAt;
+  if (
+    item.historicalCostSnapshot == null || item.costSnapshotSource !== 'VERIFIED_BATCH' ||
+    item.historicalMrpSnapshot == null || !item.inventoryBatchId || !receivedAt ||
+    !Number.isFinite(Date.parse(receivedAt)) ||
+    Number(item.returnedQuantity) > 0 || Number(item.returnedAmount) > 0
+  ) return itemKey;
+
+  const sellingPrice = scaledInteger(item.unitSellingPrice, 2);
+  const purchaseRate = scaledInteger(item.historicalCostSnapshot, 2);
+  const mrp = scaledInteger(item.historicalMrpSnapshot, 2);
+  const netRate = fractionKey(item.lineTotal, 2, item.quantity, 3);
+  const discountRate = fractionKey(item.discountAmount, 2, item.quantity, 3);
+  const effectiveReturnRate = fractionKey(allocatedRevenueCents.toString(), 0, item.quantity, 3);
+  const conversion = item.displayQuantity == null
+    ? '1/1'
+    : fractionKey(item.displayQuantity, 3, item.quantity, 3);
+  if (sellingPrice == null || purchaseRate == null || mrp == null || !netRate || !discountRate || !effectiveReturnRate || !conversion) return itemKey;
+
+  return JSON.stringify([
+    item.productId,
+    sellingPrice.toString(),
+    purchaseRate.toString(),
+    mrp.toString(),
+    item.unitName,
+    item.unitSymbol || '',
+    item.unitAllowsDecimals,
+    item.displayUnitName || '',
+    item.displayUnitSymbol || '',
+    conversion,
+    netRate,
+    discountRate,
+    effectiveReturnRate,
+  ]);
+};
+
+const compareOldestBatchFirst = (left: ReturnSaleLine, right: ReturnSaleLine) => {
+  const leftDate = Date.parse(left.item.inventoryBatchReceivedAt || '');
+  const rightDate = Date.parse(right.item.inventoryBatchReceivedAt || '');
+  const leftOrder = Number.isFinite(leftDate) ? leftDate : Number.MAX_SAFE_INTEGER;
+  const rightOrder = Number.isFinite(rightDate) ? rightDate : Number.MAX_SAFE_INTEGER;
+  return leftOrder - rightOrder ||
+    (left.item.inventoryBatchId || '').localeCompare(right.item.inventoryBatchId || '') ||
+    left.item.id.localeCompare(right.item.id);
+};
+
+const buildReturnProductGroups = (invoice: ApiSaleReturnDetail): ReturnProductGroup[] => {
+  const groups = new Map<string, Omit<ReturnProductGroup, 'allocationGroups'>>();
+  const allocatedRevenue = allocatedReturnRevenueByItem(invoice);
+  const allocatedRevenueById = new Map(invoice.items.map((item, index) => [item.id, allocatedRevenue[index]]));
+  for (const item of invoice.items) {
+    const key = `${item.productId}:${Number(item.unitSellingPrice).toFixed(2)}`;
+    const sold = item.displayQuantity != null ? Number(item.displayQuantity) : Number(item.quantity);
+    const returned = item.displayQuantity != null ? Number(item.returnedDisplayQuantity || 0) : Number(item.returnedQuantity);
+    const line: ReturnSaleLine = { item, sold, returned, remaining: Math.max(0, sold - returned) };
+    const group = groups.get(key) || {
+      key, productId: item.productId, productName: item.productName,
+      sellingPrice: Number(item.unitSellingPrice), sold: 0, returned: 0, remaining: 0, requested: 0, amount: 0, lines: [],
+    };
+    group.sold += line.sold;
+    group.returned += line.returned;
+    group.remaining += line.remaining;
+    group.lines.push(line);
+    groups.set(key, group);
+  }
+
+  return [...groups.values()].map((group) => {
+    const allocationGroups = new Map<string, ReturnAllocationGroup>();
+    for (const line of group.lines) {
+      const key = `${group.key}:${returnAllocationIdentity(line.item, allocatedRevenueById.get(line.item.id) ?? 0n)}`;
+      const allocationGroup = allocationGroups.get(key) || {
+        key, lines: [], sold: 0, returned: 0, remaining: 0, requested: 0, amount: 0,
+      };
+      allocationGroup.lines.push(line);
+      allocationGroup.sold += line.sold;
+      allocationGroup.returned += line.returned;
+      allocationGroup.remaining += line.remaining;
+      allocationGroups.set(key, allocationGroup);
+    }
+    return {
+      ...group,
+      allocationGroups: [...allocationGroups.values()].map((allocationGroup) => ({
+        ...allocationGroup,
+        lines: [...allocationGroup.lines].sort(compareOldestBatchFirst),
+      })).sort((left, right) => compareOldestBatchFirst(left.lines[0], right.lines[0])),
+    };
+  });
+};
+
 const defaultReturnQuantities = (invoice: ApiSaleReturnDetail) => Object.fromEntries(
-  invoice.items.map((item) => {
-    const remaining = item.displayQuantity != null
-      ? Math.max(0, Number(item.displayQuantity) - Number(item.returnedDisplayQuantity || 0))
-      : Math.max(0, Number(item.remainingQuantity) || 0);
-    return [item.id, remaining === 1 ? '1' : ''];
-  }),
+  buildReturnProductGroups(invoice).flatMap((group) => group.allocationGroups.map((allocationGroup) => [
+    allocationGroup.key,
+    allocationGroup.remaining === 1 ? '1' : '',
+  ])),
 );
 
 const csvCell = (value: string | number) => `"${String(value).replace(/"/g, '""')}"`;
@@ -104,7 +284,7 @@ export const DailySalesManagementView: React.FC = () => {
   const [transactionPage, setTransactionPage] = useState(1);
   const [apiSales, setApiSales] = useState<SaleRecord[] | null>(null);
   const [apiSalesReturns, setApiSalesReturns] = useState<Array<{ id: string; date: string; invoiceNumber: string; customer: string; reason: string; amount: number; creditAppliedAmount: number; settlementType: string; returnedBy?: string | null; settlements: Array<{ id: string; type: string; amount: number; method?: string | null; reference?: string | null; date: string }> }>>([]);
-  const [apiCreditCancellations, setApiCreditCancellations] = useState<Array<{ id: string; date: string; invoiceNumber: string; customer: string; reason: string; amount: number; actualReceivedAmount: number; pendingRefundAmount: number; cancelledBy?: string | null; recordedPayments: Array<{ id: string; method: string; amount: number }>; actualPayments: Array<{ method: string; amount: number }>; paymentCorrections: Array<{ id: string; type: string; method: string; amount: number; date: string }>; refunds: Array<{ id: string; amount: number; method: string; reference?: string | null; date: string }> }>>([]);
+  const [apiCreditCancellations, setApiCreditCancellations] = useState<Array<{ id: string; date: string; invoiceNumber: string; customer: string; reason: string; amount: number; creditReversedAmount: number | null; refundedAmount: number; actualReceivedAmount: number; pendingRefundAmount: number; cancelledBy?: string | null; recordedPayments: Array<{ id: string; method: string; amount: number }>; actualPayments: Array<{ method: string; amount: number }>; paymentCorrections: Array<{ id: string; type: string; method: string; amount: number; date: string }>; refunds: Array<{ id: string; amount: number; method: string; reference?: string | null; date: string }> }>>([]);
   const [invoiceDetail, setInvoiceDetail] = useState<ApiSaleReturnDetail | null>(null);
   const [returnDetailsOnly, setReturnDetailsOnly] = useState(false);
   const [selectedTransaction, setSelectedTransaction] = useState<TransactionHistoryEntry | null>(null);
@@ -112,7 +292,6 @@ export const DailySalesManagementView: React.FC = () => {
   const [returnQuantities, setReturnQuantities] = useState<Record<string, string>>({});
   const [expandedReturnGroups, setExpandedReturnGroups] = useState<Record<string, boolean>>({});
   const [returnReason, setReturnReason] = useState('');
-  const [returnNotes, setReturnNotes] = useState('');
   const [returnReasonPreset, setReturnReasonPreset] = useState('');
   const [returnSettlement, setReturnSettlement] = useState<'REFUND' | 'CUSTOMER_CREDIT' | 'PENDING'>('REFUND');
   const [refundMethod, setRefundMethod] = useState<'CASH' | 'UPI' | 'BANK' | 'OTHER'>('CASH');
@@ -154,6 +333,8 @@ export const DailySalesManagementView: React.FC = () => {
         id: String(cancellation.id), date: String(cancellation.date), invoiceNumber: String(cancellation.invoiceNumber || ''),
         customer: String(cancellation.customer || 'Walk-in customer'), reason: String(cancellation.reason || ''),
         amount: Number(cancellation.amount) || 0, actualReceivedAmount: Number(cancellation.actualReceivedAmount) || 0,
+        creditReversedAmount: cancellation.creditReversedAmount == null ? null : Number(cancellation.creditReversedAmount),
+        refundedAmount: Number(cancellation.refundedAmount) || 0,
         pendingRefundAmount: Number(cancellation.pendingRefundAmount) || 0, cancelledBy: cancellation.cancelledBy || null,
         recordedPayments: (cancellation.recordedPayments || []).map((payment: any) => ({ id: String(payment.id), method: String(payment.method), amount: Number(payment.amount) || 0 })),
         actualPayments: (cancellation.actualPayments || []).map((payment: any) => ({ method: String(payment.method), amount: Number(payment.amount) || 0 })),
@@ -292,7 +473,6 @@ export const DailySalesManagementView: React.FC = () => {
     setReturnQuantities({});
     setExpandedReturnGroups({});
     setReturnReason('');
-    setReturnNotes('');
     setReturnReasonPreset('');
     setReturnSettlement('REFUND');
     setPendingSettlementId(null);
@@ -313,78 +493,127 @@ export const DailySalesManagementView: React.FC = () => {
     }
   };
 
+  const returnProductGroupsBase = invoiceDetail ? buildReturnProductGroups(invoiceDetail) : [];
+  const quantitySelection = (() => {
+    const bySaleItem: Record<string, string> = {};
+    const invalidGroupKeys = new Set<string>();
+    for (const productGroup of returnProductGroupsBase) {
+      for (const allocationGroup of productGroup.allocationGroups) {
+        const rawValue = returnQuantities[allocationGroup.key] || '';
+        for (const line of allocationGroup.lines) bySaleItem[line.item.id] = '';
+        if (!rawValue) continue;
+        const firstLine = allocationGroup.lines[0];
+        const decimals = firstLine.item.displayQuantity != null ? 0 : firstLine.item.unitAllowsDecimals ? 3 : 0;
+        const scale = 10 ** decimals;
+        const requested = Number(rawValue);
+        const requestedUnits = Math.round(requested * scale);
+        const availableUnits = Math.round(allocationGroup.remaining * scale);
+        if (!Number.isFinite(requested) || rawValue.endsWith('.') || requested < 0 || requestedUnits > availableUnits) {
+          invalidGroupKeys.add(allocationGroup.key);
+          continue;
+        }
+        let unitsLeft = requestedUnits;
+        const selected: Array<{ saleItemId: string; units: number }> = [];
+        for (const line of allocationGroup.lines) {
+          const lineUnits = Math.max(0, Math.round(line.remaining * scale));
+          const units = Math.min(unitsLeft, lineUnits);
+          if (units > 0) selected.push({ saleItemId: line.item.id, units });
+          unitsLeft -= units;
+          if (!unitsLeft) break;
+        }
+        if (unitsLeft > 0) {
+          invalidGroupKeys.add(allocationGroup.key);
+          continue;
+        }
+        for (const allocation of selected) {
+          bySaleItem[allocation.saleItemId] = decimals === 0
+            ? String(allocation.units)
+            : (allocation.units / scale).toFixed(decimals).replace(/\.?0+$/, '');
+        }
+      }
+    }
+    return { bySaleItem, invalidGroupKeys, valid: invalidGroupKeys.size === 0 };
+  })();
+  const fromCents = (value: bigint) => Number(value) / 100;
   const returnPreview = (() => {
-    if (!invoiceDetail) return { items: [] as Array<{ saleItemId: string; productName: string; quantity: number; displayQuantity: number; unitLabel: string; amount: number }>, amount: 0, creditApplied: 0, settlementAmount: 0 };
-    const lineRevenueTotal = invoiceDetail.items.reduce((total, item) => total + (Number(item.lineTotal) || 0), 0);
-    let allocatedBefore = 0;
+    if (!invoiceDetail) return { items: [] as Array<{ saleItemId: string; productName: string; quantity: number; displayQuantity: number; unitLabel: string; amount: number }>, amount: 0, creditApplied: 0, settlementAmount: 0, quantitiesValid: quantitySelection.valid };
+    const totalAmountCents = scaledInteger(invoiceDetail.totalAmount, 2) ?? 0n;
+    const lineTotalCents = invoiceDetail.items.map((item) => scaledInteger(item.lineTotal, 2) ?? 0n);
+    const lineRevenueTotalCents = lineTotalCents.reduce((total, amount) => total + amount, 0n);
+    let allocatedBeforeCents = 0n;
     const items: Array<{ saleItemId: string; productName: string; quantity: number; displayQuantity: number; unitLabel: string; amount: number }> = [];
+    let selectedAmountCents = 0n;
     for (const [index, item] of invoiceDetail.items.entries()) {
-      const lineTotal = Number(item.lineTotal) || 0;
-      const allocatedRevenue = index === invoiceDetail.items.length - 1
-        ? Number(invoiceDetail.totalAmount) - allocatedBefore
-        : lineRevenueTotal > 0 ? Math.round((Number(invoiceDetail.totalAmount) * lineTotal / lineRevenueTotal) * 100) / 100 : 0;
-      allocatedBefore += allocatedRevenue;
-      const entered = Number(returnQuantities[item.id] || 0);
-      if (!entered) continue;
-      const originalQuantity = Number(item.quantity) || 0;
-      const displayQuantity = Number(item.displayQuantity) || 0;
-      const quantity = displayQuantity > 0 ? entered * originalQuantity / displayQuantity : entered;
-      const remainingQuantity = Number(item.remainingQuantity) || 0;
-      if (quantity <= 0 || quantity > remainingQuantity + 0.0000001 || originalQuantity <= 0) continue;
-      const previousAmount = Number(item.returnedAmount) || 0;
-      const remainingAmount = Math.max(0, allocatedRevenue - previousAmount);
-      const amount = Math.abs(quantity - remainingQuantity) < 0.0000001
-        ? remainingAmount
-        : Math.round(allocatedRevenue * quantity / originalQuantity * 100) / 100;
-      items.push({ saleItemId: item.id, productName: item.productName, quantity, displayQuantity: entered, unitLabel: item.displayUnitSymbol || item.displayUnitName || item.unitSymbol || item.unitName, amount });
+      const allocatedRevenueCents = index === invoiceDetail.items.length - 1
+        ? totalAmountCents - allocatedBeforeCents
+        : lineRevenueTotalCents > 0n
+          ? divideRoundHalfUp(totalAmountCents * lineTotalCents[index], lineRevenueTotalCents)
+          : 0n;
+      allocatedBeforeCents += allocatedRevenueCents;
+      const enteredDisplayMilli = scaledInteger(quantitySelection.bySaleItem[item.id] || '0', 3);
+      if (enteredDisplayMilli == null || enteredDisplayMilli <= 0n) continue;
+      const originalQuantityMilli = scaledInteger(item.quantity, 3) ?? 0n;
+      const displayQuantityMilli = item.displayQuantity == null ? 0n : scaledInteger(item.displayQuantity, 3) ?? 0n;
+      const quantityMilli = displayQuantityMilli > 0n
+        ? divideRoundHalfUp(enteredDisplayMilli * originalQuantityMilli, displayQuantityMilli)
+        : enteredDisplayMilli;
+      const remainingQuantityMilli = scaledInteger(item.remainingQuantity, 3) ?? 0n;
+      if (quantityMilli <= 0n || quantityMilli > remainingQuantityMilli || originalQuantityMilli <= 0n) continue;
+      const previousAmountCents = scaledInteger(item.returnedAmount, 2) ?? 0n;
+      const remainingAmountCents = allocatedRevenueCents > previousAmountCents ? allocatedRevenueCents - previousAmountCents : 0n;
+      const amountCents = quantityMilli === remainingQuantityMilli
+        ? remainingAmountCents
+        : divideRoundHalfUp(allocatedRevenueCents * quantityMilli, originalQuantityMilli);
+      items.push({
+        saleItemId: item.id,
+        productName: item.productName,
+        quantity: Number(quantityMilli) / 1000,
+        displayQuantity: Number(enteredDisplayMilli) / 1000,
+        unitLabel: item.displayUnitSymbol || item.displayUnitName || item.unitSymbol || item.unitName,
+        amount: fromCents(amountCents),
+      });
+      selectedAmountCents += amountCents;
     }
-    const amount = Math.round(items.reduce((total, item) => total + item.amount, 0) * 100) / 100;
-    const outstanding = invoiceDetail.creditBill
-      ? Math.max(0, Number(invoiceDetail.creditBill.billAmount) - Number(invoiceDetail.creditBill.paidAmount))
-      : 0;
-    const creditApplied = Math.min(amount, outstanding);
-    return { items, amount, creditApplied, settlementAmount: Math.max(0, amount - creditApplied) };
+    const outstandingCents = invoiceDetail.creditBill
+      ? (scaledInteger(invoiceDetail.creditBill.billAmount, 2) ?? 0n) - (scaledInteger(invoiceDetail.creditBill.paidAmount, 2) ?? 0n)
+      : 0n;
+    const creditAppliedCents = outstandingCents > 0n
+      ? (selectedAmountCents < outstandingCents ? selectedAmountCents : outstandingCents)
+      : 0n;
+    return {
+      items,
+      amount: fromCents(selectedAmountCents),
+      creditApplied: fromCents(creditAppliedCents),
+      settlementAmount: fromCents(selectedAmountCents - creditAppliedCents),
+      quantitiesValid: quantitySelection.valid,
+    };
   })();
-  const returnProductGroups = (() => {
-    if (!invoiceDetail) return [];
-    const groups = new Map<string, {
-      key: string;
-      productId: string;
-      productName: string;
-      sellingPrice: number;
-      sold: number;
-      returned: number;
-      remaining: number;
-      requested: number;
-      amount: number;
-      lines: Array<{ item: ApiSaleReturnDetail['items'][number]; sold: number; returned: number; remaining: number; requested: number; amount: number }>;
-    }>();
-    for (const item of invoiceDetail.items) {
-      const key = `${item.productId}:${Number(item.unitSellingPrice).toFixed(2)}`;
-      const sold = item.displayQuantity != null ? Number(item.displayQuantity) : Number(item.quantity);
-      const returned = item.displayQuantity != null ? Number(item.returnedDisplayQuantity || 0) : Number(item.returnedQuantity);
-      const remaining = Math.max(0, sold - returned);
-      const requested = Number(returnQuantities[item.id] || 0);
-      const amount = returnPreview.items.find((line) => line.saleItemId === item.id)?.amount || 0;
-      const group = groups.get(key) || {
-        key, productId: item.productId, productName: item.productName,
-        sellingPrice: Number(item.unitSellingPrice), sold: 0, returned: 0,
-        remaining: 0, requested: 0, amount: 0, lines: [],
-      };
-      group.sold += sold;
-      group.returned += returned;
-      group.remaining += remaining;
-      group.requested += requested;
-      group.amount += amount;
-      group.lines.push({ item, sold, returned, remaining, requested, amount });
-      groups.set(key, group);
-    }
-    return [...groups.values()];
-  })();
+  const sumRequestedDisplayQuantity = (lines: ReturnSaleLine[]) => Number(lines.reduce(
+    (total, line) => total + (scaledInteger(quantitySelection.bySaleItem[line.item.id] || '0', 3) ?? 0n), 0n,
+  )) / 1000;
+  const sumSelectedReturnAmount = (lines: ReturnSaleLine[]) => fromCents(lines.reduce((total, line) => {
+    const selectedLine = returnPreview.items.find((entry) => entry.saleItemId === line.item.id);
+    return total + (scaledInteger(selectedLine?.amount ?? 0, 2) ?? 0n);
+  }, 0n));
+  const returnProductGroups = returnProductGroupsBase.map((group) => ({
+    ...group,
+    lines: group.lines.map((line) => {
+      const requested = Number(quantitySelection.bySaleItem[line.item.id] || 0);
+      const amount = returnPreview.items.find((entry) => entry.saleItemId === line.item.id)?.amount || 0;
+      return { ...line, requested, amount };
+    }),
+    allocationGroups: group.allocationGroups.map((allocationGroup) => ({
+      ...allocationGroup,
+      requested: sumRequestedDisplayQuantity(allocationGroup.lines),
+      amount: sumSelectedReturnAmount(allocationGroup.lines),
+    })),
+    requested: sumRequestedDisplayQuantity(group.lines),
+    amount: sumSelectedReturnAmount(group.lines),
+  }));
   const canViewReturnCost = authSession?.user.role === 'ADMIN';
 
   const submitSalesReturn = async () => {
-    if (!authSession || !invoiceDetail || savingReturn || returnRequestInFlight.current || !returnReason.trim() || !returnPreview.items.length) return;
+    if (!authSession || !invoiceDetail || savingReturn || returnRequestInFlight.current || !returnReason.trim() || !returnPreview.items.length || !returnPreview.quantitiesValid) return;
     if (returnSettlement === 'CUSTOMER_CREDIT' && returnPreview.settlementAmount > 0 && !invoiceDetail.customer) {
       showToast('Customer credit requires a registered customer on this invoice.', 'error');
       return;
@@ -396,7 +625,7 @@ export const DailySalesManagementView: React.FC = () => {
       const submittedItems = returnPreview.items;
       await createSalesReturnRequest(authSession.token, saleId, {
         idempotencyKey: crypto.randomUUID(),
-        reason: [returnReason.trim(), returnNotes.trim()].filter(Boolean).join(' — '),
+        reason: returnReason.trim(),
         settlementType: returnSettlement,
         items: returnPreview.items.map((item) => ({ saleItemId: item.saleItemId, quantity: item.quantity })),
         ...(returnSettlement === 'REFUND' && returnPreview.settlementAmount > 0 ? { refunds: [{ amount: returnPreview.settlementAmount, method: refundMethod, ...(refundReference.trim() ? { reference: refundReference.trim() } : {}) }] } : {}),
@@ -404,7 +633,6 @@ export const DailySalesManagementView: React.FC = () => {
       setConfirmReturnOpen(false);
       setReturnReason('');
       setReturnReasonPreset('');
-      setReturnNotes('');
       void refreshCustomers();
       setRefreshRegister((value) => value + 1);
       const optimisticItems = invoiceDetail.items.map((item) => {
@@ -519,7 +747,7 @@ export const DailySalesManagementView: React.FC = () => {
       ];
       if (row.pendingRefundAmount > 0) details.push({ id: `${row.id}-pending`, group: 'Refund settlements', label: 'Refund Pending', amount: row.pendingRefundAmount });
       if (!details.some((detail) => detail.group === 'Refund settlements')) details.push({ id: `${row.id}-none`, group: 'Refund settlements', label: 'No refund required', amount: 0 });
-      return { id: `cancellation-${row.id}`, date: row.date, invoiceNumber: row.invoiceNumber, customer: row.customer, transactionType: 'Credit Cancellation', reason: row.reason, amount: row.amount, settlementStatus, staff: row.cancelledBy, details };
+      return { id: `cancellation-${row.id}`, date: row.date, invoiceNumber: row.invoiceNumber, customer: row.customer, transactionType: 'Credit Cancellation', reason: row.reason, amount: row.amount, billAmount: row.amount, creditReversedAmount: row.creditReversedAmount, refundedAmount: row.refundedAmount, settlementStatus, staff: row.cancelledBy, details };
     }),
   ]
     .filter((row) => !query || [row.invoiceNumber, row.customer, row.transactionType, row.reason, row.settlementStatus].some((value) => value.toLowerCase().includes(query)))
@@ -548,6 +776,8 @@ export const DailySalesManagementView: React.FC = () => {
   const safeTransactionPage = Math.min(transactionPage, transactionPageCount);
   const pageTransactions = getPageRecords(activeReturnRows, safeTransactionPage, pageSize);
   const transactionRange = getPaginationRange(activeReturnRows.length, safeTransactionPage, pageSize);
+  const creditReturnsTab = activeTab === 'credit-returns';
+  const returnTableColumnCount = creditReturnsTab ? 8 : 6;
   const printSalesTotal = filteredSales.reduce((sum, sale) => sum + (sale.netSalesAmount ?? sale.amount), 0);
   const printPaymentsTotal = filteredSales.reduce((sum, sale) => sum + sale.amount, 0);
   const printExpensesTotal = matchingExpenses.reduce((sum, expense) => sum + expense.amount, 0);
@@ -851,9 +1081,9 @@ console.log(pageSales,"pageSales");
             <div><h2 className="text-sm font-bold text-[#272727]">{activeTab === 'product-returns' ? 'Product Returns' : 'Credit Returns'}</h2></div>
             <strong className="text-sm text-[#a86600]">{activeReturnRows.length} records</strong>
           </div>
-          <div className="overflow-x-auto"><table className="w-full min-w-[900px] border-collapse text-left text-sm"><thead><tr className="h-10 bg-[#f6f5f2] text-xs font-bold uppercase tracking-wide text-[#6d685f]"><th className="px-4 py-2">Date &amp; time</th><th className="px-4 py-2">Invoice</th><th className="px-4 py-2">Customer</th><th className="px-4 py-2">Reason</th><th className="px-4 py-2 text-right">Amount</th><th className="px-4 py-2">Settlement status</th></tr></thead><tbody className="divide-y divide-[#efede8] text-sm text-[#272727]">
-            {apiLoading ? <tr><td colSpan={6} className="px-4 py-14 text-center"><LoaderOne /></td></tr> : pageTransactions.map((transaction) => <tr key={transaction.id} className="transition hover:bg-[#fcfbf9]"><td className="whitespace-nowrap px-4 py-2 text-xs text-[#68645e]">{formatSaleDateTime(transaction.date)}</td><td className="px-4 py-2"><button type="button" onClick={() => setSelectedTransaction(transaction)} title="Open transaction details" className="font-semibold text-[#a86600] hover:underline">{transaction.invoiceNumber}</button></td><td className="px-4 py-2">{transaction.customer}</td><td className="max-w-[260px] truncate px-4 py-2" title={transaction.reason}>{transaction.reason || '—'}</td><td className="whitespace-nowrap px-4 py-2 text-right font-semibold">{formatCurrency(transaction.amount)}</td><td className="px-4 py-2"><span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${transaction.settlementStatus.includes('Pending') ? 'bg-[#fff5d9] text-[#765000]' : transaction.settlementStatus === 'Refunded' ? 'bg-[#eaf5ed] text-[#2f6d3d]' : transaction.settlementStatus === 'Customer Credit' ? 'bg-[#edf3ff] text-[#375b9d]' : 'bg-[#f1f1ef] text-[#625d54]'}`}>{transaction.settlementStatus}</span></td></tr>)}
-            {!apiLoading && activeReturnRows.length === 0 && <tr><td colSpan={6} className="px-4 py-10 text-center text-sm text-[#77736d]">{activeTab === 'product-returns' ? 'No product returns match this date range and search.' : 'No credit returns match this date range and search.'}</td></tr>}
+          <div className="overflow-x-auto"><table className={creditReturnsTab ? 'w-full min-w-[1260px] border-collapse text-left text-sm' : 'w-full min-w-[900px] border-collapse text-left text-sm'}><thead><tr className="h-10 bg-[#f6f5f2] text-xs font-bold uppercase tracking-wide text-[#6d685f]"><th className="px-4 py-2">Date &amp; time</th><th className="px-4 py-2">Invoice</th><th className="px-4 py-2">Customer</th><th className="px-4 py-2">Reason</th>{creditReturnsTab ? <><th className="px-4 py-2 text-right">Bill Amount</th><th className="px-4 py-2 text-right">Credit Reversed</th><th className="px-4 py-2 text-right">Refunded Amount</th></> : <th className="px-4 py-2 text-right">Amount</th>}<th className="px-4 py-2">Settlement status</th></tr></thead><tbody className="divide-y divide-[#efede8] text-sm text-[#272727]">
+            {apiLoading ? <tr><td colSpan={returnTableColumnCount} className="px-4 py-14 text-center"><LoaderOne /></td></tr> : pageTransactions.map((transaction) => <tr key={transaction.id} className="transition hover:bg-[#fcfbf9]"><td className="whitespace-nowrap px-4 py-2 text-xs text-[#68645e]">{formatSaleDateTime(transaction.date)}</td><td className="px-4 py-2"><button type="button" onClick={() => setSelectedTransaction(transaction)} title="Open transaction details" className="font-semibold text-[#a86600] hover:underline">{transaction.invoiceNumber}</button></td><td className="px-4 py-2">{transaction.customer}</td><td className="max-w-[260px] truncate px-4 py-2" title={transaction.reason}>{transaction.reason || '—'}</td>{creditReturnsTab ? <><td className="whitespace-nowrap px-4 py-2 text-right font-semibold tabular-nums">{formatCurrency(transaction.billAmount ?? transaction.amount)}</td><td className="whitespace-nowrap px-4 py-2 text-right font-semibold tabular-nums">{transaction.creditReversedAmount == null ? <span className="font-normal text-[#77736d]">Unavailable</span> : formatCurrency(transaction.creditReversedAmount)}</td><td className="whitespace-nowrap px-4 py-2 text-right font-semibold tabular-nums">{formatCurrency(transaction.refundedAmount ?? 0)}</td></> : <td className="whitespace-nowrap px-4 py-2 text-right font-semibold">{formatCurrency(transaction.amount)}</td>}<td className="px-4 py-2"><span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${transaction.settlementStatus.includes('Pending') ? 'bg-[#fff5d9] text-[#765000]' : transaction.settlementStatus === 'Refunded' ? 'bg-[#eaf5ed] text-[#2f6d3d]' : transaction.settlementStatus === 'Customer Credit' ? 'bg-[#edf3ff] text-[#375b9d]' : 'bg-[#f1f1ef] text-[#625d54]'}`}>{transaction.settlementStatus}</span></td></tr>)}
+            {!apiLoading && activeReturnRows.length === 0 && <tr><td colSpan={returnTableColumnCount} className="px-4 py-10 text-center text-sm text-[#77736d]">{activeTab === 'product-returns' ? 'No product returns match this date range and search.' : 'No credit returns match this date range and search.'}</td></tr>}
           </tbody></table></div>
           <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-[#eee8df] bg-[#f8f7f4] px-4 py-3"><span className="text-xs text-[#6b665c]">Showing <strong className="text-[#272727]">{transactionRange.start}-{transactionRange.end}</strong> of <strong className="text-[#272727]">{activeReturnRows.length}</strong> records</span><PaginationControls totalRecords={activeReturnRows.length} page={safeTransactionPage} pageSize={pageSize} onPageChange={setTransactionPage} /></footer>
         </motion.section>
@@ -902,33 +1132,38 @@ console.log(pageSales,"pageSales");
               <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3 sm:px-5">
                 <section>
                   <div className="mb-2 flex items-center gap-2"><span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#ffedc2] text-xs font-bold text-[#684400]">1</span><h3 className="text-sm font-bold text-[#171717]">Select products to return</h3></div>
-                  <div className="overflow-x-auto rounded-lg border border-[#e8e4dd]"><table className="w-full min-w-[760px] text-left text-xs"><thead className="bg-[#f6f5f3] text-[10px] font-semibold uppercase tracking-wide text-[#5d5a55]"><tr><th className="px-3 py-2">Product</th><th className="px-2 py-2 text-right">Selling price</th><th className="px-2 py-2 text-right">Sold</th><th className="px-2 py-2 text-right">Returned</th><th className="px-2 py-2 text-right">Remaining</th><th className="px-2 py-2 text-right">Return Qty</th><th className="px-3 py-2 text-right">Line Value</th></tr></thead><tbody className="divide-y divide-[#eeeae4]">
+                  <div className="overflow-x-auto rounded-lg border border-[#e8e4dd]"><table className="w-full min-w-[760px] text-left text-xs"><thead className="bg-[#f6f5f3] text-[10px] font-semibold uppercase tracking-wide text-[#5d5a55]"><tr><th className="px-3 py-2">Product</th><th className="px-2 py-2 text-right">Selling price</th><th className="px-2 py-2 text-right">Sold</th><th className="px-2 py-2 text-right">Returned</th><th className="px-2 py-2 text-right">Remaining</th><th className="px-2 py-2 text-right">Return Qty</th><th className="px-3 py-2 text-right">Selected return amount</th></tr></thead><tbody className="divide-y divide-[#eeeae4]">
                     {returnProductGroups.map((group) => {
                       const unit = group.lines[0]?.item.displayUnitSymbol || group.lines[0]?.item.displayUnitName || group.lines[0]?.item.unitSymbol || group.lines[0]?.item.unitName || 'units';
                       const isExpanded = Boolean(expandedReturnGroups[group.key]);
-                      const singleLine = group.lines.length === 1 ? group.lines[0] : null;
+                      const singleAllocationGroup = group.allocationGroups.length === 1 ? group.allocationGroups[0] : null;
                       const mrpText = (item: ApiSaleReturnDetail['items'][number]) => item.historicalMrpSnapshot == null ? 'Unavailable' : formatCurrency(Number(item.historicalMrpSnapshot));
                       const costText = (item: ApiSaleReturnDetail['items'][number]) => item.historicalCostSnapshot == null ? 'Unavailable' : formatCurrency(Number(item.historicalCostSnapshot));
-                      const renderReturnInput = (line: typeof group.lines[number]) => <NumericTextInput min="0" max={line.remaining} maxDecimals={line.item.displayQuantity != null ? 0 : line.item.unitAllowsDecimals ? 3 : 0} value={returnQuantities[line.item.id] || ''} onValueChange={(value) => setReturnQuantities((previous) => ({ ...previous, [line.item.id]: value }))} disabled={line.remaining <= 0 || savingReturn} className="h-8 w-24 rounded-md border border-[#e1d9cb] bg-white px-2 text-right text-sm font-medium text-[#171717] outline-none focus:border-[#c58a00] disabled:bg-[#f5f4f2] disabled:text-[#a5a19a]" aria-label={`Return quantity for ${line.item.productName}, original line ${group.lines.indexOf(line) + 1}`} />;
+                      const renderReturnInput = (allocationGroup: typeof group.allocationGroups[number]) => {
+                        const representative = allocationGroup.lines[0].item;
+                        const invalid = quantitySelection.invalidGroupKeys.has(allocationGroup.key);
+                        return <div className="flex flex-col items-end gap-0.5"><NumericTextInput min="0" max={allocationGroup.remaining} maxDecimals={representative.displayQuantity != null ? 0 : representative.unitAllowsDecimals ? 3 : 0} value={returnQuantities[allocationGroup.key] || ''} onValueChange={(value) => setReturnQuantities((previous) => ({ ...previous, [allocationGroup.key]: value }))} disabled={allocationGroup.remaining <= 0 || savingReturn} className={`h-8 w-24 rounded-md border bg-white px-2 text-right text-sm font-medium text-[#171717] outline-none focus:border-[#c58a00] disabled:bg-[#f5f4f2] disabled:text-[#a5a19a] ${invalid ? 'border-red-500' : 'border-[#e1d9cb]'}`} aria-invalid={invalid} aria-label={`Return quantity for ${representative.productName}, ${allocationGroup.lines.length} equivalent original sale line(s)`} />{invalid && <span className="text-[10px] font-medium text-red-700">Max {allocationGroup.remaining.toLocaleString('en-IN')} {unit}</span>}</div>;
+                      };
                       return <React.Fragment key={group.key}>
                         <tr className="bg-white">
                           <td className="px-3 py-2 font-semibold text-[#171717]">
-                            {group.lines.length > 1 ? <button type="button" aria-expanded={isExpanded} onClick={() => setExpandedReturnGroups((previous) => ({ ...previous, [group.key]: !previous[group.key] }))} className="inline-flex items-center gap-1.5 text-left hover:text-[#8f5f00]"><ChevronDown size={14} className={`shrink-0 transition-transform ${isExpanded ? 'rotate-180' : ''}`} aria-hidden="true" /><span>{group.productName}<span className="ml-2 text-[10px] font-medium text-[#77736d]">{group.lines.length} original lines</span></span></button> : <><span>{group.productName}</span><span className="mt-1 block text-[10px] font-medium text-[#68645e]">MRP {mrpText(singleLine!.item)}{canViewReturnCost ? ` · Purchase rate ${costText(singleLine!.item)}` : ''}</span></>}
+                            {group.allocationGroups.length > 1 ? <button type="button" aria-expanded={isExpanded} onClick={() => setExpandedReturnGroups((previous) => ({ ...previous, [group.key]: !previous[group.key] }))} className="inline-flex items-center gap-1.5 text-left hover:text-[#8f5f00]"><ChevronDown size={14} className={`shrink-0 transition-transform ${isExpanded ? 'rotate-180' : ''}`} aria-hidden="true" /><span>{group.productName}<span className="ml-2 text-[10px] font-medium text-[#77736d]">{group.allocationGroups.length} return groups</span></span></button> : <><span>{group.productName}</span><span className="mt-1 block text-[10px] font-medium text-[#68645e]">MRP {mrpText(singleAllocationGroup!.lines[0].item)}{canViewReturnCost ? ` · Purchase rate ${costText(singleAllocationGroup!.lines[0].item)}` : ''}{singleAllocationGroup!.lines.length > 1 ? <span className="ml-1">· {singleAllocationGroup!.lines.length} equivalent lines, oldest batch first</span> : null}</span></>}
                           </td>
                           <td className="whitespace-nowrap px-2 py-2 text-right text-[#282828]">{formatCurrency(group.sellingPrice)}</td>
                           <td className="whitespace-nowrap px-2 py-2 text-right text-[#282828]">{group.sold.toLocaleString('en-IN')} {unit}</td>
                           <td className="whitespace-nowrap px-2 py-2 text-right text-[#282828]">{group.returned.toLocaleString('en-IN')} {unit}</td>
                           <td className="whitespace-nowrap px-2 py-2 text-right text-[#282828]">{group.remaining.toLocaleString('en-IN')} {unit}</td>
-                          <td className="px-2 py-1.5 text-right">{singleLine ? renderReturnInput(singleLine) : <span className="font-semibold text-[#282828]">{group.requested.toLocaleString('en-IN')} {unit}</span>}</td>
+                          <td className="px-2 py-1.5 text-right">{singleAllocationGroup ? renderReturnInput(singleAllocationGroup) : <span className="font-semibold text-[#282828]">{group.requested.toLocaleString('en-IN')} {unit}</span>}</td>
                           <td className="whitespace-nowrap px-3 py-2 text-right font-semibold text-[#171717]">{formatCurrency(group.amount)}</td>
                         </tr>
-                        {group.lines.length > 1 && isExpanded && <tr className="bg-[#fbfaf7]"><td colSpan={7} className="px-3 py-2"><div className="overflow-x-auto rounded-md border border-[#e8e4dd] bg-white"><table className="w-full min-w-[720px] text-left text-[11px]"><thead className="bg-[#f6f5f3] uppercase tracking-wide text-[#68645e]"><tr><th className="px-2 py-2">Original sale line</th><th className="px-2 py-2">Historical MRP</th>{canViewReturnCost && <th className="px-2 py-2">Purchase rate</th>}<th className="px-2 py-2 text-right">Sold</th><th className="px-2 py-2 text-right">Returned</th><th className="px-2 py-2 text-right">Remaining</th><th className="px-2 py-2 text-right">Return Qty</th><th className="px-2 py-2 text-right">Value</th></tr></thead><tbody className="divide-y divide-[#eeeae4]">{group.lines.map((line, index) => {
-                          const lineUnit = line.item.displayUnitSymbol || line.item.displayUnitName || line.item.unitSymbol || line.item.unitName || 'units';
-                          return <tr key={line.item.id}><td className="px-2 py-2 font-medium text-[#272727]">Line {index + 1}</td><td className="px-2 py-2 font-semibold text-[#765000]">{mrpText(line.item)}</td>{canViewReturnCost && <td className="px-2 py-2 text-[#4e4b46]">{costText(line.item)}</td>}<td className="whitespace-nowrap px-2 py-2 text-right">{line.sold.toLocaleString('en-IN')} {lineUnit}</td><td className="whitespace-nowrap px-2 py-2 text-right">{line.returned.toLocaleString('en-IN')} {lineUnit}</td><td className="whitespace-nowrap px-2 py-2 text-right">{line.remaining.toLocaleString('en-IN')} {lineUnit}</td><td className="px-2 py-1.5 text-right">{renderReturnInput(line)}</td><td className="whitespace-nowrap px-2 py-2 text-right font-semibold">{formatCurrency(line.amount)}</td></tr>;
+                        {group.allocationGroups.length > 1 && isExpanded && <tr className="bg-[#fbfaf7]"><td colSpan={7} className="px-3 py-2"><div className="overflow-x-auto rounded-md border border-[#e8e4dd] bg-white"><table className="w-full min-w-[700px] text-left text-[11px]"><thead className="bg-[#f6f5f3] uppercase tracking-wide text-[#68645e]"><tr><th className="px-2 py-2">Return group</th>{canViewReturnCost && <th className="px-2 py-2">Purchase rate</th>}<th className="px-2 py-2">Historical MRP</th><th className="px-2 py-2 text-right">Sold</th><th className="px-2 py-2 text-right">Returned</th><th className="px-2 py-2 text-right">Remaining</th><th className="px-2 py-2 text-right">Return Qty</th></tr></thead><tbody className="divide-y divide-[#eeeae4]">{group.allocationGroups.map((allocationGroup, allocationIndex) => {
+                          const representative = allocationGroup.lines[0].item;
+                          const lineUnit = representative.displayUnitSymbol || representative.displayUnitName || representative.unitSymbol || representative.unitName || 'units';
+                          return <tr key={allocationGroup.key}><td className="px-2 py-2 font-medium text-[#272727]">Group {allocationIndex + 1}{allocationGroup.lines.length > 1 && <span className="ml-1 text-[10px] text-[#77736d]">({allocationGroup.lines.length} equivalent lines)</span>}</td>{canViewReturnCost && <td className="px-2 py-2 font-medium text-[#272727]">{costText(representative)}</td>}<td className="px-2 py-2 font-semibold text-[#765000]">{mrpText(representative)}</td><td className="whitespace-nowrap px-2 py-2 text-right">{allocationGroup.sold.toLocaleString('en-IN')} {lineUnit}</td><td className="whitespace-nowrap px-2 py-2 text-right">{allocationGroup.returned.toLocaleString('en-IN')} {lineUnit}</td><td className="whitespace-nowrap px-2 py-2 text-right">{allocationGroup.remaining.toLocaleString('en-IN')} {lineUnit}</td><td className="px-2 py-1.5 text-right">{renderReturnInput(allocationGroup)}</td></tr>;
                         })}</tbody></table></div></td></tr>}
                       </React.Fragment>;
                     })}
-                  </tbody></table></div>
+                  </tbody></table></div><p className="mt-1.5 text-[11px] text-[#68645e]">Return amounts include applicable original invoice discounts.</p>
                 </section>
 
                 <section className="grid gap-3 border-y border-[#eee8df] py-3 lg:grid-cols-2 lg:gap-4">
@@ -936,7 +1171,6 @@ console.log(pageSales,"pageSales");
                     <div className="flex items-center gap-2"><span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#ffedc2] text-xs font-bold text-[#684400]">2</span><h3 className="text-sm font-bold text-[#171717]">Return reason <span className="ml-1 text-xs font-medium text-[#6a665f]">Required</span></h3></div>
                     <div className="flex flex-wrap gap-1.5" aria-label="Quick return reasons">{SALES_RETURN_REASON_PRESETS.filter((preset) => preset !== 'Other').map((preset) => <button key={preset} type="button" disabled={savingReturn} aria-pressed={returnReasonPreset === preset} onClick={() => { setReturnReasonPreset(preset); setReturnReason(preset); }} className={`rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors disabled:opacity-50 ${returnReasonPreset === preset ? 'border-[#c58a00] bg-[#fff3d3] text-[#684400]' : 'border-[#e5e1da] bg-white text-[#35322e] hover:border-[#c58a00] hover:bg-[#fffaf0]'}`}>{preset}{returnReasonPreset === preset && <span className="ml-1 font-bold">✓</span>}</button>)}</div>
                     <label className="block text-xs font-medium text-[#35322e]">Reason details <span className="text-[#a65d00">*</span><textarea aria-label="Return reason" required maxLength={1000} value={returnReason} onChange={(event) => handleReturnReasonChange(event.target.value)} rows={2} disabled={savingReturn} className="mt-1 w-full rounded-lg border border-[#e5e1da] bg-[#f8f7f5] p-2 text-xs outline-none focus:border-[#c58a00]" placeholder="Choose a quick reason or enter another reason" /></label>
-                    <label className="block text-xs font-medium text-[#35322e]">Additional notes <span className="font-normal text-[#77736d]">(optional)</span><textarea aria-label="Additional return notes" maxLength={Math.max(0, 1000 - returnReason.trim().length - 3)} value={returnNotes} onChange={(event) => setReturnNotes(event.target.value)} rows={2} disabled={savingReturn} className="mt-1 w-full rounded-lg border border-[#e5e1da] bg-[#f8f7f5] p-2 text-xs outline-none focus:border-[#c58a00]" placeholder="Add any useful details" /></label>
                   </div>
 
                   <div className="space-y-2">
@@ -953,10 +1187,10 @@ console.log(pageSales,"pageSales");
 
               <footer className="flex shrink-0 flex-col gap-2 border-t border-[#eee8df] bg-white px-4 py-2 sm:flex-row sm:items-center sm:justify-between sm:px-5">
                 <div className="flex min-w-0 flex-1 items-center justify-between gap-3 rounded-lg bg-[#fff7e5] px-3 py-2 sm:max-w-[48%]"><span className="text-xs font-semibold text-[#272727]">Total return amount</span><strong className="text-lg font-bold text-[#9a6200]">{formatCurrency(returnPreview.amount)}</strong></div>
-                <div className="flex shrink-0 justify-end gap-2"><button type="button" disabled={savingReturn || savingPendingSettlement} onClick={() => { setInvoiceDetail(null); setReturnDetailsOnly(false); }} className="h-9 rounded-lg border border-[#e1dcd4] px-3 text-xs font-semibold text-[#4e4b46] hover:bg-[#f8f7f4] disabled:opacity-50">Cancel</button><button type="button" disabled={savingReturn || !returnReason.trim() || !returnPreview.items.length} onClick={() => setConfirmReturnOpen(true)} className="h-9 rounded-lg bg-[#b77700] px-4 text-xs font-semibold text-white shadow-sm hover:bg-[#965f00] disabled:cursor-not-allowed disabled:opacity-50">Confirm Sales Return</button></div>
+                <div className="flex shrink-0 justify-end gap-2"><button type="button" disabled={savingReturn || savingPendingSettlement} onClick={() => { setInvoiceDetail(null); setReturnDetailsOnly(false); }} className="h-9 rounded-lg border border-[#e1dcd4] px-3 text-xs font-semibold text-[#4e4b46] hover:bg-[#f8f7f4] disabled:opacity-50">Cancel</button><button type="button" disabled={savingReturn || !returnReason.trim() || !returnPreview.items.length || !returnPreview.quantitiesValid} onClick={() => setConfirmReturnOpen(true)} className="h-9 rounded-lg bg-[#b77700] px-4 text-xs font-semibold text-white shadow-sm hover:bg-[#965f00] disabled:cursor-not-allowed disabled:opacity-50">Confirm Sales Return</button></div>
               </footer>
 
-              {confirmReturnOpen && <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/45 p-4" onClick={() => !savingReturn && setConfirmReturnOpen(false)}><section role="alertdialog" aria-modal="true" aria-labelledby="confirm-sales-return-title" onClick={(event) => event.stopPropagation()} className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl"><h3 id="confirm-sales-return-title" className="text-lg font-bold text-[#272727]">Confirm sales return</h3><p className="mt-2 text-sm text-[#68645e]">Return these {returnPreview.items.length} product line(s) for <strong className="text-[#272727]">{formatCurrency(returnPreview.amount)}</strong>?</p><div className="mt-3 max-h-40 space-y-2 overflow-y-auto rounded-xl border border-[#eee8df] p-3">{returnPreview.items.map((item) => <div key={item.saleItemId} className="flex items-start justify-between gap-3 text-sm"><span className="font-medium text-[#272727]">{item.productName}<span className="ml-2 text-[#77736d]">× {item.displayQuantity.toLocaleString('en-IN')} {item.unitLabel}</span></span><strong className="shrink-0 text-[#493819]">{formatCurrency(item.amount)}</strong></div>)}</div><div className="mt-3 rounded-xl bg-[#fffaf0] p-3 text-sm"><p className="font-semibold text-[#493819]">{returnPreview.settlementAmount <= 0 ? 'Applied to invoice balance' : returnSettlement === 'REFUND' ? `Refund ${formatCurrency(returnPreview.settlementAmount)} now` : returnSettlement === 'CUSTOMER_CREDIT' ? `Add ${formatCurrency(returnPreview.settlementAmount)} to customer credit` : `${formatCurrency(returnPreview.settlementAmount)} refund pending`}</p><p className="mt-1 text-[#77736d]">Reason: {returnReason.trim()}{returnNotes.trim() ? ` · ${returnNotes.trim()}` : ''}</p></div><div className="mt-5 flex justify-end gap-2"><button type="button" disabled={savingReturn} onClick={() => setConfirmReturnOpen(false)} className="h-10 rounded-lg border border-[#e8e4dd] px-4 text-sm font-semibold text-[#625d54] hover:bg-[#f8f7f4] disabled:opacity-50">Go back</button><button type="button" disabled={savingReturn} onClick={() => void submitSalesReturn()} className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-[#b77700] px-4 text-sm font-bold text-white hover:bg-[#965f00] disabled:opacity-50">{savingReturn && <LoaderCircle size={16} className="animate-spin" aria-hidden="true" />}{savingReturn ? 'Returning...' : 'Confirm return'}</button></div></section></div>}
+              {confirmReturnOpen && <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/45 p-4" onClick={() => !savingReturn && setConfirmReturnOpen(false)}><section role="alertdialog" aria-modal="true" aria-labelledby="confirm-sales-return-title" onClick={(event) => event.stopPropagation()} className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl"><h3 id="confirm-sales-return-title" className="text-lg font-bold text-[#272727]">Confirm sales return</h3><p className="mt-2 text-sm text-[#68645e]">Return these {returnPreview.items.length} product line(s) for <strong className="text-[#272727]">{formatCurrency(returnPreview.amount)}</strong>?</p><div className="mt-3 max-h-40 space-y-2 overflow-y-auto rounded-xl border border-[#eee8df] p-3">{returnPreview.items.map((item) => <div key={item.saleItemId} className="flex items-start justify-between gap-3 text-sm"><span className="font-medium text-[#272727]">{item.productName}<span className="ml-2 text-[#77736d]">× {item.displayQuantity.toLocaleString('en-IN')} {item.unitLabel}</span></span><strong className="shrink-0 text-[#493819]">{formatCurrency(item.amount)}</strong></div>)}</div><div className="mt-3 rounded-xl bg-[#fffaf0] p-3 text-sm"><p className="font-semibold text-[#493819]">{returnPreview.settlementAmount <= 0 ? 'Applied to invoice balance' : returnSettlement === 'REFUND' ? `Refund ${formatCurrency(returnPreview.settlementAmount)} now` : returnSettlement === 'CUSTOMER_CREDIT' ? `Add ${formatCurrency(returnPreview.settlementAmount)} to customer credit` : `${formatCurrency(returnPreview.settlementAmount)} refund pending`}</p><p className="mt-1 text-[#77736d]">Reason: {returnReason.trim()}</p></div><div className="mt-5 flex justify-end gap-2"><button type="button" disabled={savingReturn} onClick={() => setConfirmReturnOpen(false)} className="h-10 rounded-lg border border-[#e8e4dd] px-4 text-sm font-semibold text-[#625d54] hover:bg-[#f8f7f4] disabled:opacity-50">Go back</button><button type="button" disabled={savingReturn || !returnPreview.quantitiesValid} onClick={() => void submitSalesReturn()} className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-[#b77700] px-4 text-sm font-bold text-white hover:bg-[#965f00] disabled:opacity-50">{savingReturn && <LoaderCircle size={16} className="animate-spin" aria-hidden="true" />}{savingReturn ? 'Returning...' : 'Confirm return'}</button></div></section></div>}
             </>}
           </section>
         </div>
@@ -1040,9 +1274,10 @@ console.log(pageSales,"pageSales");
           </table>
         </section> : <section className="register-print-section">
           <h2>{activeTab === 'product-returns' ? 'Product Returns' : 'Credit Returns'} <span>({activeReturnRows.length})</span></h2>
-          <table className="register-print-sales">
-            <thead><tr><th>Date &amp; time</th><th>Invoice</th><th>Customer</th><th>Reason</th><th>Amount (₹)</th><th>Settlement status</th></tr></thead>
-            <tbody>{activeReturnRows.map((transaction) => <tr key={transaction.id}><td>{formatSaleDateTime(transaction.date)}</td><td>{transaction.invoiceNumber}</td><td>{transaction.customer}</td><td>{transaction.reason || '—'}</td><td>{formatCurrency(transaction.amount)}</td><td>{transaction.settlementStatus}</td></tr>)}{activeReturnRows.length === 0 && <tr><td colSpan={6} className="register-print-empty">No records in this range.</td></tr>}</tbody>
+          <table className={creditReturnsTab ? 'register-print-sales register-print-credit-returns' : 'register-print-sales'}>
+            {creditReturnsTab ? <colgroup><col style={{ width: '12%' }} /><col style={{ width: '11%' }} /><col style={{ width: '12%' }} /><col style={{ width: '18%' }} /><col style={{ width: '12%' }} /><col style={{ width: '12%' }} /><col style={{ width: '12%' }} /><col style={{ width: '11%' }} /></colgroup> : null}
+            <thead><tr><th>Date &amp; time</th><th>Invoice</th><th>Customer</th><th>Reason</th>{creditReturnsTab ? <><th>Bill Amount (₹)</th><th>Credit Reversed (₹)</th><th>Refunded Amount (₹)</th></> : <th>Amount (₹)</th>}<th>Settlement status</th></tr></thead>
+            <tbody>{activeReturnRows.map((transaction) => <tr key={transaction.id}><td>{formatSaleDateTime(transaction.date)}</td><td>{transaction.invoiceNumber}</td><td>{transaction.customer}</td><td>{transaction.reason || '—'}</td>{creditReturnsTab ? <><td className="register-print-money">{formatCurrency(transaction.billAmount ?? transaction.amount)}</td><td className="register-print-money">{transaction.creditReversedAmount == null ? 'Unavailable' : formatCurrency(transaction.creditReversedAmount)}</td><td className="register-print-money">{formatCurrency(transaction.refundedAmount ?? 0)}</td></> : <td>{formatCurrency(transaction.amount)}</td>}<td>{transaction.settlementStatus}</td></tr>)}{activeReturnRows.length === 0 && <tr><td colSpan={creditReturnsTab ? 8 : 6} className="register-print-empty">No records in this range.</td></tr>}</tbody>
           </table>
         </section>}
       </article>

@@ -339,10 +339,12 @@ export interface ApiSaleReturnDetail {
     unitName: string;
     unitSymbol?: string | null;
     unitAllowsDecimals: boolean;
+    inventoryBatchReceivedAt?: string | null;
     unitSellingPrice: string | number;
     discountAmount: string | number;
     lineTotal: string | number;
     historicalCostSnapshot?: string | number | null;
+    costSnapshotSource?: 'VERIFIED_BATCH' | 'LEGACY_ESTIMATE' | null;
     historicalMrpSnapshot?: string | number | null;
     returnedQuantity: string | number;
     returnedAmount: string | number;
@@ -538,8 +540,31 @@ export interface CustomerPaymentPayload {
 export const createCustomerPaymentRequest = (token: string, payload: CustomerPaymentPayload) =>
   apiRequest('/customer-payments', { method: 'POST', body: JSON.stringify(payload) }, token);
 
+export type ApiDailyCreditCancellation = {
+  id: string;
+  invoiceNumber: string;
+  customer: string;
+  reason: string;
+  date: string;
+  amount: string | number;
+  creditReversedAmount: string | number | null;
+  refundedAmount: string | number;
+  actualReceivedAmount: string | number;
+  pendingRefundAmount: string | number;
+  cancelledBy?: string | null;
+  recordedPayments: Array<{ id: string; method: string; amount: string | number }>;
+  actualPayments: Array<{ method: string; amount: string | number }>;
+  paymentCorrections: Array<{ id: string; type: string; method: string; amount: string | number; date: string }>;
+  refunds: Array<{ id: string; amount: string | number; method: string; reference?: string | null; date: string }>;
+};
+
+export type ApiDailySalesReport = {
+  creditCancellations: ApiDailyCreditCancellation[];
+  [key: string]: any;
+};
+
 export const getDailySalesReport = (token: string, date: string) =>
-  apiRequest<any>(`/reports/daily-sales?date=${encodeURIComponent(date)}`, {}, token);
+  apiRequest<ApiDailySalesReport>(`/reports/daily-sales?date=${encodeURIComponent(date)}`, {}, token);
 
 export const getProfitReport = (token: string, from: string, to: string) => {
   const query = new URLSearchParams({ from, to });

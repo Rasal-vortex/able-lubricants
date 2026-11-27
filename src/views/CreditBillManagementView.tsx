@@ -11,6 +11,7 @@ export const CreditBillManagementView: React.FC = () => {
     creditBills,
     creditBillLoading,
     creditBillError,
+    refreshCreditBillDetails,
     addCreditBill,
     deleteCreditBill,
     cancelCreditBillSale,
@@ -57,6 +58,9 @@ export const CreditBillManagementView: React.FC = () => {
   const [deletingCreditBill, setDeletingCreditBill] = useState(false);
   const deleteCreditBillInFlight = useRef(false);
   const [cancelModalBill, setCancelModalBill] = useState<CreditBill | null>(null);
+  const [cancelDetailsLoading, setCancelDetailsLoading] = useState(false);
+  const [cancelDetailsError, setCancelDetailsError] = useState('');
+  const [cancelRefreshNotice, setCancelRefreshNotice] = useState('');
   const [cancellationReason, setCancellationReason] = useState('');
   const [savingCancellation, setSavingCancellation] = useState(false);
   const cancellationInFlight = useRef(false);
@@ -216,6 +220,8 @@ export const CreditBillManagementView: React.FC = () => {
   const openCancelSale = (bill: CreditBill) => {
     setCancelModalBill(bill);
     setCancellationReason('');
+    setCancelDetailsError('');
+    setCancelRefreshNotice('');
   };
 
   const handleCancelSale = async () => {
@@ -237,6 +243,18 @@ export const CreditBillManagementView: React.FC = () => {
     try {
       const success = await cancelCreditBillSale(cancelModalBill.id, reason, refundMode, actualPayments, refunds, true);
       if (success) setCancelModalBill(null);
+      else {
+        setCancelDetailsLoading(true);
+        setCancelDetailsError('');
+        setCancelRefreshNotice('Cancellation was not completed. Payment details were refreshed; review them and confirm again.');
+        try {
+          setCancelModalBill(await refreshCreditBillDetails(cancelModalBill.id));
+        } catch (error) {
+          setCancelDetailsError(error instanceof Error ? error.message : 'Could not refresh payment details. Confirmation is disabled.');
+        } finally {
+          setCancelDetailsLoading(false);
+        }
+      }
     } finally {
       cancellationInFlight.current = false;
       setSavingCancellation(false);
@@ -973,8 +991,11 @@ export const CreditBillManagementView: React.FC = () => {
                 <div className="min-h-[78px] rounded-xl bg-surface-container-low p-2.5"><span className="block text-xs text-on-surface-variant">Cash refund to return</span><strong className="mt-1 block text-xl text-on-surface">{formatCurrency(actualReceivedAmount)}</strong></div>
               </div></section>
               {cancelModalBill.saleItems?.length ? <div><h3 className="mb-1.5 text-sm font-semibold text-on-surface">Stock to restore</h3><ul className="max-h-24 divide-y divide-outline-variant/20 overflow-y-auto rounded-lg border border-outline-variant/20">{cancelModalBill.saleItems.map((item, index) => <li key={`${item.productName}-${index}`} className="flex justify-between gap-4 px-3 py-1 text-sm"><span className="truncate text-on-surface">{item.productName}</span><strong className="shrink-0 text-on-surface">{item.quantity} {item.unitSymbol || item.unitName}</strong></li>)}</ul></div> : null}
+              {cancelDetailsLoading && <p role="status" className="text-xs text-on-surface-variant">Refreshing latest payment details…</p>}
+              {cancelDetailsError && <p role="alert" className="text-xs text-error">{cancelDetailsError}</p>}
+              {cancelRefreshNotice && <p role="status" className="text-xs text-on-surface-variant">{cancelRefreshNotice}</p>}
               <div className="flex items-start gap-2 rounded-lg bg-primary/10 px-3 py-1.5 text-xs leading-4 text-on-surface-variant"><Info size={14} className="mt-0.5 shrink-0 text-primary" aria-hidden="true" /><span>Confirming reverses the sale, restores stock, and returns {formatCurrency(actualReceivedAmount)} in cash.</span></div>
-            </div>            <div className="sticky bottom-0 flex shrink-0 justify-end gap-2 border-t border-surface-container bg-surface-container-lowest px-4 py-2 sm:px-5"><button type="button" disabled={savingCancellation} onClick={() => setCancelModalBill(null)} className="h-9 rounded-lg px-3 text-sm font-semibold text-on-surface-variant hover:bg-surface-container-low disabled:opacity-50">Keep sale</button><button type="button" disabled={savingCancellation || !cancellationReason.trim()} onClick={() => void handleCancelSale()} className="inline-flex h-9 items-center gap-2 rounded-lg bg-error px-3 text-sm font-semibold text-white shadow-sm hover:bg-error/90 disabled:opacity-60">{savingCancellation && <LoaderCircle size={15} className="animate-spin" aria-hidden="true" />}{savingCancellation ? 'Cancelling…' : 'Confirm cancellation'}</button></div>
+            </div>            <div className="sticky bottom-0 flex shrink-0 justify-end gap-2 border-t border-surface-container bg-surface-container-lowest px-4 py-2 sm:px-5"><button type="button" disabled={savingCancellation} onClick={() => setCancelModalBill(null)} className="h-9 rounded-lg px-3 text-sm font-semibold text-on-surface-variant hover:bg-surface-container-low disabled:opacity-50">Keep sale</button><button type="button" disabled={savingCancellation || cancelDetailsLoading || Boolean(cancelDetailsError) || !cancellationReason.trim()} onClick={() => void handleCancelSale()} className="inline-flex h-9 items-center gap-2 rounded-lg bg-error px-3 text-sm font-semibold text-white shadow-sm hover:bg-error/90 disabled:opacity-60">{(savingCancellation || cancelDetailsLoading) && <LoaderCircle size={15} className="animate-spin" aria-hidden="true" />}{savingCancellation ? 'Cancelling…' : cancelDetailsLoading ? 'Loading…' : 'Confirm cancellation'}</button></div>
           </section>
         </div>
       )}

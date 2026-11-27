@@ -237,6 +237,7 @@ interface AppContextType {
   creditBills: CreditBill[];
   creditBillLoading: boolean;
   creditBillError: string | null;
+  refreshCreditBillDetails: (id: string) => Promise<CreditBill>;
   addCreditBill: (bill: Omit<CreditBill, 'id'> & { customerId?: string }) => Promise<boolean>;
   deleteCreditBill: (id: string) => Promise<boolean>;
   cancelCreditBillSale: (id: string, reason: string, refundMode: 'PENDING' | 'NOW', actualPayments: Array<{ amount: number; method: 'CASH' | 'UPI' | 'BANK' | 'OTHER' }>, refunds: Array<{ amount: number; method: 'CASH' | 'UPI' | 'BANK' | 'OTHER'; reference?: string; originalPaymentId?: string }>, actualReceivedConfirmed: boolean) => Promise<boolean>;
@@ -1128,6 +1129,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const refreshCreditBillDetails = async (id: string): Promise<CreditBill> => {
+    if (!authSession) throw new Error('Sign in to refresh credit bill details.');
+    const rows = await getCustomerCreditBillsRequest(authSession.token);
+    const refreshed = rows.map(mapCreditBill);
+    setCreditBills(refreshed);
+    const bill = refreshed.find((entry) => entry.id === id);
+    if (!bill) throw new Error('Credit bill details could not be found.');
+    return bill;
+  };
+
   const settleCreditBillRefund = async (
     id: string,
     amount: number,
@@ -1578,6 +1589,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         creditBills,
         creditBillLoading,
         creditBillError,
+        refreshCreditBillDetails,
         addCreditBill,
         deleteCreditBill,
         cancelCreditBillSale,

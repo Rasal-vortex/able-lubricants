@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { AlertTriangle, Building2, CircleAlert, CreditCard, FileText, Info, LoaderCircle, LockKeyhole, PackageX, Pencil, Plus, Printer, ShoppingCart, Wallet, X } from 'lucide-react';
+import { AlertTriangle, Building2, CircleAlert, CreditCard, FileText, Info, LoaderCircle, LockKeyhole, MoreHorizontal, PackageX, Pencil, Plus, Printer, ShoppingCart, Wallet, X } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { createSupplierPaymentRequest, getSupplierLedgerReport } from '../services/api';
 import { NumericTextInput } from '../components/ui/NumericTextInput';
@@ -209,6 +209,8 @@ export const PartyLedgerManagementView: React.FC = () => {
   const [supplierModalOpen, setSupplierModalOpen] = useState(false);
   const [savingSupplier, setSavingSupplier] = useState(false);
   const [deactivateTarget, setDeactivateTarget] = useState<(typeof suppliers)[number] | null>(null);
+  const [supplierActionsOpen, setSupplierActionsOpen] = useState(false);
+  const [showCancelledPurchases, setShowCancelledPurchases] = useState(false);
   const [deactivatingSupplier, setDeactivatingSupplier] = useState(false);
   const [paymentOpen, setPaymentOpen] = useState(false);
   const [cashPaymentAmount, setCashPaymentAmount] = useState('');
@@ -263,7 +265,8 @@ export const PartyLedgerManagementView: React.FC = () => {
 
   const selectedSupplier = suppliers.find((supplier) => supplier.id === selectedSupplierId);
   const activePurchases = (ledger?.purchases || []).filter((purchase) => purchase.status !== 'CANCELLED');
-  const newestFirstPurchases = [...activePurchases].sort((left, right) =>
+  const displayedPurchases = showCancelledPurchases ? (ledger?.purchases || []) : activePurchases;
+  const newestFirstPurchases = [...displayedPurchases].sort((left, right) =>
     new Date(right.date).getTime() - new Date(left.date).getTime(),
   );
   const purchasePageCount = Math.max(1, Math.ceil(newestFirstPurchases.length / DEFAULT_PAGE_SIZE));
@@ -738,24 +741,28 @@ export const PartyLedgerManagementView: React.FC = () => {
         {(supplierError || ledgerError) && <p role="alert" className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">{supplierError || ledgerError}</p>}
 
         <section className="overflow-hidden rounded-2xl border border-[#e9e3d9] bg-white shadow-sm">
-          <div className="flex flex-wrap items-center justify-between gap-4 border-b border-[#efede8] bg-gradient-to-r from-[#fff8e7] via-[#fffdf8] to-white px-5 py-5">
-            <div className="flex min-w-0 items-center gap-3">
-              <div className="min-w-0"><div className="flex items-center gap-1.5"><h2 className="truncate text-lg font-bold text-[#272727]">{ledger?.supplier.name || selectedSupplier?.name || 'Supplier ledger'}</h2>{selectedSupplier && <button type="button" aria-label={`Edit ${selectedSupplier.name}`} title="Edit supplier" onClick={() => editSupplier(selectedSupplier)} className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[#765000] transition hover:bg-[#fff1c9] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c58a00]"><Pencil size={14} /></button>}</div><p className="mt-0.5 text-sm text-[#77736d]">{ledger?.supplier.phone || selectedSupplier?.phone || ''}</p></div>
+          <div className="bg-gradient-to-r from-[#fff8e7] via-[#fffdf8] to-white px-4 py-4 sm:px-5 sm:py-5">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex min-w-0 items-center gap-3">
+                <div className="min-w-0"><div className="flex items-center gap-1.5"><h2 className="truncate text-lg font-bold text-[#272727]">{ledger?.supplier.name || selectedSupplier?.name || 'Supplier ledger'}</h2>{selectedSupplier && <button type="button" aria-label={`Edit ${selectedSupplier.name}`} title="Edit supplier" onClick={() => editSupplier(selectedSupplier)} className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[#765000] transition hover:bg-[#fff1c9] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c58a00]"><Pencil size={14} /></button>}</div><p className="mt-0.5 text-sm text-[#77736d]">{ledger?.supplier.phone || selectedSupplier?.phone || ''}</p></div>
+              </div>
+              {selectedSupplier && <div className="relative shrink-0"><button type="button" aria-label="Supplier actions" aria-expanded={supplierActionsOpen} onClick={() => setSupplierActionsOpen((open) => !open)} className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-[#eadfc8] bg-white text-[#625d54] shadow-sm transition hover:bg-[#fffaf0] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c58a00]" title="More supplier actions"><MoreHorizontal size={19} /></button>{supplierActionsOpen && <div className="absolute right-0 top-11 z-30 w-52 rounded-xl border border-[#e9e3d9] bg-white p-1 shadow-lg"><button type="button" aria-pressed={showCancelledPurchases} onClick={() => { setShowCancelledPurchases((show) => !show); setPurchasePage(1); setSupplierActionsOpen(false); }} className="w-full rounded-lg px-3 py-2 text-left text-sm font-medium text-[#49443b] transition hover:bg-[#fff8e7] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c58a00]">{showCancelledPurchases ? 'Hide cancelled purchases' : 'View cancelled purchases'}</button><button type="button" onClick={() => { setSupplierActionsOpen(false); setDeactivateTarget(selectedSupplier); }} className="w-full rounded-lg px-3 py-2 text-left text-sm font-medium text-red-700 transition hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c58a00]">Deactivate supplier</button></div>}</div>}
             </div>
-            <div className="flex w-full flex-wrap items-end gap-2 sm:w-auto">
-              <label className="flex min-w-[230px] flex-1 flex-col gap-1.5 text-xs font-semibold text-[#77736d] sm:flex-none">
-                Select supplier
-                <select value={selectedSupplierId} disabled={supplierLoading || suppliers.length === 0} onChange={(event) => setSelectedSupplierId(event.target.value)} className="h-11 w-full rounded-lg border border-[#e5d3a7] bg-white px-3 text-sm font-semibold text-[#272727] shadow-sm outline-none focus:border-[#c58a00] sm:min-w-[250px]">
-                  <option value="">{supplierLoading ? 'Loading suppliers…' : suppliers.length ? 'Choose a supplier' : 'No suppliers available'}</option>
-                  {suppliers.map((supplier) => <option key={supplier.id} value={supplier.id}>{supplier.name}</option>)}
-                </select>
-              </label>
-              <button type="button" onClick={() => { resetSupplierForm(); setSupplierModalOpen(true); }} className="inline-flex h-10 items-center gap-1.5 rounded-lg bg-[#ffe4a0] px-3 text-sm font-semibold text-[#493819] shadow-sm transition hover:bg-[#ffdc82]"><Plus size={16} />Add supplier</button>
-              {selectedSupplier && <>
-                <button type="button" disabled={!ledger || ledgerLoading} onClick={printSupplierLedger} className="inline-flex h-11 items-center gap-2 rounded-lg border border-[#eadfc8] bg-white px-3 text-sm font-semibold text-[#765000] shadow-sm hover:bg-[#fffaf0] disabled:cursor-not-allowed disabled:opacity-50"><Printer size={15} />Print / Save PDF</button>
-                <button type="button" onClick={() => setDeactivateTarget(selectedSupplier)} className="h-11 rounded-lg border border-red-200 bg-white px-3 text-sm font-semibold text-red-700 shadow-sm hover:bg-red-50">Deactivate</button>
-              </>}
-              <button type="button" disabled={!ledger || Number(ledger.totals.outstanding) <= 0 || ledgerLoading} onClick={() => { setCashPaymentAmount(String(Number(ledger?.totals.outstanding || 0))); setUpiPaymentAmount(''); setPaymentDate(localToday()); setReceiptNumber(''); setPaymentOpen(true); }} className="inline-flex h-11 items-center gap-2 rounded-lg bg-[#c58a00] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#a97000] disabled:cursor-not-allowed disabled:opacity-45"><Wallet size={16} />Record payment</button>
+            <div className="mt-3 border-t border-[#e9e3d9]" />
+            <div className="flex flex-col gap-3 pt-3 lg:flex-row lg:items-end lg:justify-between">
+              <div className="flex flex-wrap items-end gap-2">
+                <label className="flex min-w-[230px] flex-1 flex-col gap-1.5 text-xs font-semibold text-[#77736d] sm:flex-none">Select supplier
+                  <select value={selectedSupplierId} disabled={supplierLoading || suppliers.length === 0} onChange={(event) => setSelectedSupplierId(event.target.value)} className="h-11 w-full rounded-lg border border-[#e5d3a7] bg-white px-3 text-sm font-semibold text-[#272727] shadow-sm outline-none focus:border-[#c58a00] focus-visible:ring-2 focus-visible:ring-[#c58a00]/30 sm:min-w-[250px]">
+                    <option value="">{supplierLoading ? 'Loading suppliers…' : suppliers.length ? 'Choose a supplier' : 'No suppliers available'}</option>
+                    {suppliers.map((supplier) => <option key={supplier.id} value={supplier.id}>{supplier.name}</option>)}
+                  </select>
+                </label>
+                <button type="button" onClick={() => { resetSupplierForm(); setSupplierModalOpen(true); }} className="inline-flex h-11 items-center gap-1.5 rounded-lg border border-[#f0dfb7] bg-[#fff4d9] px-3 text-sm font-semibold text-[#765000] shadow-sm transition hover:bg-[#ffebbf] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c58a00]"><Plus size={16} />Add supplier</button>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 lg:justify-end">
+                {selectedSupplier && <button type="button" disabled={!ledger || ledgerLoading} onClick={printSupplierLedger} className="inline-flex h-11 items-center gap-2 rounded-lg border border-[#eadfc8] bg-white px-3 text-sm font-semibold text-[#765000] shadow-sm transition hover:bg-[#fffaf0] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c58a00] disabled:cursor-not-allowed disabled:opacity-50"><Printer size={16} />Print / Save PDF</button>}
+                {selectedSupplier && <button type="button" disabled={!ledger || Number(ledger.totals.outstanding) <= 0 || ledgerLoading} onClick={() => { setCashPaymentAmount(String(Number(ledger?.totals.outstanding || 0))); setUpiPaymentAmount(''); setPaymentDate(localToday()); setReceiptNumber(''); setPaymentOpen(true); }} className="inline-flex h-11 items-center gap-2 rounded-lg bg-[#c58a00] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#a97000] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c58a00] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-45"><Wallet size={16} />Record payment</button>}
+              </div>
             </div>
           </div>
 
@@ -799,7 +806,7 @@ export const PartyLedgerManagementView: React.FC = () => {
                         </td>
                       </tr>
                     ))}
-                    {newestFirstPurchases.length === 0 && <tr><td colSpan={7} className="px-4 py-12 text-center text-sm text-[#77736d]">No active purchase records for this supplier.</td></tr>}
+                    {newestFirstPurchases.length === 0 && <tr><td colSpan={7} className="px-4 py-12 text-center text-sm text-[#77736d]">{showCancelledPurchases ? 'No purchase records for this supplier.' : 'No active purchase records for this supplier.'}</td></tr>}
                   </tbody>
                 </table>
               </div>
