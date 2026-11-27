@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { formatCurrency } from '../utils/currency';
-import { getExpenseReport, getProfitReport, getSalesReport } from '../services/api';
+import { getExpenseReport, getProfitReport, getPurchaseReport, getSalesReport, type PurchaseReportResponse } from '../services/api';
 import LoaderOne from '../components/ui/loader-one';
 import CountUp from '../components/ReactBitsCountUp';
 import { Package, ShoppingCart, TrendingUp, Wallet, type LucideIcon } from 'lucide-react';
@@ -21,6 +21,9 @@ export const ReportsProfitView: React.FC = () => {
   const [salesLoading, setSalesLoading] = useState(false);
   const [apiExpenseReport, setApiExpenseReport] = useState<any>(null);
   const [expenseLoading, setExpenseLoading] = useState(false);
+  const [apiPurchaseReport, setApiPurchaseReport] = useState<PurchaseReportResponse | null>(null);
+  const [purchaseReportLoading, setPurchaseReportLoading] = useState(false);
+  const [purchaseReportError, setPurchaseReportError] = useState<string | null>(null);
   const [reportPage, setReportPage] = useState(1);
   const normalizeDate = (value?: string) => {
     if (!value) return '';
@@ -69,8 +72,32 @@ export const ReportsProfitView: React.FC = () => {
     }).finally(() => { if (!cancelled) setExpenseLoading(false); });
     return () => { cancelled = true; };
   }, [report, authSession, from, to, showToast]);
+  useEffect(() => {
+    if (!['daily', 'purchases', 'profit'].includes(report) || !authSession) {
+      setApiPurchaseReport(null);
+      setPurchaseReportError(null);
+      setPurchaseReportLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setApiPurchaseReport(null);
+    setPurchaseReportError(null);
+    setPurchaseReportLoading(true);
+    void getPurchaseReport(authSession.token, `${from}T00:00:00`, `${to}T23:59:59`).then((result) => {
+      if (!cancelled) setApiPurchaseReport(result);
+    }).catch((error) => {
+      if (!cancelled) {
+        setApiPurchaseReport(null);
+        const message = error instanceof Error ? error.message : 'Purchase report could not be loaded.';
+        setPurchaseReportError(message);
+        showToast(message, 'error');
+      }
+    }).finally(() => { if (!cancelled) setPurchaseReportLoading(false); });
+    return () => { cancelled = true; };
+  }, [report, authSession, from, to, showToast]);
   const salesInvoices = apiSalesReport?.invoices as any[] | undefined;
   const apiTotalSales = Number(apiSalesReport?.totals?.sales ?? 0);
+  const netPurchases = apiPurchaseReport ? Number(apiPurchaseReport.netTotal) : null;
   const profitTotals = apiProfit?.totals;
   const displayedNetSales = report === 'profit' && profitTotals
     ? Number(profitTotals.netSales ?? (apiProfit.invoices || []).reduce((total: number, invoice: any) => total + (invoice.items || []).reduce((invoiceTotal: number, item: any) => invoiceTotal + Number(item.saleAmount || 0), 0), 0))
@@ -85,7 +112,18 @@ export const ReportsProfitView: React.FC = () => {
     : totalSales - totalExpenses;
   const reportRows = useMemo<Array<Array<string | number>>>(() => {
     if (report === 'sales') return (salesInvoices || []).map((s) => [normalizeDate(s.date), s.invoiceNumber, s.customer, (s.payments || []).map((payment: any) => payment.method).join(' + ') || 'Credit', formatCurrency(Number(s.total))]);
-    if (report === 'purchases') return rangedPurchases.map(p => [p.invoiceDate, p.invoiceNumber, p.partyName, p.items.map(i => `${i.name} × ${i.quantity}`).join('; '), formatCurrency(p.totalAmount), formatCurrency(p.outstandingBalance || 0)]);
+    if (report === 'purchases') return (apiPurchaseReport?.events || []).map((event) => [
+      normalizeDate(event.date),
+      normalizeDate(event.purchaseDate),
+      event.eventType === 'CANCELLATION' ? 'Cancellation reversal' : 'Purchase',
+      event.purchaseNumber,
+      event.supplierName,
+      event.originalAmount === null ? '—' : formatCurrency(Number(event.originalAmount)),
+      Number(event.cancellationAmount) === 0 ? '—' : formatCurrency(Number(event.cancellationAmount)),
+      formatCurrency(Number(event.netAmount)),
+      event.status,
+      event.cancellationDate ? normalizeDate(event.cancellationDate) : '—',
+    ]);
     if (report === 'stock') return products.flatMap(p => {
       const batchRows = p.batches.map(batch => [
         p.sku,
@@ -118,7 +156,11 @@ export const ReportsProfitView: React.FC = () => {
       ...purchases.filter(p => (p.outstandingBalance || 0) > 0 && inRange(p.invoiceDate)).map(p => ['Supplier', p.partyName, p.invoiceNumber, p.invoiceDate, formatCurrency(p.outstandingBalance || 0), 'Payable']),
     ];
     if (report === 'profit' && apiProfit) {
-      const newestFirst = [...(apiProfit.invoices || [])].sort((a: any, b: any) => {
+      const profitEvents = [
+        ...(apiProfit.invoices || []),
+        ...(apiProfit.returns || []),
+      ];
+      const newestFirst = profitEvents.sort((a: any, b: any) => {
         const dateDifference = new Date(b.date).getTime() - new Date(a.date).getTime();
         return dateDifference || String(b.invoiceNumber || '').localeCompare(String(a.invoiceNumber || ''));
       });
@@ -129,11 +171,7 @@ export const ReportsProfitView: React.FC = () => {
       .map((sale: any) => ({ date: normalizeDate(sale.date), amount: Number(sale.sales) || 0 }));
     const reportExpenses = (apiExpenseReport?.days || []).map((expense: any) => ({ date: expense.date, amount: Number(expense.total) || 0 }));
     const profitByDate = new Map<string, number>();
-    for (const invoice of apiProfit?.invoices || []) {
-      const date = normalizeDate(invoice.date);
-      const invoiceProfit = (invoice.items || []).reduce((total: number, item: any) => total + Number(item.profit || 0), 0);
-      profitByDate.set(date, (profitByDate.get(date) || 0) + invoiceProfit);
-    }
+    for (const day of apiProfit?.daily || []) profitByDate.set(normalizeDate(day.date), Number(day.netProfit) || 0);
     const dates = Array.from(new Set([
       ...reportSales.map((sale: { date: string }) => sale.date),
       ...reportExpenses.map((expense: { date: string }) => expense.date),
@@ -142,19 +180,26 @@ export const ReportsProfitView: React.FC = () => {
     return dates.map(date => {
       const daySales = reportSales.filter((sale: { date: string }) => sale.date === date).reduce((n: number, sale: { amount: number }) => n + sale.amount, 0);
       const dayExpense = reportExpenses.filter((expense: { date: string }) => expense.date === date).reduce((n: number, expense: { amount: number }) => n + expense.amount, 0);
-      const dayProfit = apiProfit ? (profitByDate.get(date) || 0) - dayExpense : null;
+      const dayProfit = apiProfit ? (profitByDate.get(date) ?? 0) : null;
       return [date, formatCurrency(daySales), formatCurrency(dayExpense), dayProfit === null ? '—' : formatCurrency(dayProfit)];
     });
-  }, [report, rangedPurchases, rangedExpenses, products, creditBills, totalSales, totalExpenses, apiProfit, apiSalesReport, apiExpenseReport, salesInvoices]);
+  }, [report, rangedPurchases, rangedExpenses, products, creditBills, totalSales, totalExpenses, apiProfit, apiSalesReport, apiExpenseReport, apiPurchaseReport, salesInvoices]);
   const reportPageCount = Math.max(1, Math.ceil(reportRows.length / DEFAULT_PAGE_SIZE));
   const safeReportPage = Math.min(reportPage, reportPageCount);
   const pageReportRows = getPageRecords(reportRows, safeReportPage);
   const reportRange = getPaginationRange(reportRows.length, safeReportPage);
   useEffect(() => { setReportPage(1); }, [report, from, to]);
   useEffect(() => { if (reportPage > reportPageCount) setReportPage(reportPageCount); }, [reportPage, reportPageCount]);
-  const columns = report === 'sales' ? ['Date', 'Bill', 'Customer', 'Payment', 'Total (INR)'] : report === 'purchases' ? ['Date', 'Supplier invoice', 'Supplier', 'Items', 'Total (INR)', 'Balance (INR)'] : report === 'stock' ? ['SKU', 'Product', 'Batch', 'Unit', 'Available', 'Selling rate (INR)', 'Status'] : report === 'outstanding' ? ['Party type', 'Party', 'Reference', 'Due date', 'Outstanding (INR)', 'Status'] : report === 'profit' ? ['Date', 'Product', 'Quantity', 'Sale (INR)', 'Purchase rate (INR)', 'Cost basis', 'Profit (INR)'] : ['Date', 'Sales (INR)', 'Expenses (INR)', 'Net (INR)'];
+  const columns = report === 'sales' ? ['Date', 'Bill', 'Customer', 'Payment', 'Total (INR)'] : report === 'purchases' ? ['Activity date', 'Purchase date', 'Activity', 'Purchase reference', 'Supplier', 'Original amount (INR)', 'Cancellation reversal (INR)', 'Net effect (INR)', 'Status', 'Cancellation date'] : report === 'stock' ? ['SKU', 'Product', 'Batch', 'Unit', 'Available', 'Selling rate (INR)', 'Status'] : report === 'outstanding' ? ['Party type', 'Party', 'Reference', 'Due date', 'Outstanding (INR)', 'Status'] : report === 'profit' ? ['Date', 'Product', 'Quantity', 'Sale (INR)', 'Purchase rate (INR)', 'Cost basis', 'Profit (INR)'] : ['Date', 'Sales (INR)', 'Expenses (INR)', 'Net (INR)'];
   const exportCsv = () => {
-    const csv = [columns, ...reportRows].map(row => row.map(value => `"${String(value).replace(/"/g, '""')}"`).join(',')).join('\n');
+    if (report === 'purchases' && !apiPurchaseReport) {
+      showToast(purchaseReportError || 'Purchase report is not ready to export.', 'error');
+      return;
+    }
+    const exportRows = report === 'purchases' && apiPurchaseReport
+      ? [...reportRows, ['TOTAL', '', '', '', '', formatCurrency(Number(apiPurchaseReport.grossTotal)), formatCurrency(-Number(apiPurchaseReport.cancellationTotal)), formatCurrency(Number(apiPurchaseReport.netTotal)), '', '']]
+      : reportRows;
+    const csv = [columns, ...exportRows].map(row => row.map(value => `"${String(value).replace(/"/g, '""')}"`).join(',')).join('\n');
     const link = document.createElement('a'); link.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' })); link.download = `able-lubes-${report}-${today}.csv`; link.click(); URL.revokeObjectURL(link.href); showToast('Report exported.');
   };
 
@@ -180,27 +225,34 @@ export const ReportsProfitView: React.FC = () => {
           <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
             {([
               ['Net sales', displayedNetSales, ShoppingCart],
-              ['Purchases', rangedPurchases.reduce((n, p) => n + p.totalAmount, 0), Package],
+              ['Net purchases', netPurchases, Package],
               ['Expenses', displayedExpenses, Wallet],
               ['Net profit', displayedNetProfit, TrendingUp],
-            ] as Array<[string, number, LucideIcon]>).map(([label, value, Icon], index) => (
+            ] as Array<[string, number | null, LucideIcon]>).map(([label, value, Icon], index) => (
               <div key={label} className="relative isolate overflow-hidden rounded-2xl border border-[#e7e4de] bg-gradient-to-br from-white via-[#fbfaf8] to-[#f1efeb] p-4 shadow-[0_3px_12px_rgba(37,27,12,.06)]">
                 <Icon aria-hidden="true" size={76} strokeWidth={1.5} className="pointer-events-none absolute -bottom-3 -right-2 -z-10 text-[#77736d] opacity-[0.09]" />
                 <div className="relative text-sm font-medium text-[#77736d]">{label}</div>
                 <div className="relative mt-2 text-2xl font-bold tracking-tight text-[#262522]">
                   {report === 'daily' && label === 'Net profit' && !profitTotals
                     ? profitLoading ? <LoaderOne /> : '—'
-                    : report === 'daily' && label === 'Expenses' && !apiExpenseReport
+                    : label === 'Net purchases' && purchaseReportLoading
+                      ? <LoaderOne />
+                      : label === 'Net purchases' && purchaseReportError
+                        ? 'Unavailable'
+                        : label === 'Net purchases' && !apiPurchaseReport
+                          ? '—'
+                          : report === 'daily' && label === 'Expenses' && !apiExpenseReport
                       ? expenseLoading ? <LoaderOne /> : '—'
                       : <CountUp
-                        to={Number(value)}
+                        to={Number(value ?? 0)}
                         duration={0.8}
                         delay={index * 0.08}
                         trigger="view"
                         easing="easeOut"
-                        formatter={(amount) => formatCurrency(Number.isInteger(value) ? Math.round(amount) : Number(amount.toFixed(2)))}
+                        formatter={(amount) => formatCurrency(value !== null && Number.isInteger(value) ? Math.round(amount) : Number(amount.toFixed(2)))}
                       />}
                 </div>
+                {label === 'Net purchases' && purchaseReportError && <div className="relative mt-1 text-xs text-red-700">Purchase totals could not be loaded.</div>}
               </div>
             ))}
           </section>
@@ -211,20 +263,23 @@ export const ReportsProfitView: React.FC = () => {
         <section className="overflow-hidden rounded-2xl border border-[#e9e3d9] bg-white shadow-[0_3px_12px_rgba(37,27,12,.06)]">
           <div className="flex items-center justify-between border-b border-[#eee8df] px-4 py-3">
             <h2 className="text-sm font-bold text-[#272727]">{report === 'daily' ? 'Daily summary' : report === 'profit' ? 'Product profit details' : `${columns[0]} report`}</h2>
-            <span className="text-xs text-[#77736d]">{reportRows.length} {reportRows.length === 1 ? 'record' : 'records'}</span>
+            <span className="text-xs text-[#77736d]">{report === 'purchases' && purchaseReportLoading ? 'Loading purchase activity…' : report === 'purchases' && purchaseReportError ? 'Purchase activity unavailable' : `${reportRows.length} ${reportRows.length === 1 ? 'record' : 'records'}`}</span>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full min-w-[680px] text-left">
               <thead><tr className="h-11 bg-[#f6f5f2] text-xs font-bold uppercase tracking-wide text-[#6d685f]">{columns.map(col => <th key={col} className="whitespace-nowrap px-4 py-3">{col}</th>)}</tr></thead>
               <tbody className="divide-y divide-[#efede8] text-sm text-[#272727]">
-                {(profitLoading || salesLoading || expenseLoading) ? (
+                {(profitLoading || salesLoading || expenseLoading || (report === 'purchases' && purchaseReportLoading)) ? (
                   <tr><td colSpan={columns.length} className="px-4 py-14 text-center"><LoaderOne /></td></tr>
+                ) : report === 'purchases' && purchaseReportError ? (
+                  <tr><td colSpan={columns.length} className="px-4 py-14 text-center text-sm text-red-700">Purchase report could not be loaded: {purchaseReportError}</td></tr>
                 ) : reportRows.length ? (
                   pageReportRows.map((row, i) => <tr key={(safeReportPage - 1) * DEFAULT_PAGE_SIZE + i} className="transition hover:bg-[#fffdf8]">{row.map((cell, j) => <td key={j} className="px-4 py-3">{cell}</td>)}</tr>)
                 ) : (
                   <tr><td colSpan={columns.length} className="px-4 py-14 text-center text-sm text-[#77736d]">No records in this date range.</td></tr>
                 )}
               </tbody>
+              {report === 'purchases' && apiPurchaseReport && !purchaseReportLoading && !purchaseReportError && <tfoot><tr className="border-t-2 border-[#e9e3d9] bg-[#f8f7f4] text-sm font-bold text-[#272727]"><td colSpan={5} className="px-4 py-3">Totals · {apiPurchaseReport.count} purchase events · {apiPurchaseReport.cancellationCount} cancellation events</td><td className="px-4 py-3">{formatCurrency(Number(apiPurchaseReport.grossTotal))}</td><td className="px-4 py-3">{formatCurrency(-Number(apiPurchaseReport.cancellationTotal))}</td><td className="px-4 py-3">{formatCurrency(Number(apiPurchaseReport.netTotal))}</td><td colSpan={2} /></tr></tfoot>}
             </table>
           </div>
           <footer className="flex flex-col gap-3 border-t border-[#efede8] bg-[#f8f7f4] px-4 py-3 text-xs text-[#77736d] sm:flex-row sm:items-center sm:justify-between">

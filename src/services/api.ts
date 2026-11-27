@@ -556,6 +556,37 @@ export const getExpenseReport = (token: string, from: string, to: string) => {
   return apiRequest<any>(`/reports/expenses?${query.toString()}`, {}, token);
 };
 
+export interface PurchaseReportEvent {
+  eventType: 'PURCHASE' | 'CANCELLATION';
+  date: string;
+  purchaseDate: string;
+  cancellationDate: string | null;
+  purchaseId: string;
+  purchaseNumber: string;
+  supplierName: string;
+  originalAmount: string | null;
+  cancellationAmount: string;
+  netAmount: string;
+  status: string;
+}
+
+export interface PurchaseReportResponse {
+  count: number;
+  postedCount: number;
+  cancelledPurchaseCount: number;
+  total: string | number;
+  grossTotal: string | number;
+  cancellationCount: number;
+  cancellationTotal: string | number;
+  netTotal: string | number;
+  events: PurchaseReportEvent[];
+}
+
+export const getPurchaseReport = (token: string, from: string, to: string) => {
+  const query = new URLSearchParams({ from, to });
+  return apiRequest<PurchaseReportResponse>(`/reports/purchases?${query.toString()}`, {}, token);
+};
+
 export const getSupplierOutstandingReport = (token: string) =>
   apiRequest<any[]>('/reports/suppliers/outstanding', {}, token);
 

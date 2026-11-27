@@ -85,6 +85,7 @@ export interface SaleRecord {
   id: string;
   saleId?: string;
   returnStatus?: 'NONE' | 'PARTIALLY_RETURNED' | 'FULLY_RETURNED';
+  isCreditRepayment?: boolean;
   billNumber: string;
   dateTime: string;
   customerName: string;
