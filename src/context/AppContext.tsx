@@ -95,6 +95,8 @@ const mapCreditBill = (bill: ApiCreditBill): CreditBill => ({
   billAmount: Number(bill.billAmount),
   netDue: Number(bill.netDue),
   dueDate: bill.dueDate,
+  cancellationExpiresAt: bill.cancellationExpiresAt || undefined,
+  cancellationEligible: bill.cancellationEligible === true,
   remarks: bill.remarks || undefined,
   invoiceReference: bill.invoiceReference || undefined,
   saleItems: bill.saleItems?.map((item) => ({ ...item, quantity: Number(item.quantity) })),
@@ -216,6 +218,7 @@ interface AppContextType {
 
   // Products
   products: Product[];
+  refreshProducts: () => Promise<void>;
   brands: ApiBrand[];
   units: ApiUnit[];
   createBrand: (name: string) => Promise<ApiBrand>;
@@ -383,6 +386,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     return () => { cancelled = true; };
   }, [authSession?.token]);
+
+  const refreshProducts = async (): Promise<void> => {
+    if (!authSession) return;
+    const result = await getProducts(authSession.token);
+    setProducts(result.map(mapProduct));
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -996,6 +1005,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }),
       };
     }));
+    try {
+      await refreshProducts();
+    } catch {
+      // The sale is already committed; keep the optimistic stock until the next catalog refresh.
+    }
 
     // Keep the current view responsive; the backend credit-bill row is created with the sale.
     if (creditAmount > 0 && customer) {
@@ -1576,6 +1590,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         showToast,
         hideToast,
         products,
+        refreshProducts,
         brands,
         units,
         createBrand,

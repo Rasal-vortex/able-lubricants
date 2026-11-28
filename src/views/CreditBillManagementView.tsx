@@ -58,12 +58,17 @@ export const CreditBillManagementView: React.FC = () => {
   const [deletingCreditBill, setDeletingCreditBill] = useState(false);
   const deleteCreditBillInFlight = useRef(false);
   const [cancelModalBill, setCancelModalBill] = useState<CreditBill | null>(null);
+  const [currentTime, setCurrentTime] = useState(Date.now());
   const [cancelDetailsLoading, setCancelDetailsLoading] = useState(false);
   const [cancelDetailsError, setCancelDetailsError] = useState('');
   const [cancelRefreshNotice, setCancelRefreshNotice] = useState('');
   const [cancellationReason, setCancellationReason] = useState('');
   const [savingCancellation, setSavingCancellation] = useState(false);
   const cancellationInFlight = useRef(false);
+  useEffect(() => {
+    const timer = window.setInterval(() => setCurrentTime(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
   const [refundModalBill, setRefundModalBill] = useState<CreditBill | null>(null);
   const [refundSettlementAmount, setRefundSettlementAmount] = useState('');
   const [refundSettlementMethod, setRefundSettlementMethod] = useState<'CASH' | 'UPI' | 'BANK' | 'OTHER'>('CASH');
@@ -83,6 +88,9 @@ export const CreditBillManagementView: React.FC = () => {
   const expectedBalance = priorDue + currentAmt;
   const recordedCollectedAmount = (cancelModalBill?.payments || []).reduce((total, payment) => payment.method === 'CASH' || payment.method === 'UPI' ? total + Number(payment.amount || 0) : total, 0);
   const actualReceivedAmount = recordedCollectedAmount;
+  const isCancellationAllowed = (bill: CreditBill) => bill.cancellationEligible === true
+    && Boolean(bill.cancellationExpiresAt)
+    && currentTime < new Date(bill.cancellationExpiresAt!).getTime();
   const recordedStoreCreditAmount = (cancelModalBill?.payments || []).reduce((total, payment) => payment.method === 'STORE_CREDIT' ? total + Number(payment.amount || 0) : total, 0);
 
   // Filter customer credit bills.
@@ -226,6 +234,10 @@ export const CreditBillManagementView: React.FC = () => {
 
   const handleCancelSale = async () => {
     if (!cancelModalBill || cancellationInFlight.current) return;
+    if (!isCancellationAllowed(cancelModalBill)) {
+      showToast('The credit bill cancellation period has expired.', 'error');
+      return;
+    }
     const reason = cancellationReason.trim();
     if (!reason) {
       showToast('Enter a reason for cancelling this sale.', 'error');
@@ -574,7 +586,7 @@ export const CreditBillManagementView: React.FC = () => {
                       >
                         <span className="material-symbols-outlined text-[17px]">print</span>
                       </button>
-                      {bill.saleId && bill.status !== 'Cancelled' ? (
+                      {bill.saleId && bill.status !== 'Cancelled' && isCancellationAllowed(bill) ? (
                         <button className="inline-flex h-7 items-center gap-1 rounded-lg px-2 text-error transition-colors hover:bg-error-container/40 disabled:opacity-50" title="Cancel this sale and safely reverse its stock and credit" aria-label={`Cancel sale ${bill.invoiceReference || bill.billNumber}`} type="button" disabled={savingCancellation} onClick={() => openCancelSale(bill)}>
                           <RotateCcw size={14} aria-hidden="true" /><span className="text-xs font-semibold">Cancel</span>
                         </button>
@@ -994,8 +1006,9 @@ export const CreditBillManagementView: React.FC = () => {
               {cancelDetailsLoading && <p role="status" className="text-xs text-on-surface-variant">Refreshing latest payment details…</p>}
               {cancelDetailsError && <p role="alert" className="text-xs text-error">{cancelDetailsError}</p>}
               {cancelRefreshNotice && <p role="status" className="text-xs text-on-surface-variant">{cancelRefreshNotice}</p>}
+              {!isCancellationAllowed(cancelModalBill) && <p role="alert" className="text-xs text-error">The credit bill cancellation period has expired.</p>}
               <div className="flex items-start gap-2 rounded-lg bg-primary/10 px-3 py-1.5 text-xs leading-4 text-on-surface-variant"><Info size={14} className="mt-0.5 shrink-0 text-primary" aria-hidden="true" /><span>Confirming reverses the sale, restores stock, and returns {formatCurrency(actualReceivedAmount)} in cash.</span></div>
-            </div>            <div className="sticky bottom-0 flex shrink-0 justify-end gap-2 border-t border-surface-container bg-surface-container-lowest px-4 py-2 sm:px-5"><button type="button" disabled={savingCancellation} onClick={() => setCancelModalBill(null)} className="h-9 rounded-lg px-3 text-sm font-semibold text-on-surface-variant hover:bg-surface-container-low disabled:opacity-50">Keep sale</button><button type="button" disabled={savingCancellation || cancelDetailsLoading || Boolean(cancelDetailsError) || !cancellationReason.trim()} onClick={() => void handleCancelSale()} className="inline-flex h-9 items-center gap-2 rounded-lg bg-error px-3 text-sm font-semibold text-white shadow-sm hover:bg-error/90 disabled:opacity-60">{(savingCancellation || cancelDetailsLoading) && <LoaderCircle size={15} className="animate-spin" aria-hidden="true" />}{savingCancellation ? 'Cancelling…' : cancelDetailsLoading ? 'Loading…' : 'Confirm cancellation'}</button></div>
+            </div>            <div className="sticky bottom-0 flex shrink-0 justify-end gap-2 border-t border-surface-container bg-surface-container-lowest px-4 py-2 sm:px-5"><button type="button" disabled={savingCancellation} onClick={() => setCancelModalBill(null)} className="h-9 rounded-lg px-3 text-sm font-semibold text-on-surface-variant hover:bg-surface-container-low disabled:opacity-50">Keep sale</button><button type="button" disabled={savingCancellation || cancelDetailsLoading || Boolean(cancelDetailsError) || !cancellationReason.trim() || !isCancellationAllowed(cancelModalBill)} onClick={() => void handleCancelSale()} className="inline-flex h-9 items-center gap-2 rounded-lg bg-error px-3 text-sm font-semibold text-white shadow-sm hover:bg-error/90 disabled:opacity-60">{(savingCancellation || cancelDetailsLoading) && <LoaderCircle size={15} className="animate-spin" aria-hidden="true" />}{savingCancellation ? 'Cancelling…' : cancelDetailsLoading ? 'Loading…' : 'Confirm cancellation'}</button></div>
           </section>
         </div>
       )}

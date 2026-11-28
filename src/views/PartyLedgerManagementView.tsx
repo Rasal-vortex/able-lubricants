@@ -84,15 +84,6 @@ type SupplierLedger = {
   purchases: SupplierLedgerPurchase[];
 };
 
-type SupplierPaymentReceipt = {
-  firstPaymentId: string;
-  date: string;
-  amount: number;
-  methods: Set<string>;
-  purchaseNumbers: Set<string>;
-  receiptNumber: string | null;
-};
-
 const localToday = () => {
   const today = new Date();
   return new Date(today.getTime() - today.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
@@ -302,25 +293,6 @@ export const PartyLedgerManagementView: React.FC = () => {
   })();
   useEffect(() => { setPurchasePage(1); }, [selectedSupplierId]);
   useEffect(() => { if (purchasePage > purchasePageCount) setPurchasePage(purchasePageCount); }, [purchasePage, purchasePageCount]);
-  const paymentReceipts = new Map<string, SupplierPaymentReceipt>();
-  for (const purchase of ledger?.purchases || []) {
-    for (const payment of purchase.payments) {
-      const key = payment.paymentGroupId || payment.id;
-      const receipt = paymentReceipts.get(key) || {
-        firstPaymentId: payment.id,
-        date: payment.date,
-        amount: 0,
-        methods: new Set<string>(),
-        purchaseNumbers: new Set<string>(),
-        receiptNumber: payment.receiptNumber || null,
-      };
-      receipt.amount += Number(payment.amount) || 0;
-      receipt.methods.add(payment.method);
-      if (purchase.status !== 'CANCELLED') receipt.purchaseNumbers.add(purchase.supplierInvoiceNumber || purchase.purchaseNumber);
-      paymentReceipts.set(key, receipt);
-    }
-  }
-
   useEffect(() => {
     if (!selectedSupplierId || suppliers.some((supplier) => supplier.id === selectedSupplierId)) return;
     setSelectedSupplierId('');
@@ -642,62 +614,6 @@ export const PartyLedgerManagementView: React.FC = () => {
     }, 250);
   };
 
-  const printSupplierPaymentReceipt = (payment: SupplierLedgerPurchase['payments'][number]) => {
-    if (!ledger) return;
-    const key = payment.paymentGroupId || payment.id;
-    const receipt = paymentReceipts.get(key);
-    if (!receipt) return;
-    const printWindow = window.open('', '_blank', 'width=400,height=650');
-    if (!printWindow) {
-      showToast('Allow pop-ups to print the supplier payment receipt.', 'error');
-      return;
-    }
-    const methods = [...receipt.methods].map((method) =>
-      method === 'CASH' ? 'Cash' : method === 'UPI' ? 'UPI' : method,
-    ).join(' + ');
-    const appliedBills = [...receipt.purchaseNumbers].map((number) =>
-      `<div class="line"><span>${escapeHtml(number)}</span></div>`,
-    ).join('');
-    const receiptHeightMm = Math.ceil(72 + receipt.purchaseNumbers.size * 6);
-    const paymentDateValue = new Date(receipt.date);
-    const displayDate = Number.isNaN(paymentDateValue.getTime())
-      ? String(receipt.date).slice(0, 10)
-      : paymentDateValue.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
-
-    printWindow.document.open();
-    printWindow.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Supplier Payment Receipt</title>
-      <style>
-        @page { size: 80mm ${receiptHeightMm}mm; margin: 0; }
-        * { box-sizing: border-box; }
-        html, body { width: 80mm; margin: 0; padding: 0; color: #111; background: #fff; font: 10px/1.4 Arial, Helvetica, sans-serif; }
-        body { padding: 3mm; }
-        .receipt { width: 74mm; margin: 0 auto; }
-        header { padding-bottom: 2.5mm; border-bottom: 1px dashed #555; text-align: center; }
-        header h1 { margin: 0; font-size: 16px; letter-spacing: .04em; }
-        header p { margin: 1mm 0 0; font-size: 9px; }
-        .meta { padding: 2.5mm 0; border-bottom: 1px dashed #555; }
-        .line { display: flex; justify-content: space-between; gap: 2mm; margin: 1.5mm 0; overflow-wrap: anywhere; }
-        .label { color: #444; }
-        .total { margin-top: 2mm; padding: 2.5mm 0; border-top: 1px solid #111; border-bottom: 1px solid #111; font-size: 14px; font-weight: 700; }
-        .applied { margin-top: 3mm; padding-top: 2mm; border-top: 1px dashed #555; }
-        .applied h2 { margin: 0 0 2mm; font-size: 10px; }
-        footer { margin-top: 4mm; padding-top: 2mm; border-top: 1px dashed #555; text-align: center; font-size: 9px; }
-        @media screen { body { margin: 12px auto; box-shadow: 0 1px 8px #bbb; } }
-      </style></head><body><main class="receipt">
-        <header><h1>ABLE LUBES</h1><p>SUPPLIER PAYMENT RECEIPT</p></header>
-        <section class="meta">
-          <div class="line"><span class="label">Supplier</span><strong>${escapeHtml(ledger.supplier.name)}</strong></div>
-          <div class="line"><span class="label">Date</span><span>${escapeHtml(displayDate)}</span></div>
-          <div class="line"><span class="label">Payment method</span><strong>${escapeHtml(methods)}</strong></div>
-          ${receipt.receiptNumber ? `<div class="line"><span class="label">Receipt number</span><strong>${escapeHtml(receipt.receiptNumber)}</strong></div>` : ''}
-        </section>
-        <div class="line total"><span>Amount paid</span><span>${escapeHtml(formatCurrency(receipt.amount))}</span></div>
-        ${receipt.purchaseNumbers.size ? `<section class="applied"><h2>Applied against</h2>${appliedBills}</section>` : ''}
-        <footer>Payment recorded. Keep this receipt for your records.</footer>
-      </main><script>window.addEventListener('load', () => setTimeout(() => { window.focus(); window.print(); }, 250));</script></body></html>`);
-    printWindow.document.close();
-  };
-
   const submitPayment = async () => {
     if (!authSession || !selectedSupplierId || !ledger || savingPayment) return;
     const cashAmount = Number(cashPaymentAmount) || 0;
@@ -791,10 +707,7 @@ export const PartyLedgerManagementView: React.FC = () => {
                         <td className="px-3 py-3">{formatCurrency(Number(purchase.paid))}</td>
                         <td className="px-3 py-3">{formatCurrency(Number(purchase.creditApplied || 0))}</td>
                         <td className={`px-3 py-3 font-semibold ${Number(purchase.outstanding) > 0 ? 'text-[#a86600]' : 'text-[#77736d]'}`}>{formatCurrency(Number(purchase.outstanding))}</td>
-                        <td className="min-w-[170px] px-3 py-3">{purchase.payments.length ? purchase.payments.map((payment) => {
-                          const receipt = paymentReceipts.get(payment.paymentGroupId || payment.id);
-                          return <div key={payment.id} className="mb-1 flex items-center gap-1.5 text-xs text-[#68645e] last:mb-0"><span>{String(payment.date).slice(0, 10)} · {payment.method} · {formatCurrency(Number(payment.amount))}{payment.receiptNumber ? <span className="block font-medium text-[#765000]">Receipt # {payment.receiptNumber}</span> : null}{Number(payment.reversedAmount || 0) > 0 && <span className="block font-medium text-[#77736d]">Allocation reversed: {formatCurrency(Number(payment.reversedAmount))}</span>}</span>{receipt && receipt.firstPaymentId === payment.id && <button type="button" onClick={() => printSupplierPaymentReceipt(payment)} aria-label={`Print payment receipt for ${formatCurrency(receipt.amount)}`} title="Print payment receipt" className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[#765000] hover:bg-[#fff1c9] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c58a00]"><Printer size={14} /></button>}</div>;
-                        }) : <span className="text-[#77736d]">—</span>}</td>
+                        <td className="px-3 py-3">{purchase.payments.length ? purchase.payments.map((payment) => <div key={payment.id} className="mb-1 text-xs text-[#68645e] last:mb-0">{String(payment.date).slice(0, 10)} · {payment.method} · {formatCurrency(Number(payment.amount))}{payment.receiptNumber ? <span className="block font-medium text-[#765000]">Receipt # {payment.receiptNumber}</span> : null}{Number(payment.reversedAmount || 0) > 0 && <span className="block font-medium text-[#77736d]">Allocation reversed: {formatCurrency(Number(payment.reversedAmount))}</span>}</div>) : <span className="text-[#77736d]">—</span>}</td>
                         <td className="px-3 py-3">
                           {purchase.status === 'CANCELLED' ? <div className="flex min-w-[150px] flex-col items-start gap-1.5">
                             <span className="text-xs font-semibold text-[#625f59]">{purchase.cancellation?.refund?.status === 'NO_REFUND_REQUIRED' ? 'No refund required' : purchase.cancellation?.refund?.status === 'FULLY_REFUNDED' ? 'Fully refunded' : purchase.cancellation?.refund?.status === 'PARTIALLY_REFUNDED' ? `Partially refunded · ${formatCurrency(Number(purchase.cancellation.refund.settled))}` : `Refund pending · ${formatCurrency(Number(purchase.cancellation?.refund?.pending || 0))}`}</span>

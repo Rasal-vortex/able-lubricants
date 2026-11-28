@@ -271,7 +271,7 @@ const escapeHtml = (value: string | number) => String(value)
   .replace(/'/g, '&#39;');
 
 export const DailySalesManagementView: React.FC = () => {
-  const { expenses, showToast, authSession, refreshCustomers } = useApp();
+  const { expenses, showToast, authSession, refreshCustomers, refreshProducts } = useApp();
   const today = localDate(new Date());
   const [activeTab, setActiveTab] = useState<RegisterTab>('sales');
   const [quickDate, setQuickDate] = useState<'today' | 'yesterday' | 'custom'>('today');
@@ -341,19 +341,33 @@ export const DailySalesManagementView: React.FC = () => {
         paymentCorrections: (cancellation.paymentCorrections || []).map((correction: any) => ({ id: String(correction.id), type: String(correction.type), method: String(correction.method), amount: Number(correction.amount) || 0, date: String(correction.date) })),
         refunds: (cancellation.refunds || []).map((refund: any) => ({ id: String(refund.id), amount: Number(refund.amount) || 0, method: String(refund.method), reference: refund.reference || null, date: String(refund.date) })),
       })));
-      for (const report of reports) for (const invoice of report.invoices || []) {
+      for (const report of reports) {
+      const returnRefundsBySaleId = new Map<string, any[]>();
+      for (const refund of report.refunds || []) {
+        if (refund.type !== 'SALES_RETURN' || !refund.saleId) continue;
+        const saleId = String(refund.saleId);
+        returnRefundsBySaleId.set(saleId, [...(returnRefundsBySaleId.get(saleId) || []), refund]);
+      }
+      const refundsIncludedInInvoiceRows = new Set<string>();
+      for (const invoice of report.invoices || []) {
         const products = invoice.products || [];
         const payments = invoice.payments || [];
         const paymentsOnDate = invoice.paymentsOnDate || payments;
+        const saleId = String(invoice.saleId || '');
+        const saleReturnRefunds = saleId ? (returnRefundsBySaleId.get(saleId) || []) : [];
+        const completedRefundAmount = saleReturnRefunds.reduce((sum: number, refund: any) => sum + (Number(refund.amount) || 0), 0);
         const isSaleDate = typeof invoice.isSaleDate === 'boolean'
           ? invoice.isSaleDate
           : report.date <= saleDate(undefined, String(invoice.billDate || ''));
-        const paymentsReceived = paymentsOnDate.reduce((total: number, payment: any) => {
+        const calculatedPaymentsReceived = paymentsOnDate.reduce((total: number, payment: any) => {
           const method = String(payment.method || '').toUpperCase();
           return method === 'CASH' || method === 'UPI'
             ? total + (Number(payment.amount) || 0)
             : total;
         }, 0);
+        const paymentsReceived = invoice.paymentsReceived == null
+          ? calculatedPaymentsReceived
+          : Number(invoice.paymentsReceived) || 0;
         const creditAmount = Number(invoice.creditAmount) || 0;
         const invoiceDiscountTotal = Math.max(
           0,
@@ -376,15 +390,25 @@ export const DailySalesManagementView: React.FC = () => {
           })),
           ...(isSaleDate && creditAmount > 0 ? [{ method: 'CREDIT' as const, amount: creditAmount }] : []),
         ];
+        const couponAmount = paymentTenders.reduce((sum: number, payment: any) =>
+          String(payment.method).toUpperCase() === 'COUPON' ? sum + (Number(payment.amount) || 0) : sum, 0);
         const paymentBreakdown = paymentTenders.map((payment: any) => {
           const method = payment.method === 'COUPON' ? 'Coupon' : payment.method === 'STORE_CREDIT' ? 'Store Credit' : payment.method === 'CREDIT' ? 'Credit' : payment.method === 'UPI' ? 'UPI' : 'Cash';
           const code = method === 'Coupon' ? payment.notes?.match(/^Coupon code: (.+)$/)?.[1] : undefined;
           return `${method}${code ? ` ${code}` : ''} ${formatPaymentAmount(Number(payment.amount))}`;
         }).join(' · ');
         const paymentDate = paymentsOnDate[0]?.date || invoice.billDate;
-        const itemsList = products.map((product: any) =>
-          `${product.productName} × ${product.displayQuantity ?? product.quantity}${product.displayUnitSymbol || product.unitSymbol ? ` ${product.displayUnitSymbol || product.unitSymbol}` : ''}`,
-        ).join('\n');
+        const itemsList = products.flatMap((product: any) => {
+          const soldQuantity = Number(product.displayQuantity ?? product.quantity) || 0;
+          const returnedQuantity = product.displayQuantity != null
+            ? Number(product.returnedDisplayQuantity || 0)
+            : Number(product.returnedQuantity || 0);
+          const remainingQuantity = Math.max(0, soldQuantity - returnedQuantity);
+          if (remainingQuantity <= 0) return [];
+          const quantityLabel = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 3 }).format(remainingQuantity);
+          const unit = product.displayUnitSymbol || product.unitSymbol || '';
+          return [`${product.productName} × ${quantityLabel}${unit ? ` ${unit}` : ''}`];
+        }).join('\n');
         const discountAmount = productDiscountTotal + unallocatedDiscount;
         if (isSaleDate) {
           rows.push({
@@ -400,7 +424,8 @@ export const DailySalesManagementView: React.FC = () => {
             itemsList,
             paymentMode: paymentBreakdown as any,
             paymentTenders,
-            amount: paymentsReceived,
+            amount: paymentsReceived - completedRefundAmount,
+            couponAmount,
             netSalesAmount: invoice.netSalesAmount != null
               ? Number(invoice.netSalesAmount)
               : Math.max(0, Number(invoice.totalAmount || 0) - (invoice.returns || []).reduce((total: number, salesReturn: any) => total + Number(salesReturn.amount || 0), 0)),
@@ -429,35 +454,74 @@ export const DailySalesManagementView: React.FC = () => {
             tax: 0,
             })),
           });
-        } else {
-          for (const payment of paymentsOnDate) {
+          if (completedRefundAmount > 0) refundsIncludedInInvoiceRows.add(saleId);
+        } else if (paymentsOnDate.length > 0) {
+          const methodLabel = paymentTenders.map((payment: any) => {
             const method = String(payment.method || '').toUpperCase();
-            const amount = Number(payment.amount) || 0;
-            const methodLabel = method === 'STORE_CREDIT' ? 'Store Credit' : method === 'UPI' ? 'UPI' : method === 'CASH' ? 'Cash' : method;
-            rows.push({
-              id: `credit-repayment-${String(payment.id)}`,
-              saleId: invoice.saleId ? String(invoice.saleId) : undefined,
-              isCreditRepayment: true,
-              billNumber: invoice.invoiceNumber,
-              dateTime: String(payment.date || report.date),
-              date: String(report.date),
-              customerName: invoice.customer,
-              customerType: 'registered',
-              itemsCount: 0,
-              itemsList: `Credit repayment · ${methodLabel}`,
-              paymentMode: `Credit settlement · ${methodLabel} ${formatPaymentAmount(amount)}` as any,
-              paymentTenders: [{ method: method as any, amount }],
-              amount: method === 'CASH' || method === 'UPI' ? amount : 0,
-              netSalesAmount: 0,
-              subtotal: 0,
-              discountAmount: 0,
-              lineItems: [],
-            });
-          }
+            return method === 'STORE_CREDIT' ? 'Store Credit' : method === 'COUPON' ? 'Coupon' : method === 'CREDIT' ? 'Credit' : method;
+          }).join(' · ');
+          rows.push({
+            id: `credit-repayment-${saleId || invoice.invoiceNumber}-${report.date}`,
+            saleId: saleId || undefined,
+            isCreditRepayment: true,
+            returnStatus: invoice.returnStatus,
+            billNumber: invoice.invoiceNumber,
+            dateTime: String(paymentsOnDate[0]?.date || report.date),
+            date: String(report.date),
+            customerName: invoice.customer,
+            customerType: 'registered',
+            itemsCount: 0,
+            itemsList: `Credit repayment · ${methodLabel}`,
+            paymentMode: `Credit settlement · ${paymentBreakdown}` as any,
+            paymentTenders,
+            amount: paymentsReceived - completedRefundAmount,
+            couponAmount,
+            netSalesAmount: 0,
+            subtotal: 0,
+            discountAmount: 0,
+            lineItems: [],
+          });
+          if (completedRefundAmount > 0) refundsIncludedInInvoiceRows.add(saleId);
         }
       }
+      for (const [saleId, refundsForSale] of returnRefundsBySaleId) {
+        if (refundsIncludedInInvoiceRows.has(saleId)) continue;
+        const sample = refundsForSale[0];
+        const refundAmount = refundsForSale.reduce((sum: number, refund: any) => sum + (Number(refund.amount) || 0), 0);
+        if (refundAmount <= 0) continue;
+        const refundTendersByMethod = new Map<string, number>();
+        for (const refund of refundsForSale) {
+          const method = String(refund.method || 'OTHER').toUpperCase();
+          refundTendersByMethod.set(method, (refundTendersByMethod.get(method) || 0) + (Number(refund.amount) || 0));
+        }
+        const paymentTenders = [...refundTendersByMethod].map(([method, amount]) => ({ method: method as any, amount }));
+        const methodLabel = paymentTenders.map((payment) => {
+          const method = payment.method === 'CASH' ? 'Cash' : payment.method === 'UPI' ? 'UPI' : payment.method;
+          return `${method} ${formatPaymentAmount(payment.amount)}`;
+        }).join(' · ');
+        rows.push({
+          id: `sales-return-refund-${saleId}-${report.date}`,
+          saleId,
+          isCollectionAdjustment: true,
+          billNumber: String(sample.invoiceNumber || ''),
+          dateTime: String(sample.date || report.date),
+          date: String(report.date),
+          customerName: String(sample.customer || 'Walk-in customer'),
+          customerType: 'registered',
+          itemsCount: 0,
+          itemsList: '—',
+          paymentMode: `Refund · ${methodLabel}`,
+          paymentTenders,
+          amount: -refundAmount,
+          netSalesAmount: 0,
+          subtotal: 0,
+          discountAmount: 0,
+          lineItems: [],
+        });
+      }
+      }
       const uniqueRows = new Map<string, SaleRecord>();
-      for (const row of rows) uniqueRows.set(row.isCreditRepayment ? row.id : row.saleId || row.id, row);
+      for (const row of rows) uniqueRows.set(row.isCreditRepayment || row.isCollectionAdjustment ? row.id : row.saleId || row.id, row);
       setApiSales([...uniqueRows.values()].sort((a, b) => new Date(b.dateTime).getTime() - new Date(a.dateTime).getTime()));
       setApiSalesReturns(salesReturns);
       setApiCreditCancellations(creditCancellations);
@@ -630,6 +694,11 @@ export const DailySalesManagementView: React.FC = () => {
         items: returnPreview.items.map((item) => ({ saleItemId: item.saleItemId, quantity: item.quantity })),
         ...(returnSettlement === 'REFUND' && returnPreview.settlementAmount > 0 ? { refunds: [{ amount: returnPreview.settlementAmount, method: refundMethod, ...(refundReference.trim() ? { reference: refundReference.trim() } : {}) }] } : {}),
       });
+      try {
+        await refreshProducts();
+      } catch {
+        // The return is committed; catalog prices will refresh the next time products are loaded.
+      }
       setConfirmReturnOpen(false);
       setReturnReason('');
       setReturnReasonPreset('');
@@ -757,7 +826,7 @@ export const DailySalesManagementView: React.FC = () => {
     .map((row) => row.customer))].sort((a, b) => a.localeCompare(b));
   const productReturns = transactionHistory.filter((row) => row.transactionType === 'Sales Return' && (returnCustomerFilter === 'all' || row.customer === returnCustomerFilter));
   const creditReturns = transactionHistory.filter((row) => row.transactionType === 'Credit Cancellation' && (returnCustomerFilter === 'all' || row.customer === returnCustomerFilter));
-  const filteredSales = rangeSales.filter((sale) => {
+  const matchingSales = rangeSales.filter((sale) => {
     const hasOnlyCreditTenders = Array.isArray(sale.paymentTenders) && sale.paymentTenders.length > 0 && sale.paymentTenders.every((tender) => String(tender.method).toUpperCase() === 'CREDIT');
     const matchesMode = modeFilter === 'all'
       ? !hasOnlyCreditTenders
@@ -765,6 +834,8 @@ export const DailySalesManagementView: React.FC = () => {
     const matchesSearch = !query || sale.billNumber.toLowerCase().includes(query) || sale.customerName.toLowerCase().includes(query) || sale.itemsList.toLowerCase().includes(query) || sale.paymentMode.toLowerCase().includes(query);
     return matchesMode && matchesSearch;
   });
+  const filteredSales = matchingSales.filter((sale) =>
+    sale.isCreditRepayment || sale.isCollectionAdjustment || sale.returnStatus !== 'FULLY_RETURNED');
   const matchingExpenses = rangeExpenses.filter((expense) => !query || expense.description.toLowerCase().includes(query) || Boolean(expense.category?.toLowerCase().includes(query)) || Boolean(expense.notes?.toLowerCase().includes(query)));
 
   const pageCount = Math.max(1, Math.ceil(filteredSales.length / pageSize));
@@ -778,8 +849,8 @@ export const DailySalesManagementView: React.FC = () => {
   const transactionRange = getPaginationRange(activeReturnRows.length, safeTransactionPage, pageSize);
   const creditReturnsTab = activeTab === 'credit-returns';
   const returnTableColumnCount = creditReturnsTab ? 8 : 6;
-  const printSalesTotal = filteredSales.reduce((sum, sale) => sum + (sale.netSalesAmount ?? sale.amount), 0);
-  const printPaymentsTotal = filteredSales.reduce((sum, sale) => sum + sale.amount, 0);
+  const printSalesTotal = matchingSales.reduce((sum, sale) => sum + (sale.netSalesAmount ?? sale.amount), 0);
+  const printPaymentsTotal = matchingSales.reduce((sum, sale) => sum + sale.amount, 0);
   const printExpensesTotal = matchingExpenses.reduce((sum, expense) => sum + expense.amount, 0);
 console.log(pageSales,"pageSales");
 
@@ -885,7 +956,7 @@ console.log(pageSales,"pageSales");
 
   const handleExportDaySheet = () => {
     const salesRows = [
-      ['Date & Time', 'Bill Number', 'Customer', 'Product', 'Payment Received (INR)', 'Net Sales (INR)', 'Bill Total (INR)', 'Discount Given (INR)', 'Payment Mode'],
+      ['Date & Time', 'Bill Number', 'Customer', 'Product', 'Net Collection (INR)', 'Net Sales (INR)', 'Bill Total (INR)', 'Discount Given (INR)', 'Payment Mode'],
       ...filteredSales.map((sale) => [formatSaleDateTime(sale.dateTime), sale.billNumber, sale.customerName, sale.itemsList, formatCurrency(sale.amount), formatCurrency(sale.netSalesAmount ?? sale.billTotal ?? 0), sale.paymentMode.includes('Credit settlement') && sale.billTotal !== undefined ? formatCurrency(sale.billTotal) : '', (sale.discountAmount || 0) > 0 ? formatCurrency(sale.discountAmount || 0) : '', sale.paymentMode]),
     ];
     const expenseRows = [
@@ -994,7 +1065,7 @@ console.log(pageSales,"pageSales");
           <div className="overflow-x-auto">
             <table className="w-full min-w-[950px] border-collapse text-left">
               <thead><tr className="h-10 bg-[#f6f5f2] text-xs font-bold uppercase tracking-wide text-[#6d685f]">
-                <th className="px-4 py-2">Date &amp; time</th><th className="px-4 py-2">Bill number</th><th className="px-4 py-2">Product name</th><th className="px-4 py-2 text-right">Payments received (₹)</th><th className="px-4 py-2 text-center">Mode of payment</th><th className="px-4 py-2 text-center">Return</th><th className="px-4 py-2 text-center">Receipt</th>
+                <th className="px-4 py-2">Date &amp; time</th><th className="px-4 py-2">Bill number</th><th className="px-4 py-2">Product name</th><th className="px-4 py-2 text-right">Net collection (₹)</th><th className="px-4 py-2 text-center">Mode of payment</th><th className="px-4 py-2 text-center">Return</th><th className="px-4 py-2 text-center">Receipt</th>
               </tr></thead>
               <tbody className="divide-y divide-[#efede8] text-sm text-[#272727]">
                 {apiLoading ? (
@@ -1004,8 +1075,6 @@ console.log(pageSales,"pageSales");
                     <td className="whitespace-nowrap px-4 py-2 text-xs text-[#68645e]">{formatSaleDateTime(item.dateTime)}</td>
                     <td className="whitespace-nowrap px-4 py-2 font-semibold text-[#a86600]">
                       {item.billNumber}
-                      {item.isCreditRepayment && <span className="mt-1 block text-[10px] font-semibold text-[#68645e]">Credit repayment</span>}
-                      {item.returnStatus && item.returnStatus !== 'NONE' && <span className={`mt-1 block rounded-full px-2 py-0.5 text-[10px] font-bold ${item.returnStatus === 'FULLY_RETURNED' ? 'bg-[#FEE2E2] text-[#991B1B]' : 'bg-[#FFEDD5] text-[#9A3412]'}`}>{item.returnStatus === 'FULLY_RETURNED' ? 'Fully Returned' : 'Partially Returned'}</span>}
                     </td>
                     <td className="max-w-[440px] px-4 py-2">
                       <div className="space-y-1" title={item.itemsList}>
@@ -1016,12 +1085,13 @@ console.log(pageSales,"pageSales");
                     </td>
                     <td className="whitespace-nowrap px-4 py-2 text-right font-semibold">
                       <span>{formatCurrency(item.amount)}</span>
-                      {item.netSalesAmount !== undefined && <span className="mt-1 block text-[11px] font-medium text-[#4c6b45]">Net sale {formatCurrency(item.netSalesAmount)}</span>}
-                      {(item.discountAmount || 0) > 0 && (
+                      {!item.isCreditRepayment && !item.isCollectionAdjustment && item.netSalesAmount !== undefined && <span className="mt-1 block text-[11px] font-medium text-[#4c6b45]">Net sale {formatCurrency(item.netSalesAmount)}</span>}
+                      {!item.isCreditRepayment && !item.isCollectionAdjustment && (item.discountAmount || 0) > 0 && (
                         <span className="mt-1 block text-[11px] font-medium text-[#9a6700]">
                           Discount {formatCurrency(item.discountAmount || 0)}
                         </span>
                       )}
+                      {(item.couponAmount || 0) > 0 && <span className="mt-1 block text-[11px] font-medium text-[#5940a5]">Coupon {formatCurrency(item.couponAmount || 0)}</span>}
                       {item.paymentMode.includes('Credit settlement') && item.billTotal !== undefined && (
                         <span className="mt-1 block text-[11px] font-medium text-[#68645e]">
                           Bill total {formatCurrency(item.billTotal)}
@@ -1034,14 +1104,16 @@ console.log(pageSales,"pageSales");
                           const method = tender.method === 'STORE_CREDIT' ? 'Store Credit'
                             : tender.method === 'CREDIT' ? 'Credit'
                               : tender.method === 'COUPON' ? 'Coupon'
-                                : tender.method === 'UPI' ? 'UPI' : 'Cash';
+                                : tender.method === 'UPI' ? 'UPI'
+                                  : tender.method === 'BANK' ? 'Bank'
+                                    : tender.method === 'OTHER' ? 'Other' : 'Cash';
                           const tone = tender.method === 'UPI' ? 'bg-[#eee9ff] text-[#5940a5]'
                             : tender.method === 'CREDIT' ? 'bg-[#fff2d5] text-[#805600]'
                               : tender.method === 'STORE_CREDIT' ? 'bg-[#eaf5ed] text-[#376449]'
                                 : tender.method === 'COUPON' ? 'bg-[#f1efff] text-[#5940a5]'
                                   : 'bg-[#f0f0ed] text-[#45443f]';
                           return <span key={`${tender.method}-${index}`} className={`inline-flex items-center rounded-md px-2 py-1 text-[11px] font-semibold ${tone}`}>
-                            {item.paymentMode.includes('Credit settlement') ? 'Credit settlement · ' : ''}{method} {formatCurrency(tender.amount)}
+                            {item.isCollectionAdjustment ? 'Refund · ' : item.paymentMode.includes('Credit settlement') ? 'Credit settlement · ' : ''}{method} {formatCurrency(tender.amount)}
                           </span>;
                         })}
                         {!(item.paymentTenders || []).length && <span className="text-xs text-[#77736d]">No payment recorded</span>}
@@ -1051,7 +1123,7 @@ console.log(pageSales,"pageSales");
                       <button type="button" disabled={!item.saleId || item.isCreditRepayment} onClick={() => item.saleId && !item.isCreditRepayment && void openInvoice(item.saleId, true)} className="h-8 rounded-md border border-[#e8e4dd] bg-white px-3 text-xs font-semibold text-[#493819] transition hover:bg-[#fff7e7] disabled:cursor-not-allowed disabled:opacity-50">Return</button>
                     </td>
                     <td className="px-4 py-2 text-center">
-                      <button type="button" onClick={() => handlePrintSale(item)} title="Print or save receipt as PDF" aria-label={`Print receipt for ${item.billNumber}`} className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#e8e4dd] bg-white px-2.5 text-xs font-semibold text-[#493819] transition hover:bg-[#fff7e7]">
+                      <button type="button" disabled={item.isCollectionAdjustment} onClick={() => handlePrintSale(item)} title="Print or save receipt as PDF" aria-label={`Print receipt for ${item.billNumber}`} className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#e8e4dd] bg-white px-2.5 text-xs font-semibold text-[#493819] transition hover:bg-[#fff7e7] disabled:cursor-not-allowed disabled:opacity-50">
                         <Printer size={15} aria-hidden="true" /><span>Print / PDF</span>
                       </button>
                     </td>
@@ -1252,13 +1324,13 @@ console.log(pageSales,"pageSales");
         {activeTab === 'sales' ? <section className="register-print-section">
           <h2>Sales <span>({filteredSales.length})</span></h2>
           <table className="register-print-sales">
-            <thead><tr><th>Date &amp; time</th><th>Bill number</th><th>Product name</th><th>Payment received (₹)</th><th>Net sales (₹)</th><th>Bill total (₹)</th><th>Discount given (₹)</th><th>Payment mode</th></tr></thead>
+            <thead><tr><th>Date &amp; time</th><th>Bill number</th><th>Product name</th><th>Net collection (₹)</th><th>Net sales (₹)</th><th>Bill total (₹)</th><th>Discount given (₹)</th><th>Payment mode</th></tr></thead>
             <tbody>
               {filteredSales.map((sale) => <tr key={sale.id}>
-                <td>{formatSaleDateTime(sale.dateTime)}</td><td>{sale.billNumber}</td><td style={{ whiteSpace: 'pre-line' }}>{sale.itemsList}</td><td>{formatCurrency(sale.amount)}</td><td>{formatCurrency(sale.netSalesAmount ?? sale.billTotal ?? 0)}</td><td>{sale.paymentMode.includes('Credit settlement') && sale.billTotal !== undefined ? formatCurrency(sale.billTotal) : '—'}</td><td>{(sale.discountAmount || 0) > 0 ? formatCurrency(sale.discountAmount || 0) : '—'}</td><td>{sale.paymentMode}</td>
+                <td>{formatSaleDateTime(sale.dateTime)}</td><td>{sale.billNumber}</td><td style={{ whiteSpace: 'pre-line' }}>{sale.itemsList}</td><td>{formatCurrency(sale.amount)}{(sale.couponAmount || 0) > 0 && <small style={{ display: 'block', color: '#5940a5' }}>Coupon {formatCurrency(sale.couponAmount || 0)}</small>}</td><td>{formatCurrency(sale.netSalesAmount ?? sale.billTotal ?? 0)}</td><td>{sale.paymentMode.includes('Credit settlement') && sale.billTotal !== undefined ? formatCurrency(sale.billTotal) : '—'}</td><td>{(sale.discountAmount || 0) > 0 ? formatCurrency(sale.discountAmount || 0) : '—'}</td><td>{sale.paymentMode}</td>
               </tr>)}
               {filteredSales.length === 0 && <tr><td colSpan={8} className="register-print-empty">No sales in this range.</td></tr>}
-              {filteredSales.length > 0 && <tr><td colSpan={3}><strong>Grand total</strong></td><td><strong>{formatCurrency(printPaymentsTotal)}</strong></td><td><strong>{formatCurrency(printSalesTotal)}</strong></td><td /><td /><td /></tr>}
+              {matchingSales.length > 0 && <tr><td colSpan={3}><strong>Period totals</strong></td><td><strong>{formatCurrency(printPaymentsTotal)}</strong></td><td><strong>{formatCurrency(printSalesTotal)}</strong></td><td /><td /><td /></tr>}
             </tbody>
           </table>
         </section> : activeTab === 'expenses' ? <section className="register-print-section">

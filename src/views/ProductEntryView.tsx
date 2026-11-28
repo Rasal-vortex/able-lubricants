@@ -458,12 +458,10 @@ export const ProductEntryView: React.FC = () => {
       },
     }));
     setBatchDrafts(existingBatches);
-    const defaultBatch = existingBatches.find((batch) => product.batches.find((source) => source.id === batch.id)?.isDefaultSellingRate)
-      || existingBatches.find((batch) => Number(batch.sellingRate) === product.sellingPrice);
-    const availableDefault = defaultBatch && Number(defaultBatch.quantity) > 0
-      ? defaultBatch
-      : existingBatches.find((batch) => Number(batch.quantity) > 0);
-    setDefaultBatchKey(availableDefault?.key || "");
+    const defaultBatch = existingBatches.find((batch) =>
+      product.batches.find((source) => source.id === batch.id)?.isDefaultSellingRate,
+    );
+    setDefaultBatchKey(defaultBatch?.key || "");
     const pendingUpdate = readPendingProductUpdate(product.id);
     setPendingRetryAvailable(Boolean(pendingUpdate));
     if (pendingUpdate) {
@@ -1325,7 +1323,6 @@ export const ProductEntryView: React.FC = () => {
                   {drawerMode === "edit" && !isAdmin && <span className="text-[11px] text-on-surface-variant">Only Admin users can change batch quantities or add stock.</span>}
                 </div>
                 {drawerMode === "edit" && !batchDrafts.length && <p className="mt-2 text-[11px] text-on-surface-variant">No active stock batches are available. Add a batch to receive stock.</p>}
-                {drawerMode === "edit" && batchDrafts.length > 0 && <label className="mt-3 flex items-center gap-2 border-t border-outline-variant/30 pt-3 text-xs font-medium text-on-surface"><input type="radio" name="default-selling-rate" checked={!defaultBatchKey} onChange={() => setDefaultBatchKey("")} className="accent-primary" />Keep existing product listing default ({formatCurrency(productBeingEdited?.sellingPrice || 0)})</label>}
               </section>
               </div>
 

@@ -86,6 +86,7 @@ export interface SaleRecord {
   saleId?: string;
   returnStatus?: 'NONE' | 'PARTIALLY_RETURNED' | 'FULLY_RETURNED';
   isCreditRepayment?: boolean;
+  isCollectionAdjustment?: boolean;
   billNumber: string;
   dateTime: string;
   customerName: string;
@@ -93,8 +94,8 @@ export interface SaleRecord {
   customerPhone?: string;
   itemsCount: number;
   itemsList: string;
-  paymentMode: 'Cash' | 'Credit' | 'UPI' | 'Coupon' | 'Split';
-  paymentTenders?: Array<{ method: 'CASH' | 'UPI' | 'COUPON' | 'STORE_CREDIT' | 'CREDIT'; amount: number; notes?: string }>;
+  paymentMode: string;
+  paymentTenders?: Array<{ method: 'CASH' | 'UPI' | 'COUPON' | 'STORE_CREDIT' | 'CREDIT' | 'BANK' | 'OTHER'; amount: number; notes?: string }>;
   idempotencyKey?: string;
   upiRef?: string;
   amount: number;
@@ -103,6 +104,7 @@ export interface SaleRecord {
   billTotal?: number;
   couponCode?: string;
   couponPrice?: number;
+  couponAmount?: number;
   discountAmount?: number;
   billDiscountAmount?: number;
   cashReceived?: number;
@@ -130,6 +132,8 @@ export interface CreditBill {
   billAmount: number;
   netDue: number;
   dueDate: string;
+  cancellationExpiresAt?: string;
+  cancellationEligible?: boolean;
   remarks?: string;
   invoiceReference?: string;
   saleItems?: Array<{ productName: string; quantity: number; unitName: string; unitSymbol?: string | null }>;

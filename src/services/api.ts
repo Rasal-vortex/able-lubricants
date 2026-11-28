@@ -389,6 +389,8 @@ export interface ApiCreditBill {
   billNumber: string;
   billDate: string;
   dueDate: string;
+  cancellationExpiresAt?: string;
+  cancellationEligible?: boolean;
   term: string;
   status: 'Overdue' | 'Partially Paid' | 'Unpaid' | 'Settled' | 'Cancelled';
   priorBalance: string | number;
@@ -560,6 +562,16 @@ export type ApiDailyCreditCancellation = {
 
 export type ApiDailySalesReport = {
   creditCancellations: ApiDailyCreditCancellation[];
+  refunds?: Array<{
+    id: string;
+    saleId?: string;
+    type?: 'SALES_RETURN' | 'CREDIT_CANCELLATION';
+    invoiceNumber: string;
+    customer: string;
+    amount: string | number;
+    method: string;
+    date: string;
+  }>;
   [key: string]: any;
 };
 
